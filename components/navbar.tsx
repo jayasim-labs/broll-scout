@@ -7,18 +7,23 @@ import { cn } from "@/lib/utils"
 
 export function Navbar() {
   const pathname = usePathname()
-  
+
   return (
     <nav className="bg-card border-b border-border sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
             <Video className="w-8 h-8 text-primary" />
-            <span className="text-xl font-bold">B-Roll Scout</span>
+            <div>
+              <span className="text-xl font-bold">B-Roll Scout</span>
+              <span className="hidden sm:inline text-xs text-muted-foreground ml-2">
+                Beyond the Obvious
+              </span>
+            </div>
           </Link>
-          
+
           <div className="flex items-center gap-4">
-            <Link 
+            <Link
               href="/"
               className={cn(
                 "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",
@@ -26,9 +31,9 @@ export function Navbar() {
               )}
             >
               <Home className="w-5 h-5" />
-              <span className="hidden sm:inline">Home</span>
+              <span className="hidden sm:inline">Scout</span>
             </Link>
-            <Link 
+            <Link
               href="/settings"
               className={cn(
                 "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",

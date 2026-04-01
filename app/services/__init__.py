@@ -1,3 +1,0 @@
-"""
-B-Roll Scout Services
-"""

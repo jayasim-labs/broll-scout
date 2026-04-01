@@ -1,92 +1,133 @@
-// B-Roll Scout Types
+export type JobStatus = "pending" | "processing" | "complete" | "partial" | "failed"
 
-export interface VisualCue {
-  id: string
-  timestamp_start: number
-  timestamp_end: number
-  script_excerpt: string
-  visual_description: string
-  search_queries: string[]
-  priority: 'high' | 'medium' | 'low'
-  mood?: string
-  scene_type?: string
-}
-
-export interface StockClip {
-  id: string
-  source: string
-  title: string
-  description: string
-  duration: number
-  quality: string
-  preview_url: string
-  download_url: string
-  thumbnail_url: string
-  tags: string[]
-  license: string
-}
-
-export interface ClipSelection {
-  cue_id: string
-  selected_clip: StockClip | null
-  alternatives: StockClip[]
-  match_score: number
-  selection_reason: string
-}
+export type TranscriptSource =
+  | "cached_transcript"
+  | "youtube_captions"
+  | "youtube_auto_captions"
+  | "whisper_transcription"
+  | "no_transcript"
 
 export interface JobProgress {
-  stage: 'queued' | 'translating' | 'searching' | 'matching' | 'ranking' | 'completed' | 'failed'
+  stage: "queued" | "translating" | "searching" | "matching" | "ranking" | "completed" | "failed"
   percent_complete: number
   message: string
-  current_cue?: number
-  total_cues?: number
+}
+
+export interface APICosts {
+  openai_calls: number
+  openai_mini_calls: number
+  openai_input_tokens: number
+  openai_output_tokens: number
+  whisper_minutes: number
+  youtube_api_units: number
+  google_cse_calls: number
+  gemini_calls: number
+  estimated_cost_usd: number
+}
+
+export interface RankedResult {
+  result_id: string
+  segment_id: string
+  video_id: string
+  video_url: string
+  video_title: string
+  channel_name: string
+  channel_subscribers: number
+  thumbnail_url: string
+  video_duration_seconds: number
+  published_at: string
+  view_count: number
+  start_time_seconds: number | null
+  end_time_seconds: number | null
+  clip_url: string | null
+  transcript_excerpt: string | null
+  the_hook: string | null
+  relevance_score: number
+  confidence_score: number
+  source_flag: TranscriptSource
+  editor_rating: number | null
+  clip_used: boolean
+  editor_notes: string | null
+}
+
+export interface Segment {
+  segment_id: string
+  title: string
+  summary: string
+  visual_need: string
+  emotional_tone: string
+  key_terms: string[]
+  search_queries: string[]
+  estimated_duration_seconds: number
+  results: RankedResult[]
+}
+
+export interface JobResponse {
+  job_id: string
+  status: JobStatus
+  created_at: string
+  completed_at: string | null
+  processing_time_seconds: number | null
+  script_duration_minutes: number
+  total_segments: number
+  total_results: number
+  minimum_results_met: boolean
+  api_costs: APICosts
+  segments: Segment[]
+  english_translation: string | null
 }
 
 export interface JobSummary {
-  total_cues: number
-  filled_cues: number
-  fill_rate: number
-  total_clips_found: number
-  average_match_score: number
-}
-
-export interface Job {
-  id: string
-  status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'
-  script_text: string
-  video_style: string
-  target_audience: string
-  preferences: {
-    min_quality: string
-    results_per_cue?: number
-  }
-  visual_cues: VisualCue[]
-  selections: Record<string, ClipSelection>
-  progress: JobProgress
-  summary?: JobSummary
-  total_cost: number
+  job_id: string
+  status: JobStatus
   created_at: string
-  completed_at?: string
-  error?: string
+  segment_count: number
+  result_count: number
 }
 
-export interface Settings {
-  openaiKey: string
-  pexelsKey: string
-  defaultStyle: string
-  defaultAudience: string
-  defaultQuality: string
-  resultsPerCue: number
-  monthlyBudget: number
-  budgetAlerts: boolean
-  alertThreshold: number
+export interface ChannelResolution {
+  channel_id: string
+  channel_name: string
+  subscribers: number
+  thumbnail_url: string
 }
 
-export interface CostData {
-  total_cost: number
-  breakdown: {
-    openai: number
-    pexels: number
-  }
-  jobs_count: number
+export interface PipelineSettings {
+  search_queries_per_segment: number
+  youtube_results_per_query: number
+  max_candidates_per_segment: number
+  top_results_per_segment: number
+  total_results_target: number
+  gemini_expanded_queries: number
+  timestamp_model: string
+  translation_model: string
+  confidence_threshold: number
+  whisper_max_video_duration_min: number
+  whisper_audio_trim_min: number
+  min_video_duration_sec: number
+  max_video_duration_sec: number
+  prefer_min_subscribers: number
+  recency_full_score_years: number
+  weight_keyword_density: number
+  weight_viral_score: number
+  weight_channel_authority: number
+  weight_caption_quality: number
+  weight_recency: number
+  max_concurrent_segments: number
+  segment_timeout_sec: number
+  low_result_threshold: number
+  preferred_channels_tier1: string[]
+  preferred_channels_tier2: string[]
+  blocked_networks: string[]
+  blocked_studios: string[]
+  blocked_sports: string[]
+  custom_block_rules: string
+  special_instructions: string
+  enable_context_matching: boolean
+  discard_clips_shorter_than_10s: boolean
+  verify_timestamp_not_end_screen: boolean
+  cap_end_timestamp: boolean
+  public_domain_archives: Array<{ name: string; url: string }>
+  stock_platforms: Record<string, boolean>
+  [key: string]: unknown
 }

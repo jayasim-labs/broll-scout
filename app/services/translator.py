@@ -1,187 +1,171 @@
-"""
-Translator Service - Converts raw script into timestamped visual cues
-Uses OpenAI GPT-4o-mini to analyze script and generate visual search queries
-"""
-
 import json
-import re
-from typing import List, Optional
-from datetime import datetime
+import logging
+
 import httpx
 
-from app.config import get_settings
-from app.models.schemas import VisualCue, TranslationResult
+from app.config import DEFAULTS, get_settings
+from app.models.schemas import Segment
 from app.utils.cost_tracker import get_cost_tracker
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """You are the Viral B-Roll Scout — a specialist in digital storytelling and YouTube retention for a Tamil-language documentary channel.
+
+Do the following in one response:
+1. Translate the following Tamil script to English.
+2. Analyze the overall narrative arc to identify visual hooks, emotional peaks, and technical concepts that need strong B-roll support.
+3. Break the English translation into segments — one segment for approximately every 1–2 minutes of script. A 30-minute script must yield at least 30 segments. Segment by visual need, not just topic change: if one topic has multiple distinct visual moments (e.g., a historical event, then a map, then a person), split them into separate segments.
+4. For each segment, return:
+   - segment_id (format: seg_001, seg_002, ...)
+   - title (short, descriptive)
+   - summary (2–3 sentences describing what this section covers)
+   - visual_need (what the editor needs to SEE on screen: "aerial shot of ancient Rome", "chart showing GDP growth", "archival footage of the 1971 war", "close-up of circuit board manufacturing")
+   - emotional_tone (the mood: "dramatic reveal", "explanatory calm", "tension building", "inspirational climax", "historical gravity")
+   - key_terms (5–7 keywords a video editor would use to find relevant footage)
+   - search_queries (3 distinct YouTube search queries — one broad, one specific, one lateral/creative. Bias toward documentary footage, archival material, and cinematic explainers — NOT news clips)
+   - estimated_duration_seconds (rough estimate based on script length)
+
+Return as valid JSON with two keys: "english_translation" (full translated text) and "segments" (JSON array). No prose, no markdown fences."""
 
 
 class TranslatorService:
-    """Translates raw video scripts into timestamped visual cues."""
-    
+    """Translates Tamil scripts to English and segments them via GPT-4o."""
+
     def __init__(self):
-        cfg = get_settings()
-        self.api_key = cfg.openai_api_key
-        self.model = "gpt-4o-mini"
+        settings = get_settings()
+        self.api_key = settings.openai_api_key
         self.api_url = "https://api.openai.com/v1/chat/completions"
-        self.cost_tracker = get_cost_tracker()
-    
-    async def translate_script(
-        self,
-        script_text: str,
-        video_style: str = "documentary",
-        target_audience: str = "general",
-        job_id: Optional[str] = None
-    ) -> TranslationResult:
-        """
-        Translate a script into visual cues.
-        
-        Args:
-            script_text: The raw script text to analyze
-            video_style: Style of video (documentary, corporate, educational, etc.)
-            target_audience: Target audience for the video
-            job_id: Optional job ID for cost tracking
-            
-        Returns:
-            TranslationResult with list of visual cues
-        """
-        if not self.api_key:
-            raise ValueError("OpenAI API key not configured")
-        
-        system_prompt = self._build_system_prompt(video_style, target_audience)
-        user_prompt = self._build_user_prompt(script_text)
-        
+
+    async def translate_and_segment(
+        self, script: str, job_id: str | None = None
+    ) -> tuple[list[Segment], str]:
+        """Translate a Tamil script and return (segments, english_translation)."""
+        translation_model = DEFAULTS.get("translation_model", "gpt-4o")
+        special_instructions = DEFAULTS.get("special_instructions", "")
+
+        word_count = len(script.split())
+        estimated_minutes = max(1, round(word_count / 150))
+
+        system = SYSTEM_PROMPT
+        if special_instructions:
+            system += f"\n\nAdditional instructions:\n{special_instructions}"
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": script},
+        ]
+
+        data = await self._call_openai(messages, translation_model)
+
+        segments_raw = data.get("segments", [])
+        if len(segments_raw) < estimated_minutes:
+            logger.info(
+                "Segment count %d below estimated minutes %d, re-prompting",
+                len(segments_raw),
+                estimated_minutes,
+            )
+            messages.append(
+                {"role": "assistant", "content": json.dumps(data)}
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The script is approximately {estimated_minutes} minutes. "
+                    f"You returned only {len(segments_raw)} segments. "
+                    f"I need at least {estimated_minutes} segments — one per minute. "
+                    "Split the larger segments into more specific visual moments."
+                ),
+            })
+            data = await self._call_openai(messages, translation_model)
+            segments_raw = data.get("segments", [])
+
+        cost_tracker = get_cost_tracker()
+        if job_id:
+            job_costs = cost_tracker.get_job_costs(job_id)
+            if job_costs:
+                job_costs.add_gpt4o(
+                    self._last_input_tokens, self._last_output_tokens
+                )
+
+        segments = [Segment(**seg) for seg in segments_raw]
+        english_translation = data.get("english_translation", "")
+
+        logger.info(
+            "Translation complete: %d segments, ~%d min script",
+            len(segments),
+            estimated_minutes,
+        )
+        return segments, english_translation
+
+    async def _call_openai(
+        self, messages: list[dict], model: str
+    ) -> dict:
+        """Make a single OpenAI chat completion request and return parsed JSON."""
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                self.api_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+
+        result = response.json()
+        usage = result.get("usage", {})
+        self._last_input_tokens = usage.get("prompt_tokens", 0)
+        self._last_output_tokens = usage.get("completion_tokens", 0)
+
+        content = result["choices"][0]["message"]["content"]
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        "temperature": 0.7,
-                        "response_format": {"type": "json_object"}
-                    }
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                usage = result.get("usage", {})
-                input_tokens = usage.get("prompt_tokens", 0)
-                output_tokens = usage.get("completion_tokens", 0)
-                
-                if job_id:
-                    job_costs = self.cost_tracker.get_job_costs(job_id)
-                    if job_costs:
-                        job_costs.add_gpt4o_mini(input_tokens, output_tokens)
-                
-                cost = (input_tokens / 1_000_000) * 0.15 + (output_tokens / 1_000_000) * 0.60
-                
-                # Parse the response
-                content = result["choices"][0]["message"]["content"]
-                visual_cues = self._parse_response(content)
-                
-                return TranslationResult(
-                    visual_cues=visual_cues,
-                    total_cues=len(visual_cues),
-                    estimated_duration=self._estimate_duration(visual_cues),
-                    cost=cost,
-                    model_used=self.model
-                )
-                
-        except httpx.HTTPStatusError as e:
-            raise Exception(f"OpenAI API error: {e.response.status_code} - {e.response.text}")
-        except Exception as e:
-            raise Exception(f"Translation failed: {str(e)}")
-    
-    def _build_system_prompt(self, video_style: str, target_audience: str) -> str:
-        """Build the system prompt for the translator."""
-        return f"""You are an expert video editor assistant that analyzes scripts and identifies visual opportunities for b-roll footage.
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON from OpenAI, retrying with strict prompt")
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": "Your previous response was not valid JSON. Return valid JSON only.",
+            })
+            return await self._call_openai_strict(messages, model)
 
-Your task is to analyze the provided script and generate a list of visual cues - specific moments where b-roll footage would enhance the video.
+    async def _call_openai_strict(
+        self, messages: list[dict], model: str
+    ) -> dict:
+        """Single retry for invalid JSON responses."""
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                self.api_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
 
-Video Style: {video_style}
-Target Audience: {target_audience}
+        result = response.json()
+        usage = result.get("usage", {})
+        self._last_input_tokens += usage.get("prompt_tokens", 0)
+        self._last_output_tokens += usage.get("completion_tokens", 0)
 
-For each visual cue, provide:
-1. timestamp_start: Estimated start time in seconds (based on ~150 words per minute speaking rate)
-2. timestamp_end: Estimated end time in seconds
-3. script_excerpt: The exact text from the script this cue relates to
-4. visual_description: A clear description of what visual would work here
-5. search_queries: 2-3 specific search queries for finding this footage on stock sites
-6. mood: The emotional tone (cinematic, energetic, calm, professional, etc.)
-7. priority: high, medium, or low based on visual impact
-8. notes: Any additional notes for the editor
-
-Respond with valid JSON in this format:
-{{
-    "visual_cues": [
-        {{
-            "timestamp_start": 0,
-            "timestamp_end": 5,
-            "script_excerpt": "exact text from script",
-            "visual_description": "description of ideal visual",
-            "search_queries": ["query 1", "query 2"],
-            "mood": "cinematic",
-            "priority": "high",
-            "notes": "optional notes"
-        }}
-    ]
-}}
-
-Focus on:
-- Key concepts that benefit from visual support
-- Transitions between topics
-- Emotional moments that need visual reinforcement
-- Abstract concepts that need concrete visualization
-- Data or statistics that could use visual representation"""
-
-    def _build_user_prompt(self, script_text: str) -> str:
-        """Build the user prompt with the script."""
-        return f"""Analyze this script and generate visual cues for b-roll placement:
-
----
-{script_text}
----
-
-Generate comprehensive visual cues for this script. Identify at least one visual opportunity per major point or every 10-15 seconds of estimated runtime."""
-
-    def _parse_response(self, content: str) -> List[VisualCue]:
-        """Parse the API response into VisualCue objects."""
+        content = result["choices"][0]["message"]["content"]
         try:
-            data = json.loads(content)
-            cues = []
-            
-            for idx, cue_data in enumerate(data.get("visual_cues", [])):
-                cue = VisualCue(
-                    id=f"cue_{idx + 1}",
-                    timestamp_start=float(cue_data.get("timestamp_start", 0)),
-                    timestamp_end=float(cue_data.get("timestamp_end", 0)),
-                    script_excerpt=cue_data.get("script_excerpt", ""),
-                    visual_description=cue_data.get("visual_description", ""),
-                    search_queries=cue_data.get("search_queries", []),
-                    mood=cue_data.get("mood", "neutral"),
-                    priority=cue_data.get("priority", "medium"),
-                    notes=cue_data.get("notes", ""),
-                    status="pending"
-                )
-                cues.append(cue)
-            
-            return cues
-            
-        except json.JSONDecodeError as e:
-            raise Exception(f"Failed to parse translator response: {str(e)}")
-    
-    def _estimate_duration(self, cues: List[VisualCue]) -> float:
-        """Estimate total video duration based on cues."""
-        if not cues:
-            return 0.0
-        return max(cue.timestamp_end for cue in cues)
-
-
-# Singleton instance
-translator_service = TranslatorService()
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"OpenAI returned invalid JSON after retry: {content[:200]}"
+            ) from exc

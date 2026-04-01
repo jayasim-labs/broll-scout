@@ -1,42 +1,11 @@
-# B-Roll Scout - FastAPI Backend Dependencies
-
-# Core Framework
-fastapi>=0.109.2
-uvicorn[standard]>=0.27.1
-mangum>=0.17.0  # AWS Lambda adapter
-
-# Pydantic for data validation
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+mangum>=0.17.0
 pydantic>=2.10.0
 pydantic-settings>=2.1.0
-
-# OpenAI for GPT-4o and Whisper
-openai>=1.12.0
-
-# Google AI for Gemini
-google-generativeai>=0.4.0
-
-# YouTube APIs
-google-api-python-client>=2.118.0
+httpx>=0.27.0
+boto3>=1.34.0
 youtube-transcript-api>=0.6.2
-
-# AWS DynamoDB
-boto3>=1.34.44
-aioboto3>=12.3.0
-
-# HTTP client
-httpx>=0.26.0
-aiohttp>=3.9.3
-
-# Audio processing (yt-dlp included as Lambda layer)
-# yt-dlp==2024.1.25  # Installed via Lambda layer
-
-# Async utilities
-anyio>=4.2.0
-
-# Background task processing
-python-multipart>=0.0.9
-
-# Environment management
-python-dotenv>=1.0.1
-
-# Utilities (hashlib is built-in to Python stdlib)
+python-dotenv>=1.0.0
+python-multipart>=0.0.6
+anyio>=4.0.0

@@ -1,26 +1,17 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { jobs } from '../../route'
+import { NextRequest, NextResponse } from "next/server"
 
-// GET /api/v1/jobs/[id]/status - Get job status
+const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const job = jobs.get(id)
-  
-  if (!job) {
-    return NextResponse.json(
-      { detail: 'Job not found' },
-      { status: 404 }
-    )
+  try {
+    const resp = await fetch(`${BACKEND}/api/v1/jobs/${id}/status`, { cache: "no-store" })
+    const data = await resp.json()
+    return NextResponse.json(data, { status: resp.status })
+  } catch (error) {
+    return NextResponse.json({ detail: "Backend unavailable" }, { status: 502 })
   }
-  
-  return NextResponse.json({
-    id: job.id,
-    status: job.status,
-    stage: job.progress.stage,
-    progress: job.progress,
-    error: job.error
-  })
 }

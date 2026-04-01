@@ -1,522 +1,506 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { toast } from "sonner"
-import { Key, SlidersHorizontal, DollarSign, Database, Eye, EyeOff, Download, Trash2, RotateCcw } from "lucide-react"
 import { Navbar } from "@/components/navbar"
+import { Save, RotateCcw, Plus, X, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Slider } from "@/components/ui/slider"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog"
-import type { Settings, CostData } from "@/lib/types"
+import type { PipelineSettings } from "@/lib/types"
 
-const API_BASE = '/api/v1'
+const API = "/api/v1"
 
-const defaultSettings: Settings = {
-  openaiKey: '',
-  pexelsKey: '',
-  defaultStyle: 'documentary',
-  defaultAudience: 'general',
-  defaultQuality: '1080p',
-  resultsPerCue: 5,
-  monthlyBudget: 50,
-  budgetAlerts: true,
-  alertThreshold: 75,
-}
+const TABS = [
+  { id: "sources", label: "Source Management" },
+  { id: "blocked", label: "Blocked Sources" },
+  { id: "pipeline", label: "Pipeline Parameters" },
+  { id: "instructions", label: "Special Instructions" },
+] as const
+
+type TabId = (typeof TABS)[number]["id"]
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<Settings>(defaultSettings)
-  const [showOpenaiKey, setShowOpenaiKey] = useState(false)
-  const [showPexelsKey, setShowPexelsKey] = useState(false)
-  const [testingOpenai, setTestingOpenai] = useState(false)
-  const [testingPexels, setTestingPexels] = useState(false)
-  const [costData, setCostData] = useState<CostData | null>(null)
+  const [activeTab, setActiveTab] = useState<TabId>("sources")
+  const [settings, setSettings] = useState<PipelineSettings | null>(null)
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
     loadSettings()
-    loadCostData()
   }, [])
 
-  const loadSettings = () => {
-    const saved = localStorage.getItem('broll-settings')
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved)
-        setSettings({ ...defaultSettings, ...parsed })
-      } catch {
-        // Use defaults
-      }
-    }
-  }
-
-  const loadCostData = async () => {
+  const loadSettings = async () => {
+    setLoading(true)
     try {
-      const response = await fetch(`${API_BASE}/costs/monthly`)
-      if (response.ok) {
-        const data = await response.json()
-        setCostData(data)
-      }
-    } catch (error) {
-      console.error('Failed to load cost data:', error)
-    }
-  }
-
-  const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    setSettings(prev => ({ ...prev, [key]: value }))
-  }
-
-  const testApiKey = async (provider: 'openai' | 'pexels') => {
-    const key = provider === 'openai' ? settings.openaiKey : settings.pexelsKey
-    if (!key.trim()) {
-      toast.error('Please enter an API key')
-      return
-    }
-
-    if (provider === 'openai') {
-      setTestingOpenai(true)
-    } else {
-      setTestingPexels(true)
-    }
-
-    try {
-      const response = await fetch(`${API_BASE}/settings/test-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, key })
-      })
-
-      const result = await response.json()
-
-      if (result.valid) {
-        toast.success('API key is valid')
-      } else {
-        toast.error(result.error || 'Invalid API key')
+      const resp = await fetch(`${API}/settings`)
+      if (resp.ok) {
+        const data = await resp.json()
+        setSettings(data.settings as PipelineSettings)
       }
     } catch {
-      toast.error('Failed to test API key')
+      toast.error("Failed to load settings")
     } finally {
-      if (provider === 'openai') {
-        setTestingOpenai(false)
-      } else {
-        setTestingPexels(false)
-      }
+      setLoading(false)
     }
   }
 
-  const saveSettings = async () => {
-    setSaving(true)
-    
-    try {
-      localStorage.setItem('broll-settings', JSON.stringify(settings))
-      
-      await fetch(`${API_BASE}/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      })
+  const updateLocal = useCallback((key: string, value: unknown) => {
+    setSettings((prev) => prev ? { ...prev, [key]: value } as PipelineSettings : prev)
+    setDirty(true)
+  }, [])
 
-      toast.success('Settings saved')
+  const saveAll = async () => {
+    if (!settings || !dirty) return
+    setSaving(true)
+    try {
+      const resp = await fetch(`${API}/settings/bulk`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings }),
+      })
+      if (resp.ok) {
+        toast.success("Settings saved")
+        setDirty(false)
+      } else {
+        toast.error("Failed to save settings")
+      }
     } catch {
-      toast.info('Settings saved locally')
+      toast.error("Failed to save settings")
     } finally {
       setSaving(false)
     }
   }
 
-  const exportAllData = async () => {
+  const resetDefaults = async () => {
     try {
-      const response = await fetch(`${API_BASE}/data/export`)
-      if (!response.ok) throw new Error('Export failed')
-
-      const data = await response.json()
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `broll-scout-export-${new Date().toISOString().split('T')[0]}.json`
-      a.click()
-
-      URL.revokeObjectURL(url)
-      toast.success('Data exported')
+      const resp = await fetch(`${API}/settings/reset`, { method: "POST" })
+      if (resp.ok) {
+        toast.success("Settings reset to defaults")
+        await loadSettings()
+        setDirty(false)
+      }
     } catch {
-      toast.error('Failed to export data')
+      toast.error("Failed to reset settings")
     }
   }
 
-  const clearJobHistory = async () => {
-    try {
-      await fetch(`${API_BASE}/jobs`, { method: 'DELETE' })
-      toast.success('Job history cleared')
-    } catch {
-      toast.error('Failed to clear history')
-    }
+  if (loading || !settings) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Navbar />
+        <div className="flex items-center justify-center h-[60vh]">
+          <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        </div>
+      </div>
+    )
   }
-
-  const resetSettings = () => {
-    const newSettings = {
-      ...defaultSettings,
-      openaiKey: settings.openaiKey,
-      pexelsKey: settings.pexelsKey,
-    }
-    setSettings(newSettings)
-    localStorage.setItem('broll-settings', JSON.stringify(newSettings))
-    toast.success('Settings reset to defaults')
-  }
-
-  const spendPercent = costData && settings.monthlyBudget > 0
-    ? Math.round((costData.total_cost / settings.monthlyBudget) * 100)
-    : 0
 
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
-
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="space-y-8">
-          {/* API Keys */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Key className="w-5 h-5 text-primary" />
-                API Keys
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* OpenAI */}
-              <div>
-                <Label htmlFor="openai-key" className="text-muted-foreground">
-                  OpenAI API Key
-                </Label>
-                <div className="flex gap-2 mt-2">
-                  <div className="relative flex-1">
-                    <Input
-                      id="openai-key"
-                      type={showOpenaiKey ? 'text' : 'password'}
-                      value={settings.openaiKey}
-                      onChange={(e) => updateSetting('openaiKey', e.target.value)}
-                      placeholder="sk-..."
-                      className="pr-10 bg-secondary"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-0 top-0 h-full"
-                      onClick={() => setShowOpenaiKey(!showOpenaiKey)}
-                    >
-                      {showOpenaiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </Button>
-                  </div>
-                  <Button
-                    variant="secondary"
-                    onClick={() => testApiKey('openai')}
-                    disabled={testingOpenai}
-                  >
-                    {testingOpenai ? 'Testing...' : 'Test'}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Used for script analysis and clip matching.{' '}
-                  <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                    Get API key
-                  </a>
-                </p>
-              </div>
-
-              {/* Pexels */}
-              <div>
-                <Label htmlFor="pexels-key" className="text-muted-foreground">
-                  Pexels API Key
-                </Label>
-                <div className="flex gap-2 mt-2">
-                  <div className="relative flex-1">
-                    <Input
-                      id="pexels-key"
-                      type={showPexelsKey ? 'text' : 'password'}
-                      value={settings.pexelsKey}
-                      onChange={(e) => updateSetting('pexelsKey', e.target.value)}
-                      placeholder="Enter your Pexels API key..."
-                      className="pr-10 bg-secondary"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-0 top-0 h-full"
-                      onClick={() => setShowPexelsKey(!showPexelsKey)}
-                    >
-                      {showPexelsKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </Button>
-                  </div>
-                  <Button
-                    variant="secondary"
-                    onClick={() => testApiKey('pexels')}
-                    disabled={testingPexels}
-                  >
-                    {testingPexels ? 'Testing...' : 'Test'}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Used for searching stock footage.{' '}
-                  <a href="https://www.pexels.com/api/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                    Get API key
-                  </a>
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Default Preferences */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <SlidersHorizontal className="w-5 h-5 text-primary" />
-                Default Preferences
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <Label className="text-muted-foreground">Default Video Style</Label>
-                  <Select value={settings.defaultStyle} onValueChange={(v) => updateSetting('defaultStyle', v)}>
-                    <SelectTrigger className="mt-2 bg-secondary">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="documentary">Documentary</SelectItem>
-                      <SelectItem value="corporate">Corporate</SelectItem>
-                      <SelectItem value="educational">Educational</SelectItem>
-                      <SelectItem value="cinematic">Cinematic</SelectItem>
-                      <SelectItem value="social-media">Social Media</SelectItem>
-                      <SelectItem value="news">News/Journalism</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label className="text-muted-foreground">Default Target Audience</Label>
-                  <Select value={settings.defaultAudience} onValueChange={(v) => updateSetting('defaultAudience', v)}>
-                    <SelectTrigger className="mt-2 bg-secondary">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="general">General</SelectItem>
-                      <SelectItem value="professional">Professional/Business</SelectItem>
-                      <SelectItem value="young-adult">Young Adult (18-35)</SelectItem>
-                      <SelectItem value="tech-savvy">Tech Savvy</SelectItem>
-                      <SelectItem value="academic">Academic</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label className="text-muted-foreground">Default Minimum Quality</Label>
-                  <Select value={settings.defaultQuality} onValueChange={(v) => updateSetting('defaultQuality', v)}>
-                    <SelectTrigger className="mt-2 bg-secondary">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="720p">720p (HD)</SelectItem>
-                      <SelectItem value="1080p">1080p (Full HD)</SelectItem>
-                      <SelectItem value="4K">4K (Ultra HD)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label className="text-muted-foreground">Results Per Cue</Label>
-                  <Select value={String(settings.resultsPerCue)} onValueChange={(v) => updateSetting('resultsPerCue', Number(v))}>
-                    <SelectTrigger className="mt-2 bg-secondary">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="3">3 clips</SelectItem>
-                      <SelectItem value="5">5 clips</SelectItem>
-                      <SelectItem value="10">10 clips</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Cost Tracking */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <DollarSign className="w-5 h-5 text-primary" />
-                Cost Tracking
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div>
-                  <p className="font-medium">Monthly Budget</p>
-                  <p className="text-sm text-muted-foreground">Set a spending limit for API costs</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-muted-foreground">$</span>
-                  <Input
-                    type="number"
-                    value={settings.monthlyBudget}
-                    onChange={(e) => updateSetting('monthlyBudget', Number(e.target.value))}
-                    min={0}
-                    step={5}
-                    className="w-24 bg-card"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div>
-                  <p className="font-medium">Current Month Spend</p>
-                  <p className="text-sm text-muted-foreground">Total API costs this month</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-xl font-bold text-accent">
-                    ${(costData?.total_cost || 0).toFixed(2)}
-                  </p>
-                  <p className="text-sm text-muted-foreground">{spendPercent}% of budget</p>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div className="flex items-center gap-3">
-                  <Switch
-                    id="budget-alerts"
-                    checked={settings.budgetAlerts}
-                    onCheckedChange={(checked) => updateSetting('budgetAlerts', checked)}
-                  />
-                  <div>
-                    <Label htmlFor="budget-alerts" className="font-medium cursor-pointer">Budget Alerts</Label>
-                    <p className="text-sm text-muted-foreground">Warn when approaching budget limit</p>
-                  </div>
-                </div>
-                <Select
-                  value={String(settings.alertThreshold)}
-                  onValueChange={(v) => updateSetting('alertThreshold', Number(v))}
-                >
-                  <SelectTrigger className="w-28 bg-card">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="50">At 50%</SelectItem>
-                    <SelectItem value="75">At 75%</SelectItem>
-                    <SelectItem value="90">At 90%</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Data Management */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="w-5 h-5 text-primary" />
-                Data Management
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div>
-                  <p className="font-medium">Export All Data</p>
-                  <p className="text-sm text-muted-foreground">Download all jobs and settings as JSON</p>
-                </div>
-                <Button onClick={exportAllData} className="gap-2">
-                  <Download className="w-4 h-4" />
-                  Export
-                </Button>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div>
-                  <p className="font-medium">Clear Job History</p>
-                  <p className="text-sm text-muted-foreground">Remove all completed jobs (keeps settings)</p>
-                </div>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button variant="destructive" className="gap-2">
-                      <Trash2 className="w-4 h-4" />
-                      Clear
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Clear Job History?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This will permanently delete all job history. This action cannot be undone.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction onClick={clearJobHistory}>Clear History</AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-secondary rounded-lg">
-                <div>
-                  <p className="font-medium">Reset All Settings</p>
-                  <p className="text-sm text-muted-foreground">Reset everything to defaults (keeps API keys)</p>
-                </div>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button variant="outline" className="gap-2 border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground">
-                      <RotateCcw className="w-4 h-4" />
-                      Reset
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Reset Settings?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This will reset all settings to their default values. Your API keys will be preserved.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction onClick={resetSettings}>Reset Settings</AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Save Button */}
-          <div className="flex justify-end gap-4">
-            <Button variant="secondary" asChild>
-              <a href="/">Cancel</a>
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-2xl font-bold">Settings</h1>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={resetDefaults} className="gap-1">
+              <RotateCcw className="w-4 h-4" /> Reset
             </Button>
-            <Button onClick={saveSettings} disabled={saving}>
-              {saving ? 'Saving...' : 'Save Settings'}
+            <Button size="sm" onClick={saveAll} disabled={!dirty || saving} className="gap-1">
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Save
             </Button>
           </div>
         </div>
+
+        <div className="flex border-b border-border mb-6 overflow-x-auto">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "sources" && <SourcesTab settings={settings} onChange={updateLocal} />}
+        {activeTab === "blocked" && <BlockedTab settings={settings} onChange={updateLocal} />}
+        {activeTab === "pipeline" && <PipelineTab settings={settings} onChange={updateLocal} />}
+        {activeTab === "instructions" && <InstructionsTab settings={settings} onChange={updateLocal} />}
       </main>
+    </div>
+  )
+}
+
+function TagList({
+  items, onAdd, onRemove, placeholder = "Add item...",
+}: {
+  items: string[]
+  onAdd: (item: string) => void
+  onRemove: (index: number) => void
+  placeholder?: string
+}) {
+  const [input, setInput] = useState("")
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((item, i) => (
+          <Badge key={i} variant="secondary" className="gap-1 text-xs">
+            {item}
+            <button onClick={() => onRemove(i)} className="hover:text-destructive">
+              <X className="w-3 h-3" />
+            </button>
+          </Badge>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <Input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={placeholder}
+          className="flex-1"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && input.trim()) {
+              onAdd(input.trim())
+              setInput("")
+            }
+          }}
+        />
+        <Button
+          variant="outline" size="sm"
+          onClick={() => { if (input.trim()) { onAdd(input.trim()); setInput("") } }}
+        >
+          <Plus className="w-4 h-4" />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Preferred Channels (Tier 1 — Archives & History)</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-xs text-muted-foreground mb-3">
+            Tier 1 channels are searched first and receive the highest ranking boost. Enter YouTube channel IDs (UC...).
+          </p>
+          <TagList
+            items={settings.preferred_channels_tier1 || []}
+            onAdd={(id) => onChange("preferred_channels_tier1", [...(settings.preferred_channels_tier1 || []), id])}
+            onRemove={(i) => onChange("preferred_channels_tier1", (settings.preferred_channels_tier1 || []).filter((_, j) => j !== i))}
+            placeholder="UC... channel ID"
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Preferred Channels (Tier 2 — Documentary & Explainer)</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-xs text-muted-foreground mb-3">
+            Tier 2 channels get a ranking boost but are not searched exclusively. Enter channel names.
+          </p>
+          <TagList
+            items={settings.preferred_channels_tier2 || []}
+            onAdd={(name) => onChange("preferred_channels_tier2", [...(settings.preferred_channels_tier2 || []), name])}
+            onRemove={(i) => onChange("preferred_channels_tier2", (settings.preferred_channels_tier2 || []).filter((_, j) => j !== i))}
+            placeholder="Channel name"
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Public Domain Archives</CardTitle></CardHeader>
+        <CardContent>
+          <div className="space-y-2">
+            {(settings.public_domain_archives || []).map((a, i) => (
+              <div key={i} className="flex items-center gap-2 text-sm">
+                <span className="font-medium">{a.name}</span>
+                <span className="text-muted-foreground text-xs">{a.url}</span>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Stock Footage Platforms</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-3">
+            {Object.entries(settings.stock_platforms || {}).map(([key, enabled]) => (
+              <div key={key} className="flex items-center justify-between">
+                <Label className="text-sm capitalize">{key.replace(/_/g, " ")}</Label>
+                <Switch
+                  checked={enabled as boolean}
+                  onCheckedChange={(v) => onChange("stock_platforms", { ...settings.stock_platforms, [key]: v })}
+                />
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Blocked News Networks</CardTitle></CardHeader>
+        <CardContent>
+          <TagList
+            items={settings.blocked_networks || []}
+            onAdd={(n) => onChange("blocked_networks", [...(settings.blocked_networks || []), n])}
+            onRemove={(i) => onChange("blocked_networks", (settings.blocked_networks || []).filter((_, j) => j !== i))}
+            placeholder="Network name"
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Blocked Studios & Entertainment</CardTitle></CardHeader>
+        <CardContent>
+          <TagList
+            items={settings.blocked_studios || []}
+            onAdd={(s) => onChange("blocked_studios", [...(settings.blocked_studios || []), s])}
+            onRemove={(i) => onChange("blocked_studios", (settings.blocked_studios || []).filter((_, j) => j !== i))}
+            placeholder="Studio name"
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Blocked Sports Leagues</CardTitle></CardHeader>
+        <CardContent>
+          <TagList
+            items={settings.blocked_sports || []}
+            onAdd={(s) => onChange("blocked_sports", [...(settings.blocked_sports || []), s])}
+            onRemove={(i) => onChange("blocked_sports", (settings.blocked_sports || []).filter((_, j) => j !== i))}
+            placeholder="League name"
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Custom Block Rules</CardTitle></CardHeader>
+        <CardContent>
+          <Textarea
+            rows={4}
+            value={settings.custom_block_rules || ""}
+            onChange={(e) => onChange("custom_block_rules", e.target.value)}
+            placeholder='Block any channel with "reaction" or "compilation" in the title'
+            className="text-sm"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            These rules are passed to GPT-4o-mini during the ranking step as additional filtering instructions.
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function SliderSetting({
+  label, value, min, max, step = 1, onChange, unit = "",
+}: {
+  label: string; value: number; min: number; max: number; step?: number;
+  onChange: (v: number) => void; unit?: string
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex justify-between text-sm">
+        <Label>{label}</Label>
+        <span className="font-mono text-muted-foreground tabular-nums">
+          {Number.isInteger(step) ? value : value.toFixed(2)}{unit}
+        </span>
+      </div>
+      <Slider
+        value={[value]}
+        min={min} max={max} step={step}
+        onValueChange={(v) => onChange(v[0])}
+      />
+    </div>
+  )
+}
+
+function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+  const normalizeWeights = (key: string, newVal: number) => {
+    const keys = [
+      "weight_keyword_density", "weight_viral_score",
+      "weight_channel_authority", "weight_caption_quality", "weight_recency",
+    ]
+    const current: Record<string, number> = {}
+    keys.forEach((k) => (current[k] = (settings as Record<string, unknown>)[k] as number || 0))
+    current[key] = newVal
+    const total = Object.values(current).reduce((a, b) => a + b, 0)
+    if (total > 0) {
+      keys.forEach((k) => onChange(k, Math.round((current[k] / total) * 100) / 100))
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Search Settings</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <SliderSetting label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5} onChange={(v) => onChange("search_queries_per_segment", v)} />
+          <SliderSetting label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10} onChange={(v) => onChange("youtube_results_per_query", v)} />
+          <SliderSetting label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20} onChange={(v) => onChange("max_candidates_per_segment", v)} />
+          <SliderSetting label="Final results per segment" value={settings.top_results_per_segment} min={1} max={5} onChange={(v) => onChange("top_results_per_segment", v)} />
+          <SliderSetting label="Target total results" value={settings.total_results_target} min={15} max={60} onChange={(v) => onChange("total_results_target", v)} />
+          <SliderSetting label="Gemini expanded queries" value={settings.gemini_expanded_queries} min={0} max={10} onChange={(v) => onChange("gemini_expanded_queries", v)} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Timestamp Detection</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="text-sm">Timestamp model</Label>
+              <Select value={settings.timestamp_model} onValueChange={(v) => onChange("timestamp_model", v)}>
+                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-sm">Translation model</Label>
+              <Select value={settings.translation_model} onValueChange={(v) => onChange("translation_model", v)}>
+                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <SliderSetting label="Confidence threshold" value={settings.confidence_threshold} min={0.1} max={0.9} step={0.1} onChange={(v) => onChange("confidence_threshold", v)} />
+          <SliderSetting label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120} onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min" />
+          <SliderSetting label="Audio trim length for Whisper" value={settings.whisper_audio_trim_min} min={5} max={30} onChange={(v) => onChange("whisper_audio_trim_min", v)} unit=" min" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Video Filtering</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <SliderSetting label="Min video duration" value={settings.min_video_duration_sec} min={30} max={600} onChange={(v) => onChange("min_video_duration_sec", v)} unit="s" />
+          <SliderSetting label="Max video duration" value={settings.max_video_duration_sec} min={600} max={10800} step={300} onChange={(v) => onChange("max_video_duration_sec", v)} unit="s" />
+          <SliderSetting label="Prefer channels with min subscribers" value={settings.prefer_min_subscribers} min={0} max={100000} step={1000} onChange={(v) => onChange("prefer_min_subscribers", v)} />
+          <SliderSetting label="Full recency score within years" value={settings.recency_full_score_years} min={1} max={10} onChange={(v) => onChange("recency_full_score_years", v)} unit=" yr" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Ranking Weights</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">Weights auto-normalize to sum to 1.0 when adjusted.</p>
+          <SliderSetting label="Keyword density" value={settings.weight_keyword_density} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_keyword_density", v)} />
+          <SliderSetting label="View count (viral)" value={settings.weight_viral_score} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_viral_score", v)} />
+          <SliderSetting label="Channel authority" value={settings.weight_channel_authority} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_channel_authority", v)} />
+          <SliderSetting label="Caption quality" value={settings.weight_caption_quality} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_caption_quality", v)} />
+          <SliderSetting label="Recency" value={settings.weight_recency} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_recency", v)} />
+
+          <div className="flex gap-1 h-6 mt-2">
+            <div className="bg-blue-500 rounded-l" style={{ width: `${settings.weight_keyword_density * 100}%` }} title="Keyword" />
+            <div className="bg-green-500" style={{ width: `${settings.weight_viral_score * 100}%` }} title="Viral" />
+            <div className="bg-yellow-500" style={{ width: `${settings.weight_channel_authority * 100}%` }} title="Authority" />
+            <div className="bg-purple-500" style={{ width: `${settings.weight_caption_quality * 100}%` }} title="Caption" />
+            <div className="bg-red-500 rounded-r" style={{ width: `${settings.weight_recency * 100}%` }} title="Recency" />
+          </div>
+          <div className="flex text-xs text-muted-foreground gap-3">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full" />Keyword</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500 rounded-full" />Viral</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-yellow-500 rounded-full" />Authority</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-purple-500 rounded-full" />Caption</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-full" />Recency</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Performance</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <SliderSetting label="Max concurrent segments" value={settings.max_concurrent_segments} min={1} max={10} onChange={(v) => onChange("max_concurrent_segments", v)} />
+          <SliderSetting label="Segment timeout" value={settings.segment_timeout_sec} min={30} max={180} onChange={(v) => onChange("segment_timeout_sec", v)} unit="s" />
+          <SliderSetting label="Low result threshold" value={settings.low_result_threshold} min={10} max={30} onChange={(v) => onChange("low_result_threshold", v)} />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function InstructionsTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Custom Instructions</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <Textarea
+            rows={10}
+            value={settings.special_instructions || ""}
+            onChange={(e) => onChange("special_instructions", e.target.value)}
+            className="text-sm font-mono"
+          />
+          <p className="text-xs text-muted-foreground">
+            These instructions are sent to the AI during translation and ranking. Be specific about what you want prioritized or avoided.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Context-Matching Rules</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <Label className="text-sm">Enable context-matching synthesis</Label>
+            <Switch
+              checked={settings.enable_context_matching}
+              onCheckedChange={(v) => onChange("enable_context_matching", v)}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <Label className="text-sm">Discard clips shorter than 10 seconds</Label>
+            <Switch
+              checked={settings.discard_clips_shorter_than_10s}
+              onCheckedChange={(v) => onChange("discard_clips_shorter_than_10s", v)}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <Label className="text-sm">Verify timestamp doesn&apos;t land on end screen</Label>
+            <Switch
+              checked={settings.verify_timestamp_not_end_screen}
+              onCheckedChange={(v) => onChange("verify_timestamp_not_end_screen", v)}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <Label className="text-sm">Cap end timestamp at video duration - 5s</Label>
+            <Switch
+              checked={settings.cap_end_timestamp}
+              onCheckedChange={(v) => onChange("cap_end_timestamp", v)}
+            />
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }

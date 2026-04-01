@@ -1,294 +1,188 @@
-"""
-Matcher Service - Analyzes stock clips and matches them to visual cues
-Uses AI vision to analyze clip content and semantic matching
-"""
-
 import json
-from typing import List, Optional, Dict, Any
+import logging
+
 import httpx
 
-from app.config import get_settings
-from app.models.schemas import (
-    StockClip, VisualCue, MatchResult, ClipAnalysis,
-    SearchResult
-)
+from app.config import get_settings, DEFAULTS
+from app.models.schemas import Segment, MatchResult, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
+
+logger = logging.getLogger(__name__)
+
+TIMESTAMP_PROMPT_TEMPLATE = """You are the Viral B-Roll Extractor. Given a video's captions with timestamps and a script segment description, your job is to find the PEAK VISUAL MOMENT — not just where the topic is discussed, but where the most visually compelling, high-retention footage exists.
+
+Segment summary: {summary}
+Visual need: {visual_need}
+Emotional tone: {emotional_tone}
+Key terms: {key_terms}
+
+Captions:
+{transcript}
+
+Instructions:
+1. Find the section of the video that best matches the visual need described above.
+2. Within that section, pinpoint the "peak" — the moment with the highest visual impact. Prefer: cinematic footage, archival material, data visualizations, dramatic reveals, expert demonstrations, aerial/drone shots, scientific animations. Avoid: talking heads, static interview frames, title cards, end screens.
+3. The clip should be 15–90 seconds long. If the best moment is shorter, expand slightly. If longer, narrow to the most impactful portion.
+4. Do NOT return timestamp 0:00 unless the video genuinely opens with the relevant visual content.
+
+Return JSON only:
+{{
+  "start_time_seconds": int,
+  "end_time_seconds": int,
+  "excerpt": "relevant transcript text from this window (max 200 words)",
+  "confidence_score": float (0.0 to 1.0),
+  "relevance_note": "one sentence on why this section matches the topic",
+  "the_hook": "one sentence on why this specific timestamp is VISUALLY compelling — what makes it a 'peak' moment an editor would want"
+}}
+
+If no relevant section exists, return confidence_score: 0.0."""
 
 
 class MatcherService:
-    """Matches stock clips to visual cues using AI analysis."""
-    
+    """Finds peak visual moments in transcripts using GPT-4o-mini."""
+
     def __init__(self):
-        cfg = get_settings()
-        self.api_key = cfg.openai_api_key
-        self.model = "gpt-4o-mini"
-        self.vision_model = "gpt-4o-mini"
+        settings = get_settings()
+        self.api_key = settings.openai_api_key
         self.api_url = "https://api.openai.com/v1/chat/completions"
-        self.cost_tracker = get_cost_tracker()
-    
-    async def analyze_clip(
+
+    async def find_timestamp(
         self,
-        clip: StockClip,
-        cue: VisualCue,
-        job_id: Optional[str] = None
-    ) -> ClipAnalysis:
-        """
-        Analyze a clip's relevance to a visual cue.
-        
-        Args:
-            clip: The stock clip to analyze
-            cue: The visual cue to match against
-            job_id: Optional job ID for cost tracking
-            
-        Returns:
-            ClipAnalysis with relevance scores and metadata
-        """
-        # For MVP, use text-based analysis
-        # Future: Use vision API to analyze preview frames
-        
-        analysis = await self._text_based_analysis(clip, cue, job_id)
-        return analysis
-    
-    async def match_clips_to_cue(
-        self,
-        clips: List[StockClip],
-        cue: VisualCue,
-        top_k: int = 5,
-        job_id: Optional[str] = None
+        transcript_text: str | None,
+        segment: Segment,
+        video_metadata: dict,
+        job_id: str | None = None,
     ) -> MatchResult:
-        """
-        Match and rank clips for a visual cue.
-        
-        Args:
-            clips: List of candidate clips
-            cue: The visual cue to match
-            top_k: Number of top matches to return
-            job_id: Optional job ID for tracking
-            
-        Returns:
-            MatchResult with ranked clips
-        """
-        if not clips:
+        if not transcript_text:
             return MatchResult(
-                cue_id=cue.id,
-                matches=[],
-                total_analyzed=0
+                confidence_score=0.0,
+                source_flag=TranscriptSource.NONE,
             )
-        
-        # Batch analyze clips
-        analyses = []
-        for clip in clips:
-            try:
-                analysis = await self.analyze_clip(clip, cue, job_id)
-                analyses.append((clip, analysis))
-            except Exception as e:
-                print(f"Failed to analyze clip {clip.id}: {str(e)}")
-                continue
-        
-        # Sort by relevance score
-        analyses.sort(key=lambda x: x[1].relevance_score, reverse=True)
-        
-        # Get top matches
-        top_matches = []
-        for clip, analysis in analyses[:top_k]:
-            clip.relevance_score = analysis.relevance_score
-            clip.match_reasons = analysis.match_reasons
-            clip.analysis = analysis
-            top_matches.append(clip)
-        
+
+        model = DEFAULTS.get("timestamp_model", "gpt-4o-mini")
+        special_instructions = DEFAULTS.get("special_instructions", "")
+        max_words = 12000
+        words = transcript_text.split()
+        if len(words) > max_words:
+            transcript_text = " ".join(words[:max_words])
+
+        prompt = TIMESTAMP_PROMPT_TEMPLATE.format(
+            summary=segment.summary,
+            visual_need=segment.visual_need,
+            emotional_tone=segment.emotional_tone,
+            key_terms=", ".join(segment.key_terms),
+            transcript=transcript_text,
+        )
+        if special_instructions:
+            prompt += f"\n\nAdditional instructions:\n{special_instructions}"
+
+        source_str = video_metadata.get("transcript_source", "no_transcript")
+        try:
+            source_flag = TranscriptSource(source_str)
+        except ValueError:
+            source_flag = TranscriptSource.NONE
+
+        parsed = await self._call_model(prompt, model, job_id)
+        if parsed is None:
+            return MatchResult(confidence_score=0.0, source_flag=source_flag)
+
+        excerpt = parsed.get("excerpt", "")
+        max_excerpt = DEFAULTS.get("transcript_excerpt_max_words", 200)
+        excerpt_words = excerpt.split()
+        if len(excerpt_words) > max_excerpt:
+            excerpt = " ".join(excerpt_words[:max_excerpt])
+
         return MatchResult(
-            cue_id=cue.id,
-            matches=top_matches,
-            total_analyzed=len(analyses)
+            start_time_seconds=parsed.get("start_time_seconds"),
+            end_time_seconds=parsed.get("end_time_seconds"),
+            transcript_excerpt=excerpt or None,
+            confidence_score=min(1.0, max(0.0, float(parsed.get("confidence_score", 0.0)))),
+            relevance_note=parsed.get("relevance_note"),
+            the_hook=parsed.get("the_hook"),
+            source_flag=source_flag,
+            context_match_valid=True,
         )
-    
-    async def match_search_results(
-        self,
-        search_results: List[SearchResult],
-        cues: List[VisualCue],
-        top_k_per_cue: int = 3,
-        job_id: Optional[str] = None
-    ) -> Dict[str, MatchResult]:
-        """
-        Match search results to their corresponding cues.
-        
-        Args:
-            search_results: List of search results
-            cues: List of visual cues
-            top_k_per_cue: Top matches per cue
-            job_id: Optional job ID
-            
-        Returns:
-            Dictionary mapping cue_id to MatchResult
-        """
-        # Create cue lookup
-        cue_map = {cue.id: cue for cue in cues}
-        
-        results = {}
-        for search_result in search_results:
-            cue = cue_map.get(search_result.cue_id)
-            if not cue:
-                continue
-            
-            match_result = await self.match_clips_to_cue(
-                clips=search_result.clips,
-                cue=cue,
-                top_k=top_k_per_cue,
-                job_id=job_id
-            )
-            results[cue.id] = match_result
-        
-        return results
-    
-    async def _text_based_analysis(
-        self,
-        clip: StockClip,
-        cue: VisualCue,
-        job_id: Optional[str] = None
-    ) -> ClipAnalysis:
-        """
-        Perform text-based relevance analysis using LLM.
-        """
+
+    def validate_context_match(
+        self, match: MatchResult, video_duration_seconds: int
+    ) -> MatchResult:
+        start = match.start_time_seconds
+        end = match.end_time_seconds
+
+        if start is not None and start >= video_duration_seconds:
+            match.context_match_valid = False
+            return match
+
+        if end is not None and end > video_duration_seconds:
+            match.end_time_seconds = max(0, video_duration_seconds - 5)
+
+        if start is not None and end is not None and (end - start) < 10:
+            match.context_match_valid = False
+            return match
+
+        if start is not None and video_duration_seconds > 0:
+            if start > video_duration_seconds - 30:
+                match.confidence_score = max(0.0, match.confidence_score - 0.3)
+
+        return match
+
+    async def _call_model(
+        self, prompt: str, model: str, job_id: str | None
+    ) -> dict | None:
         if not self.api_key:
-            # Fallback to simple keyword matching
-            return self._simple_keyword_match(clip, cue)
-        
-        prompt = self._build_analysis_prompt(clip, cue)
-        
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": self._get_system_prompt()},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "temperature": 0.3,
-                        "response_format": {"type": "json_object"}
-                    }
-                )
-                response.raise_for_status()
-                result = response.json()
-                
+            logger.error("No OpenAI API key configured")
+            return None
+
+        messages = [
+            {"role": "system", "content": "You are the Viral B-Roll Extractor."},
+            {"role": "user", "content": prompt},
+        ]
+
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        self.api_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": 0.3,
+                            "response_format": {"type": "json_object"},
+                        },
+                    )
+                    resp.raise_for_status()
+
+                result = resp.json()
                 usage = result.get("usage", {})
+
                 if job_id:
-                    job_costs = self.cost_tracker.get_job_costs(job_id)
-                    if job_costs:
-                        job_costs.add_gpt4o_mini(
+                    costs = get_cost_tracker().get_job_costs(job_id)
+                    if costs:
+                        costs.add_gpt4o_mini(
                             usage.get("prompt_tokens", 0),
-                            usage.get("completion_tokens", 0)
+                            usage.get("completion_tokens", 0),
                         )
-                
-                # Parse response
+
                 content = result["choices"][0]["message"]["content"]
-                return self._parse_analysis(content, clip.id, cue.id)
-                
-        except Exception as e:
-            print(f"AI analysis failed, using keyword match: {str(e)}")
-            return self._simple_keyword_match(clip, cue)
-    
-    def _get_system_prompt(self) -> str:
-        """System prompt for clip analysis."""
-        return """You are a video editing assistant that evaluates how well stock footage clips match visual requirements.
+                return json.loads(content)
 
-Analyze the provided clip metadata against the visual cue requirements and score the match.
+            except json.JSONDecodeError:
+                if attempt == 0:
+                    logger.warning("Invalid JSON from matcher, retrying")
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": "Return valid JSON only.",
+                    })
+                    continue
+                logger.error("Matcher JSON parse failed after retry")
+                return None
+            except Exception:
+                logger.exception("Matcher API call failed")
+                return None
 
-Respond with JSON in this format:
-{
-    "relevance_score": 0.0-1.0,
-    "match_reasons": ["reason 1", "reason 2"],
-    "mood_match": true/false,
-    "duration_suitable": true/false,
-    "quality_assessment": "excellent/good/fair/poor",
-    "concerns": ["concern 1"],
-    "recommendation": "strong_match/good_match/weak_match/no_match"
-}"""
-
-    def _build_analysis_prompt(self, clip: StockClip, cue: VisualCue) -> str:
-        """Build analysis prompt for a clip-cue pair."""
-        return f"""Evaluate this stock footage clip against the visual requirement:
-
-**Visual Requirement (Cue):**
-- Description: {cue.visual_description}
-- Script Context: {cue.script_excerpt}
-- Desired Mood: {cue.mood}
-- Duration Needed: {cue.timestamp_end - cue.timestamp_start:.1f} seconds
-- Search Queries Used: {', '.join(cue.search_queries)}
-
-**Stock Clip Metadata:**
-- Source: {clip.source}
-- Duration: {clip.duration} seconds
-- Quality: {clip.quality}
-- Resolution: {clip.width}x{clip.height}
-- Found via query: {clip.source_query or 'N/A'}
-
-Analyze how well this clip matches the requirement."""
-
-    def _parse_analysis(self, content: str, clip_id: str, cue_id: str) -> ClipAnalysis:
-        """Parse LLM analysis response."""
-        try:
-            data = json.loads(content)
-            return ClipAnalysis(
-                clip_id=clip_id,
-                cue_id=cue_id,
-                relevance_score=float(data.get("relevance_score", 0.5)),
-                match_reasons=data.get("match_reasons", []),
-                mood_match=data.get("mood_match", False),
-                duration_suitable=data.get("duration_suitable", True),
-                quality_assessment=data.get("quality_assessment", "fair"),
-                concerns=data.get("concerns", []),
-                recommendation=data.get("recommendation", "weak_match")
-            )
-        except Exception:
-            return ClipAnalysis(
-                clip_id=clip_id,
-                cue_id=cue_id,
-                relevance_score=0.5,
-                match_reasons=["Analysis parsing failed"],
-                mood_match=False,
-                duration_suitable=True,
-                quality_assessment="unknown",
-                concerns=["Could not fully analyze"],
-                recommendation="weak_match"
-            )
-    
-    def _simple_keyword_match(self, clip: StockClip, cue: VisualCue) -> ClipAnalysis:
-        """Simple keyword-based matching as fallback."""
-        # Extract keywords from cue
-        cue_keywords = set()
-        for query in cue.search_queries:
-            cue_keywords.update(query.lower().split())
-        cue_keywords.update(cue.visual_description.lower().split())
-        
-        # Check clip metadata
-        clip_text = f"{clip.title} {clip.description} {' '.join(clip.tags)}".lower()
-        
-        # Count matches
-        matches = sum(1 for kw in cue_keywords if kw in clip_text)
-        score = min(matches / max(len(cue_keywords), 1), 1.0)
-        
-        # Duration check
-        needed_duration = cue.timestamp_end - cue.timestamp_start
-        duration_ok = clip.duration >= needed_duration * 0.5
-        
-        return ClipAnalysis(
-            clip_id=clip.id,
-            cue_id=cue.id,
-            relevance_score=score,
-            match_reasons=[f"Keyword overlap: {matches} terms"],
-            mood_match=False,
-            duration_suitable=duration_ok,
-            quality_assessment="unknown",
-            concerns=[] if duration_ok else ["Clip may be too short"],
-            recommendation="good_match" if score > 0.6 else "weak_match"
-        )
-
-
-# Singleton instance
-matcher_service = MatcherService()
+        return None

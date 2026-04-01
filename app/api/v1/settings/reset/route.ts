@@ -1,14 +1,12 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 
 const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
 
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params
+export async function POST() {
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/jobs/${id}`, { cache: "no-store" })
+    const resp = await fetch(`${BACKEND}/api/v1/settings/reset`, {
+      method: "POST",
+    })
     const data = await resp.json()
     return NextResponse.json(data, { status: resp.status })
   } catch (error) {

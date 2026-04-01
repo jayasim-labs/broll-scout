@@ -1,254 +1,341 @@
-"""
-Searcher Service - Searches Pexels API for stock footage
-Handles API rate limiting, pagination, and result aggregation
-"""
-
 import asyncio
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+import json
+import logging
+import re
+from urllib.parse import parse_qs, urlparse
+
 import httpx
 
-from app.config import get_settings
-from app.models.schemas import StockClip, SearchResult, VisualCue
+from app.config import get_settings, DEFAULTS
+from app.models.schemas import Segment, CandidateVideo
+from app.utils.youtube import (
+    search_videos,
+    search_channel_videos,
+    get_video_details,
+    get_channel_stats,
+)
 from app.utils.cost_tracker import get_cost_tracker
+
+logger = logging.getLogger(__name__)
+
+GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 
 class SearcherService:
-    """Searches stock footage APIs based on visual cues."""
-    
+    """Searches YouTube, Google CSE, and Gemini for candidate B-roll videos."""
+
     def __init__(self):
-        cfg = get_settings()
-        self.pexels_api_key = getattr(cfg, "pexels_api_key", "")
-        self.pexels_base_url = "https://api.pexels.com/videos/search"
-        self.cost_tracker = get_cost_tracker()
-        self.rate_limit_delay = 0.5
-        self._last_request_time = 0
-    
-    async def search_for_cue(
-        self,
-        cue: VisualCue,
-        max_results_per_query: int = 5,
-        job_id: Optional[str] = None
-    ) -> SearchResult:
-        """
-        Search for stock footage matching a visual cue.
-        
-        Args:
-            cue: The visual cue to search for
-            max_results_per_query: Maximum results to return per search query
-            job_id: Optional job ID for tracking
-            
-        Returns:
-            SearchResult with aggregated clips
-        """
-        if not self.pexels_api_key:
-            raise ValueError("Pexels API key not configured")
-        
-        all_clips = []
-        queries_executed = []
-        
-        for query in cue.search_queries:
-            await self._rate_limit()
-            
-            try:
-                clips = await self._search_pexels(
-                    query=query,
-                    per_page=max_results_per_query,
-                    orientation="landscape"  # Most b-roll is landscape
-                )
-                
-                # Tag clips with source query and cue info
-                for clip in clips:
-                    clip.source_query = query
-                    clip.cue_id = cue.id
-                    clip.mood_match = cue.mood
-                
-                all_clips.extend(clips)
-                queries_executed.append(query)
-                
-            except Exception as e:
-                print(f"Search failed for query '{query}': {str(e)}")
-                continue
-        
-        # Deduplicate by video ID
-        unique_clips = self._deduplicate_clips(all_clips)
-        
-        return SearchResult(
-            cue_id=cue.id,
-            clips=unique_clips,
-            total_results=len(unique_clips),
-            queries_executed=queries_executed,
-            search_timestamp=datetime.utcnow().isoformat()
+        self._settings = get_settings()
+        self._cost_tracker = get_cost_tracker()
+
+    def _get_default(self, key: str):
+        return DEFAULTS.get(key)
+
+    def _build_blocked_set(self) -> set[str]:
+        blocked: list[str] = []
+        blocked.extend(self._get_default("blocked_networks") or [])
+        blocked.extend(self._get_default("blocked_studios") or [])
+        blocked.extend(self._get_default("blocked_sports") or [])
+        custom = self._get_default("custom_block_rules") or ""
+        if custom:
+            blocked.extend(line.strip() for line in custom.split("\n") if line.strip())
+        return {name.lower() for name in blocked}
+
+    async def search_for_segment(
+        self, segment: Segment, job_id: str | None = None
+    ) -> list[CandidateVideo]:
+        tier1_ids: list[str] = self._get_default("preferred_channels_tier1") or []
+        tier2_names: list[str] = self._get_default("preferred_channels_tier2") or []
+        results_per_query: int = self._get_default("youtube_results_per_query") or 5
+        max_candidates: int = self._get_default("max_candidates_per_segment") or 12
+        min_duration: int = self._get_default("min_video_duration_sec") or 120
+        max_duration: int = self._get_default("max_video_duration_sec") or 5400
+
+        all_video_ids: list[str] = []
+        search_metadata: dict[str, dict] = {}
+
+        query_text = " ".join(segment.key_terms)
+
+        # (a) Preferred Channel Search (Tier 1)
+        tier1_video_ids = await self._search_tier1_channels(
+            tier1_ids, query_text, results_per_query, job_id
         )
-    
+        all_video_ids.extend(tier1_video_ids)
+
+        # (b) YouTube Data API (Primary)
+        yt_video_ids = await self._search_youtube_primary(
+            segment.search_queries, results_per_query, job_id
+        )
+        all_video_ids.extend(yt_video_ids)
+
+        # (c) Google Custom Search API (Secondary)
+        cse_video_ids = await self._search_google_cse(segment.key_terms, job_id)
+        for vid in cse_video_ids:
+            if vid not in all_video_ids:
+                all_video_ids.append(vid)
+
+        # (d) Gemini Query Expansion
+        initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
+        expanded_ids = await self._gemini_expand_and_search(
+            segment.summary, initial_titles, results_per_query, job_id
+        )
+        for vid in expanded_ids:
+            if vid not in all_video_ids:
+                all_video_ids.append(vid)
+
+        # (e) Batch Video Details
+        unique_ids = list(dict.fromkeys(all_video_ids))
+        if not unique_ids:
+            return []
+
+        video_details = await get_video_details(unique_ids, job_id=job_id)
+        channel_ids = list({v["channel_id"] for v in video_details if v.get("channel_id")})
+        channel_stats = await get_channel_stats(channel_ids, job_id=job_id) if channel_ids else {}
+
+        # (f) Build CandidateVideo objects
+        tier1_set = set(tier1_ids)
+        tier2_lower = {name.lower() for name in tier2_names}
+        blocked_set = self._build_blocked_set()
+
+        candidates: list[CandidateVideo] = []
+        seen_ids: set[str] = set()
+
+        for v in video_details:
+            vid = v.get("video_id", "")
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+
+            duration = v.get("duration_seconds", 0)
+            if duration < min_duration or duration > max_duration:
+                continue
+
+            ch_id = v.get("channel_id", "")
+            ch_name = v.get("channel_name", "")
+            ch_stats = channel_stats.get(ch_id, {})
+            subscribers = ch_stats.get("subscriber_count", v.get("channel_subscribers", 0))
+
+            is_blocked = ch_name.lower() in blocked_set
+            if is_blocked:
+                continue
+
+            candidate = CandidateVideo(
+                video_id=vid,
+                video_url=f"https://www.youtube.com/watch?v={vid}",
+                video_title=v.get("title", ""),
+                channel_name=ch_name,
+                channel_id=ch_id,
+                channel_subscribers=subscribers,
+                thumbnail_url=v.get("thumbnail_url", ""),
+                video_duration_seconds=duration,
+                published_at=v.get("published_at", ""),
+                view_count=v.get("view_count", 0),
+                is_preferred_tier1=ch_id in tier1_set,
+                is_preferred_tier2=ch_name.lower() in tier2_lower,
+                is_blocked=False,
+            )
+            candidates.append(candidate)
+
+        # (g) Limit to max_candidates_per_segment
+        return candidates[:max_candidates]
+
     async def search_batch(
         self,
-        cues: List[VisualCue],
-        max_results_per_query: int = 5,
-        job_id: Optional[str] = None,
-        progress_callback: Optional[callable] = None
-    ) -> List[SearchResult]:
-        """
-        Search for multiple cues in batch.
-        
-        Args:
-            cues: List of visual cues to search for
-            max_results_per_query: Maximum results per search query
-            job_id: Optional job ID for tracking
-            progress_callback: Optional callback for progress updates
-            
-        Returns:
-            List of SearchResults, one per cue
-        """
-        results = []
-        total_cues = len(cues)
-        
-        for idx, cue in enumerate(cues):
-            result = await self.search_for_cue(
-                cue=cue,
-                max_results_per_query=max_results_per_query,
-                job_id=job_id
-            )
-            results.append(result)
-            
-            if progress_callback:
-                await progress_callback(
-                    current=idx + 1,
-                    total=total_cues,
-                    message=f"Searched {idx + 1}/{total_cues} cues"
-                )
-        
+        segments: list[Segment],
+        job_id: str | None = None,
+        progress_callback=None,
+    ) -> dict[str, list[CandidateVideo]]:
+        max_concurrent: int = self._get_default("max_concurrent_segments") or 5
+        semaphore = asyncio.Semaphore(max_concurrent)
+        results: dict[str, list[CandidateVideo]] = {}
+        total = len(segments)
+        completed = 0
+        lock = asyncio.Lock()
+
+        async def _process(seg: Segment):
+            nonlocal completed
+            async with semaphore:
+                try:
+                    candidates = await self.search_for_segment(seg, job_id=job_id)
+                except Exception:
+                    logger.exception("Failed to search segment %s", seg.segment_id)
+                    candidates = []
+                results[seg.segment_id] = candidates
+                async with lock:
+                    completed += 1
+                    if progress_callback:
+                        try:
+                            await progress_callback(
+                                completed, total, f"Searched {completed}/{total} segments"
+                            )
+                        except Exception:
+                            pass
+
+        await asyncio.gather(*[_process(seg) for seg in segments])
         return results
-    
-    async def _search_pexels(
+
+    # ── Tier 1 channel search ───────────────────────────────────────────
+
+    async def _search_tier1_channels(
         self,
+        channel_ids: list[str],
         query: str,
-        per_page: int = 10,
-        page: int = 1,
-        orientation: str = "landscape",
-        size: str = "medium"
-    ) -> List[StockClip]:
-        """
-        Search Pexels API for videos.
-        
-        Args:
-            query: Search query string
-            per_page: Results per page (max 80)
-            page: Page number
-            orientation: landscape, portrait, or square
-            size: large, medium, or small
-            
-        Returns:
-            List of StockClip objects
-        """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                self.pexels_base_url,
-                headers={"Authorization": self.pexels_api_key},
-                params={
-                    "query": query,
-                    "per_page": min(per_page, 80),
-                    "page": page,
-                    "orientation": orientation,
-                    "size": size
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            clips = []
-            for video in data.get("videos", []):
-                # Find best video file (prefer HD)
-                video_files = video.get("video_files", [])
-                best_file = self._select_best_quality(video_files)
-                
-                if not best_file:
-                    continue
-                
-                # Find preview image
-                video_pictures = video.get("video_pictures", [])
-                preview_url = video_pictures[0]["picture"] if video_pictures else None
-                
-                clip = StockClip(
-                    id=str(video["id"]),
-                    source="pexels",
-                    title=query,  # Pexels doesn't provide titles
-                    description=video.get("url", ""),
-                    duration=video.get("duration", 0),
-                    preview_url=preview_url,
-                    download_url=best_file["link"],
-                    width=best_file.get("width", 1920),
-                    height=best_file.get("height", 1080),
-                    fps=best_file.get("fps", 30),
-                    file_type=best_file.get("file_type", "video/mp4"),
-                    author=video.get("user", {}).get("name", "Unknown"),
-                    author_url=video.get("user", {}).get("url", ""),
-                    license="Pexels License",
-                    tags=[],
-                    quality=self._determine_quality(best_file)
+        max_results: int,
+        job_id: str | None,
+    ) -> list[str]:
+        video_ids: list[str] = []
+        for ch_id in channel_ids:
+            try:
+                results = await search_channel_videos(
+                    channel_id=ch_id,
+                    query=query,
+                    max_results=max_results,
+                    job_id=job_id,
                 )
-                clips.append(clip)
-            
-            return clips
-    
-    def _select_best_quality(self, video_files: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Select the best quality video file, preferring HD."""
-        if not video_files:
-            return None
-        
-        # Sort by height (resolution) descending
-        sorted_files = sorted(
-            video_files,
-            key=lambda x: x.get("height", 0),
-            reverse=True
+                video_ids.extend(r["video_id"] for r in results if r.get("video_id"))
+            except Exception:
+                logger.warning("Tier 1 channel search failed for %s", ch_id)
+        return video_ids
+
+    # ── YouTube primary search ──────────────────────────────────────────
+
+    async def _search_youtube_primary(
+        self,
+        queries: list[str],
+        max_results: int,
+        job_id: str | None,
+    ) -> list[str]:
+        video_ids: list[str] = []
+        for q in queries:
+            try:
+                results = await search_videos(
+                    query=q, max_results=max_results, job_id=job_id
+                )
+                video_ids.extend(r["video_id"] for r in results if r.get("video_id"))
+            except Exception:
+                logger.warning("YouTube search failed for query: %s", q)
+        return video_ids
+
+    # ── Google CSE search ───────────────────────────────────────────────
+
+    async def _search_google_cse(
+        self, key_terms: list[str], job_id: str | None
+    ) -> list[str]:
+        api_key = self._settings.google_search_api_key
+        cx = self._settings.google_search_cx
+        if not api_key or not cx:
+            return []
+
+        queries = []
+        for term in key_terms:
+            queries.append(f"{term} documentary YouTube")
+            queries.append(f"{term} explainer video")
+
+        video_ids: list[str] = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for q in queries:
+                try:
+                    resp = await client.get(
+                        GOOGLE_CSE_URL,
+                        params={"key": api_key, "cx": cx, "q": q},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if job_id:
+                        self._cost_tracker.track_google_cse(job_id)
+                    for item in data.get("items", []):
+                        vid = self._extract_youtube_id(item.get("link", ""))
+                        if vid and vid not in video_ids:
+                            video_ids.append(vid)
+                except Exception:
+                    logger.warning("Google CSE search failed for query: %s", q)
+        return video_ids
+
+    @staticmethod
+    def _extract_youtube_id(url: str) -> str | None:
+        try:
+            parsed = urlparse(url)
+            if "youtube.com" in parsed.netloc:
+                qs = parse_qs(parsed.query)
+                vid = qs.get("v", [None])[0]
+                if vid:
+                    return vid
+            if "youtu.be" in parsed.netloc:
+                return parsed.path.lstrip("/").split("/")[0] or None
+        except Exception:
+            pass
+        return None
+
+    # ── Gemini query expansion ──────────────────────────────────────────
+
+    async def _gemini_expand_and_search(
+        self,
+        summary: str,
+        initial_titles: list[str],
+        max_results: int,
+        job_id: str | None,
+    ) -> list[str]:
+        api_key = self._settings.gemini_api_key
+        if not api_key:
+            return []
+
+        titles_text = "\n".join(f"- {t}" for t in initial_titles[:20])
+        prompt = (
+            "Given this documentary script segment summary and these initial YouTube "
+            "search results, suggest 5 additional search queries that would find better "
+            "B-roll footage. Think laterally — historical footage, related events, expert "
+            "interviews, scientific visualizations, archival material. "
+            "Return as JSON array of strings only.\n\n"
+            f"Summary: {summary}\n\n"
+            f"Initial results:\n{titles_text}"
         )
-        
-        # Prefer HD (720p-1080p) over 4K for reasonable file sizes
-        for file in sorted_files:
-            height = file.get("height", 0)
-            if 720 <= height <= 1080:
-                return file
-        
-        # Fall back to highest quality
-        return sorted_files[0] if sorted_files else None
-    
-    def _determine_quality(self, video_file: Dict[str, Any]) -> str:
-        """Determine quality label based on resolution."""
-        height = video_file.get("height", 0)
-        if height >= 2160:
-            return "4K"
-        elif height >= 1080:
-            return "1080p"
-        elif height >= 720:
-            return "720p"
-        elif height >= 480:
-            return "480p"
-        else:
-            return "SD"
-    
-    def _deduplicate_clips(self, clips: List[StockClip]) -> List[StockClip]:
-        """Remove duplicate clips based on video ID."""
-        seen_ids = set()
-        unique_clips = []
-        
-        for clip in clips:
-            if clip.id not in seen_ids:
-                seen_ids.add(clip.id)
-                unique_clips.append(clip)
-        
-        return unique_clips
-    
-    async def _rate_limit(self):
-        """Implement rate limiting for API calls."""
-        import time
-        current_time = time.time()
-        elapsed = current_time - self._last_request_time
-        
-        if elapsed < self.rate_limit_delay:
-            await asyncio.sleep(self.rate_limit_delay - elapsed)
-        
-        self._last_request_time = time.time()
 
+        expanded_queries = await self._call_gemini(prompt, api_key, job_id)
+        if not expanded_queries:
+            return []
 
-# Singleton instance
-searcher_service = SearcherService()
+        video_ids: list[str] = []
+        for q in expanded_queries:
+            try:
+                results = await search_videos(
+                    query=q, max_results=max_results, job_id=job_id
+                )
+                video_ids.extend(r["video_id"] for r in results if r.get("video_id"))
+            except Exception:
+                logger.warning("Expanded query search failed for: %s", q)
+        return video_ids
+
+    async def _call_gemini(
+        self, prompt: str, api_key: str, job_id: str | None
+    ) -> list[str]:
+        body = {"contents": [{"parts": [{"text": prompt}]}]}
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{GEMINI_URL}?key={api_key}",
+                    json=body,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            if job_id:
+                self._cost_tracker.track_gemini(job_id)
+
+            text = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+            text = text.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:json)?\s*", "", text)
+                text = re.sub(r"\s*```$", "", text)
+
+            queries = json.loads(text)
+            if isinstance(queries, list):
+                return [str(q) for q in queries if q]
+        except Exception:
+            logger.warning("Gemini query expansion failed")
+        return []

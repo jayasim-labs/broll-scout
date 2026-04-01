@@ -1,290 +1,188 @@
-"""
-Ranker Service - Ranks and selects optimal clips for each cue
-Applies user preferences, diversity scoring, and final selection
-"""
+import logging
+from datetime import datetime, timezone
+from typing import Optional
 
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
-from collections import defaultdict
-
+from app.config import DEFAULTS
 from app.models.schemas import (
-    StockClip, VisualCue, MatchResult, RankedSelection,
-    SelectionPreferences
+    Segment, CandidateVideo, MatchResult, RankedResult, TranscriptSource,
 )
 
-
-@dataclass
-class RankingWeights:
-    """Weights for different ranking factors."""
-    relevance: float = 0.4
-    quality: float = 0.2
-    duration: float = 0.15
-    diversity: float = 0.15
-    recency: float = 0.1
+logger = logging.getLogger(__name__)
 
 
 class RankerService:
-    """Ranks clips and makes final selections based on multiple criteria."""
-    
-    def __init__(self):
-        self.default_weights = RankingWeights()
-        self.quality_scores = {
-            "4K": 1.0,
-            "1080p": 0.9,
-            "720p": 0.7,
-            "480p": 0.5,
-            "SD": 0.3
-        }
-    
-    def rank_matches(
+    """Computes relevance scores, filters, and returns top ranked results."""
+
+    def rank_and_filter(
         self,
-        match_results: Dict[str, MatchResult],
-        cues: List[VisualCue],
-        preferences: Optional[SelectionPreferences] = None,
-        weights: Optional[RankingWeights] = None
-    ) -> Dict[str, RankedSelection]:
-        """
-        Rank matches for all cues and create final selections.
-        
-        Args:
-            match_results: Dictionary of cue_id -> MatchResult
-            cues: List of visual cues
-            preferences: User preferences for selection
-            weights: Custom ranking weights
-            
-        Returns:
-            Dictionary of cue_id -> RankedSelection
-        """
-        weights = weights or self.default_weights
-        preferences = preferences or SelectionPreferences()
-        
-        # Create cue lookup
-        cue_map = {cue.id: cue for cue in cues}
-        
-        # Track used clips for diversity
-        used_clips = set()
-        selections = {}
-        
-        # Process cues in priority order
-        sorted_cues = sorted(
-            cues,
-            key=lambda c: self._priority_value(c.priority),
-            reverse=True
-        )
-        
-        for cue in sorted_cues:
-            match_result = match_results.get(cue.id)
-            if not match_result or not match_result.matches:
-                selections[cue.id] = RankedSelection(
-                    cue_id=cue.id,
-                    selected_clip=None,
-                    alternatives=[],
-                    ranking_scores={},
-                    selection_reason="No matching clips found"
-                )
+        candidates: list[tuple[CandidateVideo, MatchResult]],
+        segment: Segment,
+        settings: dict | None = None,
+    ) -> list[RankedResult]:
+        cfg = settings or DEFAULTS
+
+        w_kw = float(cfg.get("weight_keyword_density", 0.30))
+        w_vs = float(cfg.get("weight_viral_score", 0.20))
+        w_ca = float(cfg.get("weight_channel_authority", 0.20))
+        w_cq = float(cfg.get("weight_caption_quality", 0.10))
+        w_re = float(cfg.get("weight_recency", 0.20))
+        total_w = w_kw + w_vs + w_ca + w_cq + w_re
+        if total_w > 0 and abs(total_w - 1.0) > 0.01:
+            w_kw /= total_w
+            w_vs /= total_w
+            w_ca /= total_w
+            w_cq /= total_w
+            w_re /= total_w
+
+        threshold = float(cfg.get("confidence_threshold", 0.4))
+        top_n = int(cfg.get("top_results_per_segment", 1))
+
+        scored: list[tuple[CandidateVideo, MatchResult, float]] = []
+        for cand, match in candidates:
+            if cand.is_blocked:
                 continue
-            
-            # Score all clips for this cue
-            scored_clips = []
-            for clip in match_result.matches:
-                score, breakdown = self._calculate_final_score(
-                    clip=clip,
-                    cue=cue,
-                    used_clips=used_clips,
-                    preferences=preferences,
-                    weights=weights
+            if match.start_time_seconds == 0 and match.transcript_excerpt:
+                excerpt_lower = (match.transcript_excerpt[:200] or "").lower()
+                if not any(t.lower() in excerpt_lower for t in segment.key_terms):
+                    continue
+            if not match.context_match_valid:
+                continue
+            if match.confidence_score < threshold:
+                has_others = any(
+                    m.confidence_score >= threshold and m.start_time_seconds is not None
+                    for _, m in candidates
                 )
-                scored_clips.append((clip, score, breakdown))
-            
-            # Sort by score
-            scored_clips.sort(key=lambda x: x[1], reverse=True)
-            
-            if scored_clips:
-                best_clip, best_score, score_breakdown = scored_clips[0]
-                
-                # Mark as used for diversity
-                used_clips.add(best_clip.id)
-                
-                # Get alternatives
-                alternatives = [clip for clip, _, _ in scored_clips[1:preferences.max_alternatives]]
-                
-                selections[cue.id] = RankedSelection(
-                    cue_id=cue.id,
-                    selected_clip=best_clip,
-                    alternatives=alternatives,
-                    ranking_scores=score_breakdown,
-                    final_score=best_score,
-                    selection_reason=self._generate_selection_reason(score_breakdown)
-                )
+                if has_others:
+                    continue
+
+            if match.source_flag == TranscriptSource.NONE:
+                relevance = 0.3
             else:
-                selections[cue.id] = RankedSelection(
-                    cue_id=cue.id,
-                    selected_clip=None,
-                    alternatives=[],
-                    ranking_scores={},
-                    selection_reason="No clips met minimum criteria"
+                kw_score = self._keyword_density(segment.key_terms, match.transcript_excerpt)
+                vs_score = self._viral_score(cand.view_count)
+                ca_score = self._channel_authority(cand)
+                cq_score = self._caption_quality(match.source_flag)
+                re_score = self._recency_score(cand.published_at, cfg)
+                relevance = (
+                    w_kw * kw_score
+                    + w_vs * vs_score
+                    + w_ca * ca_score
+                    + w_cq * cq_score
+                    + w_re * re_score
                 )
-        
-        return selections
-    
-    def _calculate_final_score(
-        self,
-        clip: StockClip,
-        cue: VisualCue,
-        used_clips: set,
-        preferences: SelectionPreferences,
-        weights: RankingWeights
-    ) -> Tuple[float, Dict[str, float]]:
-        """
-        Calculate final ranking score for a clip.
-        
-        Returns:
-            Tuple of (final_score, score_breakdown)
-        """
-        breakdown = {}
-        
-        # Relevance score (from matcher)
-        relevance_score = clip.relevance_score or 0.5
-        breakdown["relevance"] = relevance_score
-        
-        # Quality score
-        quality_score = self.quality_scores.get(clip.quality, 0.5)
-        if preferences.min_quality:
-            min_quality_score = self.quality_scores.get(preferences.min_quality, 0)
-            if quality_score < min_quality_score:
-                quality_score *= 0.5  # Penalty for not meeting minimum
-        breakdown["quality"] = quality_score
-        
-        # Duration score
-        needed_duration = cue.timestamp_end - cue.timestamp_start
-        duration_score = self._calculate_duration_score(clip.duration, needed_duration)
-        breakdown["duration"] = duration_score
-        
-        # Diversity score (prefer clips not used elsewhere)
-        diversity_score = 0.0 if clip.id in used_clips else 1.0
-        breakdown["diversity"] = diversity_score
-        
-        # Recency score (placeholder - could use upload date if available)
-        recency_score = 0.7  # Default neutral score
-        breakdown["recency"] = recency_score
-        
-        # Calculate weighted final score
-        final_score = (
-            weights.relevance * relevance_score +
-            weights.quality * quality_score +
-            weights.duration * duration_score +
-            weights.diversity * diversity_score +
-            weights.recency * recency_score
-        )
-        
-        # Apply preference boosts/penalties
-        if preferences.preferred_sources:
-            if clip.source in preferences.preferred_sources:
-                final_score *= 1.1
-            else:
-                final_score *= 0.9
-        
-        if preferences.preferred_moods and clip.mood_match:
-            if any(mood in clip.mood_match for mood in preferences.preferred_moods):
-                final_score *= 1.05
-        
-        breakdown["final"] = final_score
-        return final_score, breakdown
-    
-    def _calculate_duration_score(self, clip_duration: float, needed_duration: float) -> float:
-        """
-        Score based on how well clip duration matches need.
-        
-        Ideal: clip is 1.5x - 3x needed duration (allows for trimming)
-        Too short: heavy penalty
-        Too long: slight penalty (more trimming work)
-        """
-        if needed_duration <= 0:
+
+            scored.append((cand, match, round(min(1.0, max(0.0, relevance)), 4)))
+
+        scored.sort(key=lambda x: x[2], reverse=True)
+
+        if not scored and candidates:
+            best_cand, best_match = candidates[0]
+            scored = [(best_cand, best_match, 0.1)]
+
+        results: list[RankedResult] = []
+        for idx, (cand, match, rel_score) in enumerate(scored[:top_n]):
+            clip_url = cand.video_url
+            if match.start_time_seconds is not None:
+                clip_url = f"{cand.video_url}&t={match.start_time_seconds}"
+
+            results.append(RankedResult(
+                result_id=f"res_{segment.segment_id}_{idx + 1:03d}",
+                segment_id=segment.segment_id,
+                video_id=cand.video_id,
+                video_url=cand.video_url,
+                video_title=cand.video_title,
+                channel_name=cand.channel_name,
+                channel_subscribers=cand.channel_subscribers,
+                thumbnail_url=cand.thumbnail_url,
+                video_duration_seconds=cand.video_duration_seconds,
+                published_at=cand.published_at,
+                view_count=cand.view_count,
+                start_time_seconds=match.start_time_seconds,
+                end_time_seconds=match.end_time_seconds,
+                clip_url=clip_url,
+                transcript_excerpt=match.transcript_excerpt,
+                the_hook=match.the_hook,
+                relevance_score=rel_score,
+                confidence_score=match.confidence_score,
+                source_flag=match.source_flag,
+            ))
+
+        return results
+
+    def deduplicate_across_segments(
+        self, all_results: dict[str, list[RankedResult]]
+    ) -> dict[str, list[RankedResult]]:
+        video_best: dict[str, tuple[str, float]] = {}
+
+        for seg_id, results in all_results.items():
+            for r in results:
+                existing = video_best.get(r.video_id)
+                if existing is None or r.relevance_score > existing[1]:
+                    video_best[r.video_id] = (seg_id, r.relevance_score)
+
+        deduped: dict[str, list[RankedResult]] = {}
+        for seg_id, results in all_results.items():
+            filtered = []
+            for r in results:
+                best_seg, _ = video_best.get(r.video_id, (seg_id, 0))
+                if best_seg == seg_id:
+                    filtered.append(r)
+            deduped[seg_id] = filtered if filtered else results[:1]
+
+        return deduped
+
+    @staticmethod
+    def _keyword_density(key_terms: list[str], excerpt: str | None) -> float:
+        if not excerpt or not key_terms:
+            return 0.0
+        excerpt_lower = excerpt.lower()
+        matches = sum(1 for t in key_terms if t.lower() in excerpt_lower)
+        return min(1.0, matches / len(key_terms))
+
+    @staticmethod
+    def _viral_score(view_count: int) -> float:
+        if view_count >= 1_000_000:
+            return 1.0
+        if view_count >= 100_000:
+            return 0.8
+        if view_count >= 10_000:
             return 0.5
-        
-        ratio = clip_duration / needed_duration
-        
-        if ratio < 0.5:
-            return 0.1  # Way too short
-        elif ratio < 1.0:
-            return 0.3 + (ratio - 0.5) * 0.8  # Linear increase from 0.3 to 0.7
-        elif ratio < 1.5:
-            return 0.7 + (ratio - 1.0) * 0.6  # 0.7 to 1.0 (ideal zone)
-        elif ratio < 3.0:
-            return 1.0  # Ideal range
-        elif ratio < 5.0:
-            return 1.0 - (ratio - 3.0) * 0.1  # Slight penalty for very long
-        else:
-            return 0.8  # Long but usable
-    
-    def _priority_value(self, priority: str) -> int:
-        """Convert priority string to numeric value."""
-        priorities = {"high": 3, "medium": 2, "low": 1}
-        return priorities.get(priority, 2)
-    
-    def _generate_selection_reason(self, breakdown: Dict[str, float]) -> str:
-        """Generate human-readable selection reason."""
-        reasons = []
-        
-        if breakdown.get("relevance", 0) > 0.8:
-            reasons.append("highly relevant content")
-        elif breakdown.get("relevance", 0) > 0.6:
-            reasons.append("good content match")
-        
-        if breakdown.get("quality", 0) > 0.8:
-            reasons.append("high quality")
-        
-        if breakdown.get("duration", 0) > 0.8:
-            reasons.append("ideal duration")
-        
-        if breakdown.get("diversity", 0) > 0.5:
-            reasons.append("unique selection")
-        
-        if not reasons:
-            reasons.append("best available match")
-        
-        return f"Selected for: {', '.join(reasons)}"
-    
-    def get_selection_summary(
-        self,
-        selections: Dict[str, RankedSelection],
-        cues: List[VisualCue]
-    ) -> Dict:
-        """
-        Generate a summary of the selection results.
-        
-        Returns:
-            Summary statistics and quality metrics
-        """
-        total_cues = len(cues)
-        filled_cues = sum(1 for s in selections.values() if s.selected_clip)
-        
-        avg_score = 0.0
-        quality_distribution = defaultdict(int)
-        source_distribution = defaultdict(int)
-        
-        for selection in selections.values():
-            if selection.selected_clip:
-                avg_score += selection.final_score or 0
-                quality_distribution[selection.selected_clip.quality] += 1
-                source_distribution[selection.selected_clip.source] += 1
-        
-        if filled_cues > 0:
-            avg_score /= filled_cues
-        
-        return {
-            "total_cues": total_cues,
-            "filled_cues": filled_cues,
-            "fill_rate": filled_cues / total_cues if total_cues > 0 else 0,
-            "average_score": avg_score,
-            "quality_distribution": dict(quality_distribution),
-            "source_distribution": dict(source_distribution),
-            "unfilled_cues": [
-                cue.id for cue in cues
-                if cue.id in selections and not selections[cue.id].selected_clip
-            ]
-        }
+        return 0.2
 
+    @staticmethod
+    def _channel_authority(cand: CandidateVideo) -> float:
+        if cand.is_preferred_tier1:
+            return 1.0
+        if cand.is_preferred_tier2:
+            return 0.9
+        if cand.channel_subscribers > 100_000:
+            return 0.7
+        return 0.4
 
-# Singleton instance
-ranker_service = RankerService()
+    @staticmethod
+    def _caption_quality(source: TranscriptSource) -> float:
+        if source in (TranscriptSource.YOUTUBE_MANUAL, TranscriptSource.CACHED):
+            return 1.0
+        if source == TranscriptSource.YOUTUBE_AUTO:
+            return 0.8
+        if source == TranscriptSource.WHISPER:
+            return 0.6
+        return 0.3
+
+    @staticmethod
+    def _recency_score(published_at: str, cfg: dict) -> float:
+        if not published_at:
+            return 0.4
+        try:
+            pub_date = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            years = (now - pub_date).days / 365.25
+            full_years = float(cfg.get("recency_full_score_years", 2))
+            mid_years = float(cfg.get("recency_mid_score_years", 4))
+            if years <= full_years:
+                return 1.0
+            if years <= mid_years:
+                return 0.7
+            return 0.4
+        except Exception:
+            return 0.4
