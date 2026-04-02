@@ -115,21 +115,34 @@ Write-Host "[5/6] Setting up environment (.env.local)..." -ForegroundColor Yello
 $envLocal = Join-Path $ProjectRoot ".env.local"
 $envExample = Join-Path $ProjectRoot ".env.example"
 
-if (-not (Test-Path $envExample)) {
-    Write-Host "  .env.example not found. Skipping env setup." -ForegroundColor Yellow
-} elseif (Test-Path $envLocal) {
-    Write-Host "  OK - .env.local already exists (keeping your keys)" -ForegroundColor Green
-} else {
+if (Test-Path $envLocal) {
+    Write-Host "  .env.local already exists (keeping your keys)" -ForegroundColor Green
+} elseif (Test-Path $envExample) {
     Copy-Item $envExample $envLocal
     $secret = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
     $raw = Get-Content $envLocal -Raw
     $updated = $raw -replace 'SESSION_SECRET=change-me-to-random-32-char-string', "SESSION_SECRET=$secret"
-    # Ensure BACKEND_URL points to production API
-    $updated = $updated -replace 'BACKEND_URL=http://localhost:8000', 'BACKEND_URL=https://broll.jayasim.com'
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($envLocal, $updated, $utf8NoBom)
-    Write-Host "  OK - Created .env.local (backend: broll.jayasim.com)" -ForegroundColor Green
+    Write-Host "  OK - Created .env.local" -ForegroundColor Green
+} else {
+    Write-Host "  .env.example not found. Creating minimal .env.local..." -ForegroundColor Yellow
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($envLocal, "BACKEND_URL=https://broll.jayasim.com`n", $utf8NoBom)
 }
+
+# Always ensure BACKEND_URL points to production API
+$envContent = Get-Content $envLocal -Raw
+if ($envContent -match 'BACKEND_URL=http://localhost') {
+    $envContent = $envContent -replace 'BACKEND_URL=http://localhost:\d+', 'BACKEND_URL=https://broll.jayasim.com'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($envLocal, $envContent, $utf8NoBom)
+    Write-Host "  Fixed BACKEND_URL -> https://broll.jayasim.com" -ForegroundColor Cyan
+} elseif ($envContent -notmatch 'BACKEND_URL=') {
+    Add-Content $envLocal "`nBACKEND_URL=https://broll.jayasim.com"
+    Write-Host "  Added BACKEND_URL=https://broll.jayasim.com" -ForegroundColor Cyan
+}
+Write-Host "  OK - Backend: broll.jayasim.com" -ForegroundColor Green
 
 # --- 6. Python companion venv + packages ---
 Write-Host ""
