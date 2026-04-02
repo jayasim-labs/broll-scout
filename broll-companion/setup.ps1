@@ -124,12 +124,11 @@ if (-not (Test-Path $envExample)) {
     $secret = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
     $raw = Get-Content $envLocal -Raw
     $updated = $raw -replace 'SESSION_SECRET=change-me-to-random-32-char-string', "SESSION_SECRET=$secret"
+    # Ensure BACKEND_URL points to production API
+    $updated = $updated -replace 'BACKEND_URL=http://localhost:8000', 'BACKEND_URL=https://broll.jayasim.com'
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($envLocal, $updated, $utf8NoBom)
-    Write-Host "  OK - Created .env.local with a random SESSION_SECRET" -ForegroundColor Green
-    Write-Host "  IMPORTANT: Open .env.local and add your API keys:" -ForegroundColor Cyan
-    Write-Host "    OPENAI_API_KEY - https://platform.openai.com/api-keys" -ForegroundColor White
-    Write-Host "    GOOGLE_GENERATIVE_AI_API_KEY - https://aistudio.google.com/app/apikey" -ForegroundColor White
+    Write-Host "  OK - Created .env.local (backend: broll.jayasim.com)" -ForegroundColor Green
 }
 
 # --- 6. Python companion venv + packages ---
