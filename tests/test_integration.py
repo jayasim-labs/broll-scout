@@ -866,3 +866,422 @@ class TestStaleJobCleanup:
         call_args = mock_storage.update_job_status.call_args
         assert call_args[0][0] == "stale-123"
         assert call_args[0][1] == JobStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# 17. Transcriber — new youtube-transcript-api v1.2 compatibility
+# ---------------------------------------------------------------------------
+
+class TestTranscriberNewAPI:
+    """Verify transcriber works with youtube-transcript-api >= 1.2.0."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_transcript_uses_new_api(self):
+        """The transcriber must use YouTubeTranscriptApi().fetch() not .get_transcript()."""
+        from app.services.transcriber import TranscriberService
+
+        mock_fetched = MagicMock()
+        mock_fetched.to_raw_data.return_value = [
+            {"text": "Hello world", "start": 0.0, "duration": 2.0},
+            {"text": "Second line", "start": 2.0, "duration": 3.0},
+        ]
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage):
+            mock_api.fetch.return_value = mock_fetched
+
+            ts = TranscriberService()
+            result = await ts.get_transcript("test_vid")
+
+            mock_api.fetch.assert_called_once_with("test_vid", languages=["en"])
+            assert result.transcript_text is not None
+            assert "Hello world" in result.transcript_text
+
+    @pytest.mark.asyncio
+    async def test_list_transcripts_uses_new_api(self):
+        """Fallback path: list() then find_manually_created_transcript() uses new API."""
+        from app.services.transcriber import TranscriberService
+
+        mock_fetched = MagicMock()
+        mock_fetched.to_raw_data.return_value = [
+            {"text": "Manual caption", "start": 10.0, "duration": 5.0},
+        ]
+
+        mock_manual = MagicMock()
+        mock_manual.fetch.return_value = mock_fetched
+
+        mock_transcript_list = MagicMock()
+        mock_transcript_list.find_manually_created_transcript.return_value = mock_manual
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage):
+            mock_api.fetch.side_effect = Exception("No English transcript")
+            mock_api.list.return_value = mock_transcript_list
+
+            ts = TranscriberService()
+            result = await ts.get_transcript("test_vid_2")
+
+            mock_api.list.assert_called_once_with("test_vid_2")
+            assert result.transcript_text is not None
+            assert "Manual caption" in result.transcript_text
+
+
+# ---------------------------------------------------------------------------
+# 18. Matcher — timestamp extraction produces valid clips
+# ---------------------------------------------------------------------------
+
+class TestMatcherClipExtraction:
+
+    @pytest.mark.asyncio
+    async def test_matcher_returns_valid_timestamps(self):
+        """Matcher should return a non-zero confidence result with valid timestamps."""
+        from app.services.matcher import MatcherService
+        from app.models.schemas import Segment
+
+        gpt_response = {
+            "start_time_seconds": 120,
+            "end_time_seconds": 165,
+            "excerpt": "This is the relevant section about the topic...",
+            "confidence_score": 0.85,
+            "relevance_note": "Covers the main topic directly",
+            "the_hook": "Dramatic aerial footage of the location",
+        }
+
+        segment = Segment(
+            segment_id="seg_001",
+            title="Test Segment",
+            summary="A test segment about history",
+            visual_need="historical footage",
+            emotional_tone="dramatic",
+            key_terms=["history", "documentary"],
+            search_queries=["history documentary"],
+        )
+
+        with patch.object(MatcherService, "_call_model", return_value=gpt_response):
+            matcher = MatcherService()
+            result = await matcher.find_timestamp(
+                "0:00 This is a test transcript\n2:00 This is the relevant section about the topic",
+                segment,
+                {"video_duration_seconds": 3600, "video_title": "Test", "view_count": 100000, "transcript_source": "youtube_captions"},
+            )
+
+        assert result.confidence_score == 0.85
+        assert result.start_time_seconds == 120
+        assert result.end_time_seconds == 165
+        assert result.the_hook is not None
+
+    @pytest.mark.asyncio
+    async def test_matcher_validates_timestamps(self):
+        """Timestamps past video duration should be marked invalid."""
+        from app.services.matcher import MatcherService
+        from app.models.schemas import MatchResult
+
+        matcher = MatcherService()
+        match = MatchResult(
+            start_time_seconds=4000,
+            end_time_seconds=4060,
+            confidence_score=0.9,
+            context_match_valid=True,
+        )
+        result = matcher.validate_context_match(match, video_duration_seconds=3600)
+        assert result.context_match_valid is False
+
+
+# ---------------------------------------------------------------------------
+# 19. Ranker — full pipeline from candidate to ranked result
+# ---------------------------------------------------------------------------
+
+class TestRankerPipeline:
+
+    def test_ranker_produces_clip_url(self):
+        """Ranker should produce a RankedResult with a clip_url containing timestamp."""
+        from app.services.ranker import RankerService
+        from app.models.schemas import CandidateVideo, MatchResult, Segment, TranscriptSource
+
+        candidate = CandidateVideo(
+            video_id="test123",
+            video_url="https://www.youtube.com/watch?v=test123",
+            video_title="Test Documentary",
+            channel_name="TestChannel",
+            channel_id="UC_test",
+            channel_subscribers=500000,
+            thumbnail_url="https://img.youtube.com/vi/test123/mqdefault.jpg",
+            video_duration_seconds=3600,
+            published_at="2025-01-01T00:00:00Z",
+            view_count=1000000,
+        )
+        match = MatchResult(
+            start_time_seconds=120,
+            end_time_seconds=165,
+            transcript_excerpt="history documentary footage of the era",
+            confidence_score=0.85,
+            relevance_note="Relevant",
+            the_hook="Dramatic footage",
+            source_flag=TranscriptSource.YOUTUBE_MANUAL,
+            context_match_valid=True,
+        )
+        segment = Segment(
+            segment_id="seg_001",
+            title="Historical Era",
+            summary="Documentary about historical events",
+            visual_need="archival footage",
+            emotional_tone="dramatic",
+            key_terms=["history", "documentary", "era"],
+            search_queries=["history documentary"],
+        )
+
+        ranker = RankerService()
+        results = ranker.rank_and_filter([(candidate, match)], segment)
+
+        assert len(results) >= 1
+        r = results[0]
+        assert r.video_id == "test123"
+        assert r.clip_url is not None
+        assert "t=120" in r.clip_url
+        assert r.relevance_score > 0
+        assert r.confidence_score == 0.85
+
+    def test_ranker_filters_low_confidence(self):
+        """Very low confidence matches should be filtered when better options exist."""
+        from app.services.ranker import RankerService
+        from app.models.schemas import CandidateVideo, MatchResult, Segment, TranscriptSource
+
+        def make_candidate(vid_id, views=100000):
+            return CandidateVideo(
+                video_id=vid_id,
+                video_url=f"https://www.youtube.com/watch?v={vid_id}",
+                video_title="Test",
+                channel_name="Channel",
+                channel_id="UC_test",
+                thumbnail_url="",
+                video_duration_seconds=3600,
+                published_at="2025-06-01T00:00:00Z",
+                view_count=views,
+            )
+
+        good_match = MatchResult(
+            start_time_seconds=120, end_time_seconds=180,
+            transcript_excerpt="history documentary footage",
+            confidence_score=0.9,
+            source_flag=TranscriptSource.YOUTUBE_MANUAL,
+            context_match_valid=True,
+        )
+        bad_match = MatchResult(
+            start_time_seconds=10, end_time_seconds=40,
+            transcript_excerpt="unrelated content",
+            confidence_score=0.1,
+            source_flag=TranscriptSource.YOUTUBE_AUTO,
+            context_match_valid=True,
+        )
+
+        segment = Segment(
+            segment_id="seg_001", title="Test",
+            summary="Test", visual_need="Test", emotional_tone="neutral",
+            key_terms=["history"], search_queries=["test"],
+        )
+
+        ranker = RankerService()
+        results = ranker.rank_and_filter(
+            [(make_candidate("good"), good_match), (make_candidate("bad"), bad_match)],
+            segment,
+            settings={"top_results_per_segment": 2, "confidence_threshold": 0.4},
+        )
+        assert len(results) >= 1
+        assert results[0].video_id == "good"
+
+
+# ---------------------------------------------------------------------------
+# 19b. Transcriber — agent fallback when YouTube blocks EC2 IP
+# ---------------------------------------------------------------------------
+
+class TestTranscriberAgentFallback:
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_agent_on_request_blocked(self):
+        """When direct transcript fetch fails (e.g., YouTube blocks EC2 IP), the
+        transcriber should fall back to the local companion agent."""
+        from app.services.transcriber import TranscriberService
+        from app.models.schemas import TranscriptSource
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        agent_result = [{"video_id": "vid123", "transcript": "0:00 Test transcript\n0:05 More text", "source": "youtube_captions"}]
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-abc"), \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=agent_result):
+
+            mock_api.fetch.side_effect = Exception("RequestBlocked: YouTube is blocking requests from your IP")
+            mock_api.list.side_effect = Exception("RequestBlocked")
+
+            ts = TranscriberService()
+            result = await ts.get_transcript("vid123", video_duration_seconds=3600)
+
+            assert result.transcript_text is not None
+            assert "Test transcript" in result.transcript_text
+            assert result.transcript_source in (TranscriptSource.YOUTUBE_MANUAL, TranscriptSource.YOUTUBE_AUTO)
+
+    @pytest.mark.asyncio
+    async def test_agent_fallback_no_transcript_returns_none(self):
+        """If the agent also cannot find a transcript, return NONE source."""
+        from app.services.transcriber import TranscriberService
+        from app.models.schemas import TranscriptSource
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        agent_result = [{"video_id": "vid456", "transcript": None, "source": "no_transcript"}]
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-def"), \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=agent_result):
+
+            mock_api.fetch.side_effect = Exception("RequestBlocked")
+            mock_api.list.side_effect = Exception("RequestBlocked")
+
+            ts = TranscriberService()
+            result = await ts.get_transcript("vid456", video_duration_seconds=3600)
+
+            assert result.transcript_text is None
+            assert result.transcript_source == TranscriptSource.NONE
+
+
+# ---------------------------------------------------------------------------
+# 20. Full pipeline mock — search -> match -> rank -> clip
+# ---------------------------------------------------------------------------
+
+class TestFullPipelineMock:
+    """Test the complete pipeline with all stages mocked to verify data flows correctly."""
+
+    @pytest.mark.asyncio
+    async def test_pipeline_produces_clips(self):
+        """A full pipeline run with mocked services should produce > 0 clips."""
+        from app.models.schemas import (
+            CandidateVideo, JobStatus, MatchResult, Segment, TranscriptSource, Transcript,
+        )
+        from app.services.ranker import RankerService
+
+        segments = [Segment(
+            segment_id="seg_001",
+            title="Test Historical Segment",
+            summary="A documentary about historical events.",
+            visual_need="archival footage of historical buildings",
+            emotional_tone="dramatic",
+            key_terms=["history", "buildings", "archival"],
+            search_queries=["historical buildings documentary"],
+        )]
+
+        candidate = CandidateVideo(
+            video_id="vid_abc",
+            video_url="https://www.youtube.com/watch?v=vid_abc",
+            video_title="Historical Buildings Documentary",
+            channel_name="HistoryChannel",
+            channel_id="UC_hist",
+            channel_subscribers=250000,
+            thumbnail_url="https://img.youtube.com/vi/vid_abc/mqdefault.jpg",
+            video_duration_seconds=2400,
+            published_at="2025-03-01T00:00:00Z",
+            view_count=500000,
+        )
+
+        transcript = Transcript(
+            video_id="vid_abc",
+            transcript_text="0:00 Welcome to the documentary\n2:00 Here we see the historical buildings from the era\n4:00 The archival footage shows remarkable detail",
+            transcript_source=TranscriptSource.YOUTUBE_MANUAL,
+            video_duration_seconds=2400,
+        )
+
+        match_result = MatchResult(
+            start_time_seconds=120,
+            end_time_seconds=180,
+            transcript_excerpt="Here we see the historical buildings from the era",
+            confidence_score=0.88,
+            relevance_note="Direct match to archival footage need",
+            the_hook="Stunning archival footage of historical buildings",
+            source_flag=TranscriptSource.YOUTUBE_MANUAL,
+            context_match_valid=True,
+        )
+
+        mock_searcher = AsyncMock()
+        mock_searcher.search_batch.return_value = {"seg_001": [candidate]}
+
+        mock_transcriber = AsyncMock()
+        mock_transcriber.get_transcript.return_value = transcript
+
+        mock_matcher = AsyncMock()
+        mock_matcher.find_timestamp.return_value = match_result
+        mock_matcher.validate_context_match = MagicMock(return_value=match_result)
+
+        ranker = RankerService()
+
+        candidates_by_seg = await mock_searcher.search_batch(segments, job_id="test-job")
+        assert "seg_001" in candidates_by_seg
+        assert len(candidates_by_seg["seg_001"]) == 1
+
+        cands = candidates_by_seg["seg_001"]
+        matched = []
+        for cand in cands:
+            t = await mock_transcriber.get_transcript(cand.video_id)
+            assert t.transcript_text is not None
+            m = await mock_matcher.find_timestamp(t.transcript_text, segments[0], {})
+            m = mock_matcher.validate_context_match(m, cand.video_duration_seconds)
+            matched.append((cand, m))
+
+        assert len(matched) == 1
+        assert matched[0][1].confidence_score > 0
+
+        ranked = ranker.rank_and_filter(matched, segments[0])
+        assert len(ranked) >= 1
+
+        r = ranked[0]
+        assert r.video_id == "vid_abc"
+        assert "t=120" in r.clip_url
+        assert r.confidence_score == 0.88
+        assert r.relevance_score > 0
+
+    @pytest.mark.asyncio
+    async def test_pipeline_no_transcript_still_ranks(self):
+        """Even without transcript, the ranker should produce a fallback result."""
+        from app.models.schemas import (
+            CandidateVideo, MatchResult, Segment, TranscriptSource, Transcript,
+        )
+        from app.services.ranker import RankerService
+
+        segment = Segment(
+            segment_id="seg_002",
+            title="Test Segment No Transcript",
+            summary="Testing fallback when no transcript available.",
+            visual_need="any footage",
+            emotional_tone="neutral",
+            key_terms=["test"],
+            search_queries=["test search"],
+        )
+        candidate = CandidateVideo(
+            video_id="vid_no_tx",
+            video_url="https://www.youtube.com/watch?v=vid_no_tx",
+            video_title="Video Without Captions",
+            channel_name="SomeChannel",
+            channel_id="UC_some",
+            thumbnail_url="",
+            video_duration_seconds=1800,
+            published_at="2025-01-01T00:00:00Z",
+            view_count=50000,
+        )
+        match = MatchResult(
+            confidence_score=0.0,
+            source_flag=TranscriptSource.NONE,
+        )
+
+        ranker = RankerService()
+        ranked = ranker.rank_and_filter([(candidate, match)], segment)
+        assert len(ranked) >= 1
+        assert ranked[0].video_id == "vid_no_tx"

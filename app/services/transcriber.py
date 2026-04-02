@@ -6,12 +6,15 @@ from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFoun
 from app.config import get_settings, DEFAULTS
 from app.models.schemas import Transcript, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
+from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
+_ytt_api = YouTubeTranscriptApi()
+
 
 class TranscriberService:
-    """Fetches transcripts via cache -> YouTube captions -> Whisper flag cascade."""
+    """Fetches transcripts via cache -> YouTube captions -> agent -> Whisper flag cascade."""
 
     def __init__(self):
         self.settings = get_settings()
@@ -22,7 +25,7 @@ class TranscriberService:
         video_duration_seconds: int = 0,
         job_id: str | None = None,
     ) -> Transcript:
-        """Attempt to get a transcript following the cascade: cache -> YouTube -> Whisper flag."""
+        """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper flag."""
         from app.services.storage import get_storage
         storage = get_storage()
 
@@ -60,20 +63,54 @@ class TranscriberService:
                     video_duration_seconds=video_duration_seconds,
                 )
         except (TranscriptsDisabled, NoTranscriptFound):
-            logger.info("No YouTube captions available for %s", video_id)
+            logger.info("No YouTube captions available for %s (direct)", video_id)
         except Exception:
-            logger.exception("YouTube caption fetch failed for %s", video_id)
+            logger.info("Direct YouTube caption fetch failed for %s — trying agent", video_id)
 
-        whisper_max_seconds = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
-        if 0 < video_duration_seconds <= whisper_max_seconds:
-            return Transcript(
-                video_id=video_id,
-                transcript_text=None,
-                transcript_source=TranscriptSource.NONE,
-                video_duration_seconds=video_duration_seconds,
-            )
+        # Fallback: fetch transcript via local companion agent
+        try:
+            agent_result = await self._fetch_via_agent(video_id)
+            if agent_result:
+                await storage.store_transcript(
+                    video_id=video_id,
+                    transcript_text=agent_result["text"],
+                    source=agent_result["source"],
+                    language="en",
+                    duration=video_duration_seconds,
+                )
+                return Transcript(
+                    video_id=video_id,
+                    transcript_text=agent_result["text"],
+                    transcript_source=agent_result["source"],
+                    language="en",
+                    video_duration_seconds=video_duration_seconds,
+                )
+        except Exception:
+            logger.info("Agent transcript fetch also failed for %s", video_id)
 
         return no_transcript
+
+    async def _fetch_via_agent(self, video_id: str) -> dict | None:
+        """Ask the local companion to fetch the transcript."""
+        task_id = await agent_queue.create_task("transcript", {
+            "video_id": video_id,
+            "languages": ["en"],
+        })
+        results = await agent_queue.wait_for_result(task_id, timeout=60)
+        if not results:
+            return None
+        data = results[0]
+        transcript_text = data.get("transcript")
+        if not transcript_text:
+            return None
+
+        source_str = data.get("source", "youtube_captions")
+        source_map = {
+            "youtube_captions": TranscriptSource.YOUTUBE_MANUAL,
+            "youtube_auto_captions": TranscriptSource.YOUTUBE_AUTO,
+        }
+        source = source_map.get(source_str, TranscriptSource.YOUTUBE_MANUAL)
+        return {"text": transcript_text, "source": source}
 
     async def store_whisper_result(
         self,
@@ -107,24 +144,24 @@ class TranscriberService:
     ) -> tuple[str | None, TranscriptSource]:
         """Try YouTube captions: manual English -> auto English -> manual any language."""
         try:
-            entries = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-            return self._format_entries(entries), TranscriptSource.YOUTUBE_MANUAL
+            fetched = _ytt_api.fetch(video_id, languages=["en"])
+            return self._format_entries(fetched.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
         except Exception:
             pass
 
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = _ytt_api.list(video_id)
 
         try:
             manual_en = transcript_list.find_manually_created_transcript(["en"])
             entries = manual_en.fetch()
-            return self._format_entries(entries), TranscriptSource.YOUTUBE_MANUAL
+            return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
         except Exception:
             pass
 
         try:
             auto_en = transcript_list.find_generated_transcript(["en"])
             entries = auto_en.fetch()
-            return self._format_entries(entries), TranscriptSource.YOUTUBE_AUTO
+            return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_AUTO
         except Exception:
             pass
 
@@ -132,7 +169,7 @@ class TranscriberService:
             if not transcript.is_generated:
                 try:
                     entries = transcript.fetch()
-                    return self._format_entries(entries), TranscriptSource.YOUTUBE_MANUAL
+                    return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
                 except Exception:
                     continue
 

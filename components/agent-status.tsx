@@ -189,7 +189,7 @@ export function useAgentLoop(jobActive: boolean) {
             continue
           }
 
-          for (const task of tasks) {
+          await Promise.all(tasks.map(async (task: Record<string, unknown>) => {
             try {
               const execResp = await fetch(`${COMPANION_URL}/execute`, {
                 method: "POST",
@@ -220,7 +220,7 @@ export function useAgentLoop(jobActive: boolean) {
                 }),
               }).catch(() => {})
             }
-          }
+          }))
         } catch (e) {
           console.error("Agent loop error:", e)
           await sleep(POLL_INTERVAL_IDLE)

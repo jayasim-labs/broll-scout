@@ -41,7 +41,7 @@ def _log_activity(job_id: str, icon: str, text: str) -> None:
     existing = _progress.get(job_id, {})
     log = existing.get("activity_log", [])
     log.append({
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
+        "time": datetime.utcnow().isoformat() + "Z",
         "icon": icon,
         "text": text,
     })
@@ -130,7 +130,11 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
 
         search_elapsed = round(time.time() - search_start, 1)
         total_candidates = sum(len(v) for v in candidates_by_segment.values())
+        empty_segments = sum(1 for v in candidates_by_segment.values() if not v)
         _log_activity(job_id, "check", f"Search done in {search_elapsed}s! Found {total_candidates} potential B-roll videos across all {len(segments)} scenes")
+        if empty_segments:
+            _log_activity(job_id, "alert", f"{empty_segments} of {len(segments)} scenes had no candidate videos from search")
+        logger.info("Job %s search: %d candidates, %d empty segments", job_id, total_candidates, empty_segments)
 
 
         # --- Stage 3: Matching ---
@@ -327,6 +331,12 @@ async def _match_candidates(
                     job_id=job_id,
                 )
 
+                logger.info(
+                    "Transcript for %s: source=%s has_text=%s",
+                    cand.video_id, transcript.transcript_source.value,
+                    bool(transcript.transcript_text),
+                )
+
                 video_meta = {
                     "video_duration_seconds": cand.video_duration_seconds,
                     "video_title": cand.video_title,
@@ -339,6 +349,12 @@ async def _match_candidates(
                 )
                 match = matcher.validate_context_match(
                     match, cand.video_duration_seconds
+                )
+
+                logger.info(
+                    "Match for %s: confidence=%.2f valid=%s start=%s",
+                    cand.video_id, match.confidence_score,
+                    match.context_match_valid, match.start_time_seconds,
                 )
 
                 async with lock:

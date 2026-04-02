@@ -62,6 +62,16 @@ const iconColor: Record<string, string> = {
   terminal: "text-lime-400",
 }
 
+function formatActivityTime(raw: string): string {
+  try {
+    const d = new Date(raw)
+    if (isNaN(d.getTime())) return raw
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
+  } catch {
+    return raw
+  }
+}
+
 const stages = [
   { key: "translating", label: "Translate", icon: FileText },
   { key: "searching", label: "Search", icon: Search },
@@ -146,6 +156,9 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
             <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
               <Zap className="w-3.5 h-3.5" />
               Live Activity
+              <span className="ml-auto text-[10px] font-normal text-muted-foreground/50">
+                {Intl.DateTimeFormat().resolvedOptions().timeZone}
+              </span>
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
@@ -166,8 +179,8 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
                         isLatest ? "opacity-100" : "opacity-70"
                       )}
                     >
-                      <span className="text-[10px] text-muted-foreground/60 tabular-nums pt-0.5 w-12 shrink-0">
-                        {entry.time}
+                      <span className="text-[10px] text-muted-foreground/60 tabular-nums pt-0.5 w-16 shrink-0" title={entry.time}>
+                        {formatActivityTime(entry.time)}
                       </span>
                       <IconComp className={cn("w-3.5 h-3.5 shrink-0 mt-0.5", color)} />
                       <span

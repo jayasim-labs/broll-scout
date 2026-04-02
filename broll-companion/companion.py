@@ -18,6 +18,7 @@ import json
 import logging
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -32,7 +33,8 @@ CORS(app, origins=[
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 log = logging.getLogger("companion")
 
-YTDLP_TIMEOUT = 45
+YTDLP_TIMEOUT = 60
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 @app.route("/health")
@@ -71,6 +73,8 @@ def execute():
         )
     elif task_type == "video_details":
         results = ytdlp_video_details(payload["video_ids"])
+    elif task_type == "transcript":
+        results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
     else:
         return jsonify({"error": f"Unknown task type: {task_type}"}), 400
 
@@ -135,6 +139,53 @@ def _run_ytdlp(cmd: list[str]) -> list[dict]:
     return results
 
 
+def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[dict]:
+    """Fetch transcript using youtube-transcript-api (runs locally, not blocked by YouTube)."""
+    languages = languages or ["en"]
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        api = YouTubeTranscriptApi()
+
+        try:
+            fetched = api.fetch(video_id, languages=languages)
+            entries = fetched.to_raw_data()
+            source = "youtube_captions"
+        except Exception:
+            transcript_list = api.list(video_id)
+            try:
+                manual = transcript_list.find_manually_created_transcript(languages)
+                entries = manual.fetch().to_raw_data()
+                source = "youtube_captions"
+            except Exception:
+                try:
+                    auto = transcript_list.find_generated_transcript(languages)
+                    entries = auto.fetch().to_raw_data()
+                    source = "youtube_auto_captions"
+                except Exception:
+                    for t in transcript_list:
+                        if not t.is_generated:
+                            entries = t.fetch().to_raw_data()
+                            source = "youtube_captions"
+                            break
+                    else:
+                        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+        lines = []
+        for entry in entries:
+            total_seconds = int(entry.get("start", 0))
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            text = entry.get("text", "").strip()
+            if text:
+                lines.append(f"{minutes}:{seconds:02d} {text}")
+
+        return [{"video_id": video_id, "transcript": "\n".join(lines), "source": source}]
+
+    except Exception as e:
+        log.warning("Transcript fetch failed for %s: %s", video_id, e)
+        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+
 def _normalize(data: dict) -> dict:
     """Convert yt-dlp JSON to the same dict format the YouTube API returns."""
     upload_date = data.get("upload_date", "")
@@ -167,4 +218,4 @@ if __name__ == "__main__":
     port = 9876
     log.info("B-Roll Scout Companion starting on http://127.0.0.1:%d", port)
     log.info("Keep this running while using broll.jayasim.com")
-    app.run(host="127.0.0.1", port=port)
+    app.run(host="127.0.0.1", port=port, threaded=True)
