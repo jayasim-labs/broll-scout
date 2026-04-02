@@ -54,8 +54,8 @@ def _log_activity(
     if group:
         entry["group"] = group
     log.append(entry)
-    if len(log) > 150:
-        log = log[-150:]
+    if len(log) > 500:
+        log = log[-500:]
     existing["activity_log"] = log
     _progress[job_id] = existing
 

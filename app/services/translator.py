@@ -95,6 +95,11 @@ class TranslatorService:
             segments_raw = data.get("segments", [])
             await _emit("check", f"Better! Now {len(segments_raw)} scenes — each focused on a specific visual moment")
 
+        max_segments = max(estimated_minutes * 2, 10)
+        if len(segments_raw) > max_segments:
+            await _emit("alert", f"GPT-4o generated {len(segments_raw)} scenes but your ~{estimated_minutes}-min script only needs ~{estimated_minutes}–{max_segments}. Trimming to the top {max_segments} to keep the search efficient.")
+            segments_raw = segments_raw[:max_segments]
+
         cost_tracker = get_cost_tracker()
         if job_id:
             job_costs = cost_tracker.get_job_costs(job_id)
