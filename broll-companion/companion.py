@@ -16,6 +16,7 @@ Prerequisites:
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +37,57 @@ log = logging.getLogger("companion")
 YTDLP_TIMEOUT = 60
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# ---------------------------------------------------------------------------
+# Browser cookie configuration
+# ---------------------------------------------------------------------------
+COOKIE_BROWSER = os.environ.get("BROLL_COOKIE_BROWSER", "chrome")
+_cookie_args: list[str] = []
+_cookie_status: str = "untested"
+
+
+def _detect_cookie_support() -> None:
+    """Test if yt-dlp can read cookies from the configured browser."""
+    global _cookie_args, _cookie_status
+
+    if COOKIE_BROWSER.lower() == "none":
+        _cookie_status = "disabled"
+        log.info("Cookie extraction disabled (BROLL_COOKIE_BROWSER=none)")
+        return
+
+    try:
+        proc = subprocess.run(
+            ["yt-dlp", "--cookies-from-browser", COOKIE_BROWSER,
+             "--dump-json", "--no-download", "--no-warnings",
+             "--flat-playlist", "--playlist-end", "1",
+             "ytsearch1:test"],
+            capture_output=True, text=True, timeout=20,
+        )
+        stderr_upper = proc.stderr.upper()[:300]
+        cookie_error = any(kw in stderr_upper for kw in [
+            "COULD NOT FIND COOKIE", "COOKIE", "KEYRING", "DECRYPT",
+            "NO SUITABLE COOKIE",
+        ])
+        if not cookie_error:
+            _cookie_args = ["--cookies-from-browser", COOKIE_BROWSER]
+            _cookie_status = f"active ({COOKIE_BROWSER})"
+            log.info("Cookie extraction enabled: --cookies-from-browser %s", COOKIE_BROWSER)
+        else:
+            _cookie_status = f"failed ({COOKIE_BROWSER})"
+            log.warning(
+                "Cookie extraction from %s failed: %s. "
+                "Running without cookies. Set BROLL_COOKIE_BROWSER=none to silence this.",
+                COOKIE_BROWSER, proc.stderr[:200].strip(),
+            )
+    except subprocess.TimeoutExpired:
+        _cookie_status = "timeout"
+        log.warning("Cookie detection timed out — running without cookies")
+    except FileNotFoundError:
+        _cookie_status = "no yt-dlp"
+        log.error("yt-dlp not found during cookie detection")
+    except Exception as e:
+        _cookie_status = f"error: {e}"
+        log.warning("Cookie detection error: %s — running without cookies", e)
+
 
 @app.route("/health")
 def health():
@@ -47,6 +99,7 @@ def health():
         return jsonify({
             "status": "ok",
             "ytdlp_version": proc.stdout.strip(),
+            "cookie_status": _cookie_status,
         })
     except FileNotFoundError:
         return jsonify({
@@ -55,6 +108,28 @@ def health():
         }), 500
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/settings", methods=["GET", "POST"])
+def settings():
+    """View or change cookie browser at runtime."""
+    global COOKIE_BROWSER, _cookie_args, _cookie_status
+
+    if request.method == "POST":
+        body = request.json or {}
+        new_browser = body.get("cookie_browser", "").strip()
+        if new_browser:
+            COOKIE_BROWSER = new_browser  # noqa: F841 — intentional global reassign
+            _cookie_args = []
+            _cookie_status = "untested"
+            _detect_cookie_support()
+        return jsonify({"cookie_browser": COOKIE_BROWSER, "cookie_status": _cookie_status})
+
+    return jsonify({
+        "cookie_browser": COOKIE_BROWSER,
+        "cookie_status": _cookie_status,
+        "cookie_args": _cookie_args,
+    })
 
 
 @app.route("/execute", methods=["POST"])
@@ -126,11 +201,13 @@ def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
     return results
 
 
-def _run_ytdlp(cmd: list[str]) -> list[dict]:
+def _run_ytdlp(cmd: list[str], timeout: int | None = None) -> list[dict]:
+    full_cmd = cmd[:1] + _cookie_args + cmd[1:]
     results = []
+    t = timeout or YTDLP_TIMEOUT
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=YTDLP_TIMEOUT,
+            full_cmd, capture_output=True, text=True, timeout=t,
         )
         for line in proc.stdout.strip().split("\n"):
             if not line:
@@ -141,7 +218,7 @@ def _run_ytdlp(cmd: list[str]) -> list[dict]:
                 continue
             results.append(_normalize(data))
     except subprocess.TimeoutExpired:
-        log.warning("yt-dlp timed out after %ds: %s", YTDLP_TIMEOUT, " ".join(cmd[:4]))
+        log.warning("yt-dlp timed out after %ds: %s", t, " ".join(full_cmd[:4]))
     except FileNotFoundError:
         log.error("yt-dlp not found — install with: pip install yt-dlp")
     except Exception as e:
@@ -206,7 +283,7 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, "audio.mp3")
         cmd = [
-            "yt-dlp", url,
+            "yt-dlp", *_cookie_args, url,
             "-x", "--audio-format", "mp3",
             "--no-playlist", "--no-warnings",
             "-o", audio_path,
@@ -263,7 +340,7 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
-        "yt-dlp", url,
+        "yt-dlp", *_cookie_args, url,
         "--download-sections", f"*{start_ts}-{end_ts}",
         "--force-keyframes-at-cuts",
         "--merge-output-format", "mp4",
@@ -333,5 +410,8 @@ def _normalize(data: dict) -> dict:
 if __name__ == "__main__":
     port = 9876
     log.info("B-Roll Scout Companion starting on http://127.0.0.1:%d", port)
+    log.info("Detecting browser cookies (default: %s)...", COOKIE_BROWSER)
+    _detect_cookie_support()
+    log.info("Cookie status: %s", _cookie_status)
     log.info("Keep this running while using broll.jayasim.com")
     app.run(host="127.0.0.1", port=port, threaded=True)

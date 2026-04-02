@@ -14,11 +14,13 @@ type AgentState = "connected" | "disconnected" | "checking"
 interface CompanionHealth {
   status: string
   ytdlp_version?: string
+  cookie_status?: string
 }
 
 export function AgentStatusBadge() {
   const [state, setState] = useState<AgentState>("checking")
   const [version, setVersion] = useState<string>("")
+  const [cookieStatus, setCookieStatus] = useState<string>("")
 
   useEffect(() => {
     checkCompanion()
@@ -33,6 +35,7 @@ export function AgentStatusBadge() {
       if (data.status === "ok") {
         setState("connected")
         setVersion(data.ytdlp_version || "")
+        setCookieStatus(data.cookie_status || "")
       } else {
         setState("disconnected")
       }
@@ -42,6 +45,8 @@ export function AgentStatusBadge() {
   }
 
   if (state === "checking") return null
+
+  const cookieOk = cookieStatus.startsWith("active")
 
   return (
     <div
@@ -53,7 +58,7 @@ export function AgentStatusBadge() {
       )}
       title={
         state === "connected"
-          ? `Local agent connected (yt-dlp ${version})`
+          ? `Local agent connected (yt-dlp ${version})${cookieStatus ? ` · Cookies: ${cookieStatus}` : ''}`
           : "Local agent not detected"
       }
     >
@@ -63,7 +68,9 @@ export function AgentStatusBadge() {
         <WifiOff className="w-3 h-3" />
       )}
       <span className="hidden sm:inline">
-        {state === "connected" ? "Agent" : "No agent"}
+        {state === "connected"
+          ? `Agent${cookieOk ? ' · 🍪' : ''}`
+          : "No agent"}
       </span>
     </div>
   )

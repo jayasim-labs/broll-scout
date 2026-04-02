@@ -52,6 +52,11 @@ export default function HomePage() {
 
       if (status.progress) {
         setProgress(status.progress)
+        setJobHistory(prev => prev.map(j =>
+          j.job_id === jobId
+            ? { ...j, status: status.status, segment_count: status.segment_count ?? j.segment_count, result_count: status.result_count ?? j.result_count }
+            : j
+        ))
       }
 
       if (status.status === 'complete') {
@@ -66,10 +71,12 @@ export default function HomePage() {
         return true
       } else if (status.status === 'failed') {
         toast.error('Job failed')
+        loadJobHistory()
         resetToInput()
         return true
       } else if (status.status === 'cancelled') {
         toast.info('Job was cancelled')
+        loadJobHistory()
         resetToInput()
         return true
       }
@@ -116,6 +123,16 @@ export default function HomePage() {
         message: 'Starting pipeline...',
         activity_log: [{ time: new Date().toLocaleTimeString('en-GB'), icon: 'zap', text: 'Submitting your script to the pipeline...' }],
       })
+      setJobHistory(prev => {
+        if (prev.some(j => j.job_id === data.job_id)) return prev
+        return [{
+          job_id: data.job_id,
+          status: 'processing',
+          created_at: new Date().toISOString(),
+          segment_count: 0,
+          result_count: 0,
+        }, ...prev]
+      })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to start scouting')
     } finally {
@@ -125,6 +142,17 @@ export default function HomePage() {
 
   const handleLoadJob = async (jobId: string) => {
     try {
+      const statusResp = await fetch(`${API_BASE}/jobs/${jobId}/status`)
+      if (statusResp.ok) {
+        const statusData = await statusResp.json()
+        if (statusData.status === 'processing' || statusData.status === 'pending') {
+          setCurrentJobId(jobId)
+          if (statusData.progress) setProgress(statusData.progress)
+          setViewState('processing')
+          return
+        }
+      }
+
       const resp = await fetch(`${API_BASE}/jobs/${jobId}`)
       if (resp.ok) {
         const data = await resp.json()
