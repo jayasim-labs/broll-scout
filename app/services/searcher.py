@@ -58,6 +58,7 @@ async def _dispatch_search(
     backend: str = "auto",
 ) -> list[dict]:
     qt = get_quota_tracker()
+    ct = get_cost_tracker()
 
     if backend == "ytdlp_only":
         qt.track_ytdlp_search()
@@ -66,9 +67,10 @@ async def _dispatch_search(
     if backend == "api_only":
         results = await search_videos(query=query, max_results=max_results, job_id=job_id)
         qt.track_api_call(100)
+        if job_id:
+            ct.track_youtube_search(job_id)
         return results
 
-    # auto mode
     if qt.is_quota_exhausted:
         qt.track_ytdlp_search()
         return await _search_via_agent(query, max_results)
@@ -76,6 +78,8 @@ async def _dispatch_search(
     try:
         results = await search_videos(query=query, max_results=max_results, job_id=job_id)
         qt.track_api_call(100)
+        if job_id:
+            ct.track_youtube_search(job_id)
         return results
     except YouTubeQuotaExceeded:
         qt.mark_quota_exhausted()
@@ -91,6 +95,7 @@ async def _dispatch_channel_search(
     backend: str = "auto",
 ) -> list[dict]:
     qt = get_quota_tracker()
+    ct = get_cost_tracker()
 
     if backend == "ytdlp_only":
         qt.track_ytdlp_search()
@@ -101,6 +106,8 @@ async def _dispatch_channel_search(
             channel_id=channel_id, query=query, max_results=max_results, job_id=job_id,
         )
         qt.track_api_call(100)
+        if job_id:
+            ct.track_youtube_search(job_id)
         return results
 
     if qt.is_quota_exhausted:
@@ -112,6 +119,8 @@ async def _dispatch_channel_search(
             channel_id=channel_id, query=query, max_results=max_results, job_id=job_id,
         )
         qt.track_api_call(100)
+        if job_id:
+            ct.track_youtube_search(job_id)
         return results
     except YouTubeQuotaExceeded:
         qt.mark_quota_exhausted()
@@ -125,6 +134,7 @@ async def _dispatch_video_details(
     backend: str = "auto",
 ) -> list[dict]:
     qt = get_quota_tracker()
+    ct = get_cost_tracker()
 
     if backend == "ytdlp_only":
         qt.track_ytdlp_details(len(video_ids))
@@ -133,6 +143,8 @@ async def _dispatch_video_details(
     if backend == "api_only":
         results = await get_video_details(video_ids, job_id=job_id)
         qt.track_api_call(len(video_ids))
+        if job_id:
+            ct.track_youtube_details(job_id, len(video_ids))
         return results
 
     if qt.is_quota_exhausted:
@@ -142,6 +154,8 @@ async def _dispatch_video_details(
     try:
         results = await get_video_details(video_ids, job_id=job_id)
         qt.track_api_call(len(video_ids))
+        if job_id:
+            ct.track_youtube_details(job_id, len(video_ids))
         return results
     except YouTubeQuotaExceeded:
         qt.mark_quota_exhausted()

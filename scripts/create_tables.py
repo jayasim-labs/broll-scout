@@ -100,6 +100,11 @@ def main():
         attr_defs=[{"AttributeName": "project_id", "AttributeType": "S"}],
     )
 
+    create_table(client, "usage",
+        key_schema=[{"AttributeName": "period", "KeyType": "HASH"}],
+        attr_defs=[{"AttributeName": "period", "AttributeType": "S"}],
+    )
+
     print("\nAll tables created successfully!")
 
 

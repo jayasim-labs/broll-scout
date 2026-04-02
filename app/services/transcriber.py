@@ -69,6 +69,7 @@ class TranscriberService:
 
         # Fallback: fetch transcript via local companion agent
         try:
+            logger.info("Trying agent transcript for %s", video_id)
             agent_result = await self._fetch_via_agent(video_id)
             if agent_result:
                 await storage.store_transcript(
@@ -85,13 +86,16 @@ class TranscriberService:
                     language="en",
                     video_duration_seconds=video_duration_seconds,
                 )
+            else:
+                logger.info("Agent transcript returned nothing for %s", video_id)
         except Exception:
-            logger.info("Agent transcript fetch also failed for %s", video_id)
+            logger.info("Agent transcript fetch failed for %s", video_id)
 
         # Last resort: Whisper transcription via local companion
         max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
         if video_duration_seconds and video_duration_seconds <= max_whisper_duration:
             try:
+                logger.info("Trying Whisper for %s (%ds video)", video_id, video_duration_seconds)
                 whisper_result = await self._whisper_via_agent(video_id, video_duration_seconds)
                 if whisper_result:
                     await storage.store_transcript(
@@ -114,20 +118,27 @@ class TranscriberService:
                         language="en",
                         video_duration_seconds=video_duration_seconds,
                     )
+                else:
+                    logger.info("Whisper returned no transcript for %s", video_id)
             except Exception:
-                logger.info("Whisper transcription also failed for %s", video_id)
-        else:
+                logger.exception("Whisper transcription failed for %s", video_id)
+        elif video_duration_seconds > max_whisper_duration:
             logger.info("Skipping Whisper for %s — duration %ds exceeds max %ds", video_id, video_duration_seconds, max_whisper_duration)
 
+        logger.warning("All transcript sources exhausted for %s", video_id)
         return no_transcript
 
     async def _fetch_via_agent(self, video_id: str) -> dict | None:
         """Ask the local companion to fetch the transcript."""
+        if not agent_queue.is_agent_available():
+            logger.info("No agent available for transcript fetch of %s", video_id)
+            return None
+
         task_id = await agent_queue.create_task("transcript", {
             "video_id": video_id,
             "languages": ["en"],
         })
-        results = await agent_queue.wait_for_result(task_id, timeout=60)
+        results = await agent_queue.wait_for_result(task_id, timeout=90)
         if not results:
             return None
         data = results[0]
@@ -145,12 +156,16 @@ class TranscriberService:
 
     async def _whisper_via_agent(self, video_id: str, duration_seconds: int) -> dict | None:
         """Ask the local companion to download audio and run Whisper transcription."""
+        if not agent_queue.is_agent_available():
+            logger.info("No agent available for Whisper transcription of %s", video_id)
+            return None
+
         max_dur_min = DEFAULTS.get("whisper_max_video_duration_min", 60)
         task_id = await agent_queue.create_task("whisper", {
             "video_id": video_id,
             "max_duration_min": max_dur_min,
         })
-        timeout = min(300, max(120, duration_seconds))
+        timeout = min(600, max(180, duration_seconds + 120))
         results = await agent_queue.wait_for_result(task_id, timeout=timeout)
         if not results:
             return None

@@ -196,7 +196,9 @@ export function useAgentLoop(jobActive: boolean) {
             continue
           }
 
-          await Promise.all(tasks.map(async (task: Record<string, unknown>) => {
+          // Execute tasks sequentially to avoid overwhelming the single-threaded companion.
+          // Whisper/clip tasks can take minutes, so running them in parallel blocks everything.
+          for (const task of tasks) {
             try {
               const execResp = await fetch(`${COMPANION_URL}/execute`, {
                 method: "POST",
@@ -221,13 +223,13 @@ export function useAgentLoop(jobActive: boolean) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                  task_id: task.task_id,
+                  task_id: task.task_id as string,
                   status: "failed",
                   result: [],
                 }),
               }).catch(() => {})
             }
-          }))
+          }
         } catch (e) {
           console.error("Agent loop error:", e)
           await sleep(POLL_INTERVAL_IDLE)

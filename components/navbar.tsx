@@ -2,12 +2,32 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Video, Settings, Home, FolderOpen } from "lucide-react"
+import { Video, Settings, Home, FolderOpen, DollarSign } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { AgentStatusBadge } from "@/components/agent-status"
+import { useEffect, useState, useCallback } from "react"
 
 export function Navbar() {
   const pathname = usePathname()
+  const [totalCost, setTotalCost] = useState<number | null>(null)
+
+  const fetchCost = useCallback(async () => {
+    try {
+      const resp = await fetch("/api/v1/usage", { cache: "no-store" })
+      if (resp.ok) {
+        const data = await resp.json()
+        setTotalCost(data.all_time?.estimated_cost_usd ?? null)
+      }
+    } catch {
+      /* silent */
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchCost()
+    const iv = setInterval(fetchCost, 60_000)
+    return () => clearInterval(iv)
+  }, [fetchCost])
 
   return (
     <nav className="bg-card border-b border-border sticky top-0 z-50">
@@ -44,6 +64,18 @@ export function Navbar() {
             >
               <FolderOpen className="w-5 h-5" />
               <span className="hidden sm:inline">Projects</span>
+            </Link>
+            <Link
+              href="/usage"
+              className={cn(
+                "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",
+                pathname === "/usage" && "text-foreground"
+              )}
+            >
+              <DollarSign className="w-5 h-5" />
+              <span className="hidden sm:inline">
+                {totalCost !== null ? `$${totalCost.toFixed(2)}` : "Usage"}
+              </span>
             </Link>
             <Link
               href="/settings"

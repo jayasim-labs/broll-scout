@@ -17,6 +17,7 @@ from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
 from app.utils.cost_tracker import get_cost_tracker
+from app.services.usage_service import get_usage_service
 
 logger = logging.getLogger(__name__)
 
@@ -323,13 +324,16 @@ async def run_pipeline(
         # --- Stage 4: Storing ---
         _set_progress(job_id, "ranking", 95, "Saving your results...")
         if all_results:
-            _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes", group="rank")
+            status_note = ""
+            if not minimum_results_met:
+                status_note = f" (target was {script_duration}+ clips for a ~{script_duration}-min script)"
+            _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes{status_note}", group="rank")
         else:
             qt = get_quota_tracker()
             if qt.is_quota_exhausted:
                 _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted and no local agent connected — no clips could be found. Install the B-Roll Scout companion app or try again tomorrow.", group="rank")
             else:
-                _log_activity(job_id, "alert", "No clips found. The search queries may be too specific, or the APIs returned no matching videos. Try adjusting key terms or broadening your script.", group="rank")
+                _log_activity(job_id, "alert", "No clips found. Many videos had no transcripts available. Ensure the companion app is running so Whisper can transcribe audio locally.", group="rank")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)
@@ -366,11 +370,18 @@ async def run_pipeline(
         logger.info("Job %s cancelled by user", job_id)
         _log_activity(job_id, "alert", "Job cancelled by user.")
         elapsed = round(time.time() - start_time, 2)
-        cost_tracker.end_job(job_id)
+        api_costs = cost_tracker.end_job(job_id) or {}
+        qt_stats = get_quota_tracker().stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        est_cost = api_costs.get("estimated_cost_usd", 0)
+        if est_cost:
+            _log_activity(job_id, "clock", f"Cancelled after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
         await storage.update_job_status(
             job_id, JobStatus.CANCELLED,
             completed_at=datetime.utcnow().isoformat(),
             processing_time_seconds=elapsed,
+            api_costs=api_costs,
         )
         _set_progress(job_id, "cancelled", 0, "Cancelled by user")
 
@@ -378,14 +389,26 @@ async def run_pipeline(
         logger.exception("Pipeline failed for job %s", job_id)
         _log_activity(job_id, "alert", f"Pipeline failed: {str(exc)[:200]}")
         elapsed = round(time.time() - start_time, 2)
-        cost_tracker.end_job(job_id)
+        api_costs = cost_tracker.end_job(job_id) or {}
+        qt_stats = get_quota_tracker().stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        est_cost = api_costs.get("estimated_cost_usd", 0)
+        if est_cost:
+            _log_activity(job_id, "clock", f"Failed after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
         await storage.update_job_status(
             job_id, JobStatus.FAILED,
             completed_at=datetime.utcnow().isoformat(),
             processing_time_seconds=elapsed,
+            api_costs=api_costs,
         )
         _set_progress(job_id, "failed", 0, "Pipeline failed")
 
+    finally:
+        try:
+            await get_usage_service().recalculate()
+        except Exception:
+            logger.warning("Failed to recalculate usage after job %s", job_id)
 
 
 _TRANSCRIPT_SOURCE_LABELS = {
@@ -441,7 +464,7 @@ async def _match_candidates(
                 if transcript.transcript_text:
                     await _emit("mic", f"  📄 \"{short_title}\" — transcript via {source_label}")
                 else:
-                    await _emit("alert", f"  ✗ \"{short_title}\" — {source_label}, skipping timestamp analysis")
+                    await _emit("alert", f"  ✗ \"{short_title}\" — tried cache → YouTube captions → companion → Whisper: all failed, no transcript")
 
                 video_meta = {
                     "video_duration_seconds": cand.video_duration_seconds,

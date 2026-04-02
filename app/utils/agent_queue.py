@@ -22,7 +22,7 @@ _events: dict[str, asyncio.Event] = {}
 _active_agents: dict[str, float] = {}
 _lock = asyncio.Lock()
 
-TASK_TIMEOUT = 120
+TASK_TIMEOUT = 600
 
 
 async def create_task(task_type: str, payload: dict) -> str:

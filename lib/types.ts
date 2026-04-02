@@ -123,6 +123,34 @@ export interface ChannelResolution {
   thumbnail_url: string
 }
 
+export interface UsagePeriod {
+  openai_calls: number
+  openai_mini_calls: number
+  openai_input_tokens: number
+  openai_output_tokens: number
+  gpt4o_input_tokens: number
+  gpt4o_output_tokens: number
+  gpt4o_mini_input_tokens: number
+  gpt4o_mini_output_tokens: number
+  whisper_minutes: number
+  whisper_calls: number
+  youtube_api_units: number
+  google_cse_calls: number
+  gemini_calls: number
+  ytdlp_searches: number
+  ytdlp_detail_lookups: number
+  estimated_cost_usd: number
+  job_count: number
+  last_calculated?: string
+}
+
+export interface UsageData {
+  all_time: UsagePeriod
+  current_month: UsagePeriod
+  today: UsagePeriod
+  pricing: Record<string, number>
+}
+
 export interface PipelineSettings {
   search_queries_per_segment: number
   youtube_results_per_query: number

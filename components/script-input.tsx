@@ -66,7 +66,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
       <div className="text-center space-y-2">
         <h1 className="text-3xl font-bold">B-Roll Scout</h1>
         <p className="text-muted-foreground text-lg">
-          Paste your Tamil script below. The AI will translate, segment, and find
+          Paste your detailed script below. The AI will translate, segment, and find
           timestamped B-roll clips from YouTube.
         </p>
       </div>
@@ -108,7 +108,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                       if (proj) setTitle(proj.title)
                     }
                   }}
-                  className="w-full h-9 rounded-md border border-input bg-secondary px-3 text-sm"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
                   <option value="__new__">+ Create New Project</option>
                   {projects.map(p => (
@@ -123,7 +123,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder='e.g., "India Space Program" or "Tamil Cinema History"'
-                    className="bg-secondary"
+                    className="border border-input bg-background"
                   />
                 )}
               </div>
@@ -133,7 +133,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder='e.g., "India Space Program" or "Tamil Cinema History"'
-                className="bg-secondary"
+                className="border border-input bg-background"
               />
             )}
             <p className="text-[11px] text-muted-foreground">
@@ -142,14 +142,16 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="script-textarea" className="text-sm font-medium">Tamil Script</Label>
+            <Label htmlFor="script-textarea" className="text-sm font-medium">
+              Detailed Script <span className="text-destructive">*</span>
+            </Label>
             <Textarea
               id="script-textarea"
               rows={12}
               value={script}
               onChange={(e) => setScript(e.target.value)}
-              placeholder="உங்கள் தமிழ் ஸ்கிரிப்டை இங்கே பேஸ்ட் செய்யுங்கள்... (Paste your Tamil script here...)"
-              className="resize-y bg-secondary font-mono text-sm"
+              placeholder="Paste your detailed script here..."
+              className="resize-y border border-input bg-background font-mono text-sm"
             />
           </div>
 
@@ -167,27 +169,34 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
           </div>
 
           <div className="flex items-center justify-between pt-2">
-            <div className="flex items-center gap-3">
-              <Switch
-                id="gemini-toggle"
-                checked={enableGeminiExpansion}
-                onCheckedChange={setEnableGeminiExpansion}
-              />
-              <Label htmlFor="gemini-toggle" className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer">
-                <Sparkles className="w-3.5 h-3.5" />
-                Gemini AI Expansion
-              </Label>
-              {enableGeminiExpansion && (
-                <span className="text-[10px] text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">
-                  Slower but finds more creative B-roll
-                </span>
-              )}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="gemini-toggle"
+                  checked={enableGeminiExpansion}
+                  onCheckedChange={setEnableGeminiExpansion}
+                />
+                <Label htmlFor="gemini-toggle" className="flex items-center gap-1.5 text-sm cursor-pointer">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  Gemini AI Expansion
+                </Label>
+                {enableGeminiExpansion && (
+                  <span className="text-[10px] text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded font-medium">
+                    ON
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-muted-foreground max-w-lg leading-relaxed pl-10">
+                {enableGeminiExpansion
+                  ? "After GPT-4o generates search queries, Gemini 1.5 Flash will analyze initial YouTube results and suggest 5 additional creative queries per segment — finds more diverse B-roll but takes longer."
+                  : "Default: GPT-4o translates your script, segments it, and generates 3 targeted YouTube search queries per segment. Fast and cost-effective for most scripts."}
+              </p>
             </div>
             <Button
               onClick={handleSubmit}
               disabled={isLoading || !isValid}
               size="lg"
-              className="gap-2"
+              className="gap-2 self-start"
             >
               {isLoading ? (
                 <>

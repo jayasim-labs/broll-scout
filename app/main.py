@@ -22,10 +22,31 @@ from app.services.settings_service import get_settings_service
 logger = logging.getLogger(__name__)
 
 
+_usage_task: asyncio.Task | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _usage_task
     await _cleanup_stale_jobs()
+    _usage_task = asyncio.create_task(_usage_recalc_loop())
     yield
+    if _usage_task:
+        _usage_task.cancel()
+
+
+async def _usage_recalc_loop():
+    """Recalculate usage stats every hour."""
+    from app.services.usage_service import get_usage_service
+    await asyncio.sleep(5)
+    while True:
+        try:
+            svc = get_usage_service()
+            await svc.recalculate()
+            logger.info("Hourly usage recalculation complete")
+        except Exception:
+            logger.exception("Usage recalculation failed")
+        await asyncio.sleep(3600)
 
 
 async def _cleanup_stale_jobs():
@@ -407,6 +428,30 @@ async def delete_project(
     return {"status": "ok"}
 
 
+# --- Usage / Cost Endpoints ---
+
+from app.services.usage_service import get_usage_service
+
+
+@app.get("/api/v1/usage")
+async def get_usage(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    svc = get_usage_service()
+    return await svc.get_all_usage()
+
+
+@app.post("/api/v1/usage/recalculate")
+async def recalculate_usage(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    svc = get_usage_service()
+    totals = await svc.recalculate()
+    return {"status": "ok", "totals": totals}
+
+
 # --- Local yt-dlp Agent Endpoints ---
 
 from app.utils import agent_queue
@@ -414,7 +459,7 @@ from app.utils import agent_queue
 
 @app.post("/api/v1/agent/poll")
 async def agent_poll(body: AgentPollRequest):
-    tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=10)
+    tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=3)
     return {"tasks": tasks}
 
 

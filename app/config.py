@@ -56,7 +56,7 @@ DEFAULTS = {
 
     "max_concurrent_segments": 5,
     "max_concurrent_candidates": 3,
-    "segment_timeout_sec": 60,
+    "segment_timeout_sec": 300,
     "retry_attempts": 3,
     "retry_backoff_base_sec": 1,
     "youtube_api_batch_size": 50,
