@@ -266,12 +266,16 @@ class SearcherService:
         # (a) Preferred Channel Search (Tier 1)
         if tier1_ids:
             await _emit("search", f"🎬 \"{seg_label}\" — checking {len(tier1_ids)} preferred channels first")
-        tier1_video_ids = await self._search_tier1_channels_full(
-            tier1_ids, query_text, results_per_query, job_id, backend, _emit if using_agent else None
-        )
-        all_video_ids.extend(_collect(tier1_video_ids))
-        if tier1_video_ids:
-            await _emit("check", f"  ✓ Found {len(tier1_video_ids)} videos from your preferred channels")
+            tier1_video_ids = await self._search_tier1_channels_full(
+                tier1_ids, query_text, results_per_query, job_id, backend, _emit if using_agent else None
+            )
+            all_video_ids.extend(_collect(tier1_video_ids))
+            if tier1_video_ids:
+                await _emit("check", f"  ✓ Found {len(tier1_video_ids)} videos from preferred channels for \"{seg_label}\"")
+            else:
+                await _emit("alert", f"  ✗ No matching videos on preferred channels for \"{seg_label}\" — moving to broader search")
+        else:
+            tier1_video_ids = []
 
         # (b) YouTube / yt-dlp Primary Search
         queries_str = " → ".join(q[:40] for q in segment.search_queries[:3])
