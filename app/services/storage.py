@@ -445,14 +445,32 @@ class StorageService:
             )
             items = resp.get("Items", [])
             items.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+
+            project_ids = [i.get("project_id", "") for i in items[:limit] if i.get("project_id")]
+            live_counts: Dict[str, tuple] = {}
+            if project_ids:
+                try:
+                    jobs_resp = await self._run(
+                        self._table("jobs").scan,
+                        FilterExpression=boto3.dynamodb.conditions.Attr("project_id").is_in(project_ids),
+                        ProjectionExpression="project_id, result_count",
+                    )
+                    for j in jobs_resp.get("Items", []):
+                        pid = j.get("project_id", "")
+                        if pid:
+                            prev = live_counts.get(pid, (0, 0))
+                            live_counts[pid] = (prev[0] + 1, prev[1] + int(j.get("result_count", 0)))
+                except ClientError:
+                    logger.warning("Failed to compute live job counts, using cached values")
+
             return [
                 ProjectSummary(
                     project_id=i.get("project_id", ""),
                     title=i.get("title", ""),
                     created_at=i.get("created_at", ""),
                     updated_at=i.get("updated_at", ""),
-                    job_count=int(i.get("job_count", 0)),
-                    total_clips=int(i.get("total_clips", 0)),
+                    job_count=live_counts.get(i.get("project_id", ""), (0, 0))[0] or int(i.get("job_count", 0)),
+                    total_clips=live_counts.get(i.get("project_id", ""), (0, 0))[1] or int(i.get("total_clips", 0)),
                 )
                 for i in items[:limit]
             ]

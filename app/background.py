@@ -12,7 +12,6 @@ from app.services.matcher import MatcherService
 from app.services.ranker import RankerService
 from app.services.searcher import SearcherService
 from app.services.settings_service import get_settings_service
-from app.utils.quota_tracker import get_quota_tracker
 from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
@@ -79,7 +78,6 @@ async def run_pipeline(
     start_time = time.time()
     script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
 
-    get_quota_tracker().reset_for_job()
     cost_tracker.start_job(job_id)
     await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title)
 
@@ -121,7 +119,7 @@ async def run_pipeline(
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
         _set_progress(job_id, "searching", 20, f"Searching YouTube & yt-dlp for B-roll clips...")
         _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})", group="search")
-        sources = "preferred channels → YouTube/yt-dlp"
+        sources = "preferred channels → yt-dlp"
         if enable_gemini_expansion:
             sources += " → Gemini AI creative expansion"
         _log_activity(job_id, "clock", f"For each scene, I search: {sources}", depth=1, group="search")
@@ -141,8 +139,8 @@ async def run_pipeline(
                 time_note = ""
             _set_progress(job_id, "searching", pct, f"{msg}{time_note}")
 
-        async def search_activity(icon: str, text: str):
-            _log_activity(job_id, icon, text, depth=1, group="search")
+        async def search_activity(icon: str, text: str, depth: int = 2):
+            _log_activity(job_id, icon, text, depth=depth, group="search")
 
         candidates_by_segment = await searcher.search_batch(
             segments, job_id=job_id, progress_callback=search_progress,
@@ -333,20 +331,12 @@ async def run_pipeline(
                 status_note = f" (target was {script_duration}+ clips for a ~{script_duration}-min script)"
             _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes{status_note}", group="rank")
         else:
-            qt = get_quota_tracker()
-            if qt.is_quota_exhausted:
-                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted and no local agent connected — no clips could be found. Install the B-Roll Scout companion app or try again tomorrow.", group="rank")
-            else:
-                _log_activity(job_id, "alert", "No clips found. Many videos had no transcripts available. Ensure the companion app is running so Whisper can transcribe audio locally.", group="rank")
+            _log_activity(job_id, "alert", "No clips found. Ensure the companion app is running so yt-dlp can search and Whisper can transcribe audio locally.", group="rank")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
-        qt_stats = get_quota_tracker().stats
-        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
-        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
-        api_costs["quota_exhausted"] = qt_stats.get("quota_exhausted", False)
-        api_costs["search_mode"] = qt_stats.get("search_mode", "unknown")
+        api_costs["search_mode"] = "ytdlp"
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
         _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}", group="done")
@@ -375,9 +365,6 @@ async def run_pipeline(
         _log_activity(job_id, "alert", "Job cancelled by user.")
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
-        qt_stats = get_quota_tracker().stats
-        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
-        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Cancelled after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
@@ -394,9 +381,6 @@ async def run_pipeline(
         _log_activity(job_id, "alert", f"Pipeline failed: {str(exc)[:200]}")
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
-        qt_stats = get_quota_tracker().stats
-        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
-        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Failed after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")

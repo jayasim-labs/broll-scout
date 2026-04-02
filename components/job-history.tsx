@@ -107,6 +107,7 @@ export function JobHistory({
           const isActive = activeProjectId === project.project_id
           const projectJobs = projectJobMap[project.project_id] || []
           const hasProcessing = projectJobs.some(j => j.status === "processing")
+          const liveClipCount = projectJobs.reduce((sum, j) => sum + (j.result_count || 0), 0)
 
           return (
             <div key={project.project_id}>
@@ -159,7 +160,7 @@ export function JobHistory({
                     <p className="text-[10px] text-muted-foreground">
                       {projectJobs.length} job{projectJobs.length !== 1 ? "s" : ""}
                       {" · "}
-                      {project.total_clips} clip{project.total_clips !== 1 ? "s" : ""}
+                      {liveClipCount} clip{liveClipCount !== 1 ? "s" : ""}
                       {hasProcessing && (
                         <Loader2 className="inline w-3 h-3 ml-1 animate-spin text-yellow-500" />
                       )}

@@ -696,22 +696,18 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
         <CardContent className="space-y-4">
           <div>
             <Label className="text-sm">Search backend</Label>
-            <Select value={(settings as Record<string, unknown>).search_backend as string || "auto"} onValueChange={(v) => onChange("search_backend", v)}>
-              <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="auto">Auto (API first, yt-dlp fallback)</SelectItem>
-                <SelectItem value="ytdlp_only">yt-dlp only (zero quota usage)</SelectItem>
-                <SelectItem value="api_only">YouTube API only</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="mt-1 flex items-center gap-2 px-3 py-2 rounded-md border bg-muted/30">
+              <span className="text-sm font-medium">yt-dlp via companion app</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-600 font-medium">No quota limits</span>
+            </div>
             <p className="text-[11px] text-muted-foreground/70 mt-1">
-              Auto uses YouTube Data API (10K units/day free) and falls back to yt-dlp via the companion app when quota runs out. &quot;yt-dlp only&quot; uses zero quota but requires the companion app running locally.
+              All YouTube searches run through yt-dlp on your local companion app. No YouTube API quota is consumed — you can run unlimited jobs per day.
             </p>
           </div>
           <SliderSetting
             label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5}
             onChange={(v) => onChange("search_queries_per_segment", v)}
-            help="Number of YouTube search queries generated per script scene. GPT-4o creates broad, specific, and creative queries. Higher = more variety, but slower and more API usage."
+            help="Number of search queries generated per script scene. GPT-4o creates broad, specific, and creative queries. Higher = more variety but slower since each query goes through yt-dlp."
           />
           <SliderSetting
             label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10}
