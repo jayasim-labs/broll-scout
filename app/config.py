@@ -1,22 +1,9 @@
-import json
 import logging
-import os
 from functools import lru_cache
 
-import boto3
-from botocore.exceptions import ClientError
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
-
-_SECRET_FIELD_MAP = {
-    "OPENAI_API_KEY": "openai_api_key",
-    "GEMINI_API_KEY": "gemini_api_key",
-    "YOUTUBE_API_KEY": "youtube_api_key",
-    "GOOGLE_SEARCH_API_KEY": "google_search_api_key",
-    "GOOGLE_SEARCH_CX": "google_search_cx",
-    "API_KEY": "api_key",
-}
 
 
 class Settings(BaseSettings):
@@ -32,39 +19,12 @@ class Settings(BaseSettings):
     api_key: str = ""
     debug: bool = False
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
-
-
-def _merge_secrets_from_arn(settings: Settings, secret_arn: str) -> Settings:
-    try:
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or settings.aws_region
-        client = boto3.client("secretsmanager", region_name=region)
-        resp = client.get_secret_value(SecretId=secret_arn)
-        raw = resp.get("SecretString") or "{}"
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            return settings
-        updates = {}
-        for json_key, attr in _SECRET_FIELD_MAP.items():
-            val = data.get(json_key)
-            if isinstance(val, str) and val.strip():
-                updates[attr] = val.strip()
-        if updates:
-            return settings.model_copy(update=updates)
-    except ClientError as e:
-        logger.warning("Secrets Manager read failed: %s", e)
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning("Invalid secret JSON: %s", e)
-    return settings
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    base = Settings()
-    secret_arn = os.environ.get("SECRETS_ARN", "").strip()
-    if secret_arn:
-        base = _merge_secrets_from_arn(base, secret_arn)
-    return base
+    return Settings()
 
 
 DEFAULTS = {

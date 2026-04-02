@@ -1,17 +1,15 @@
 import asyncio
-import os
 import uuid
 import logging
 
-from fastapi import FastAPI, HTTPException, Header, Query, Request
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.models.schemas import (
-    JobCreateRequest, JobResponse, JobListResponse, JobSummary, JobStatus,
+    JobCreateRequest, JobListResponse, JobStatus,
     FeedbackRequest, SettingsUpdateRequest, BulkSettingsUpdateRequest,
-    ChannelResolveRequest, ChannelResolution, SettingsResponse, HealthResponse,
+    ChannelResolveRequest, SettingsResponse, HealthResponse,
     LibrarySearchResponse,
 )
 from app.background import run_pipeline, get_job_progress
@@ -22,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="B-Roll Scout API",
-    version="0.1.0",
+    version="0.2.0",
     description="AI-powered B-roll intelligence for video editors",
 )
 
@@ -43,18 +41,14 @@ def _verify_key(x_api_key: str | None) -> None:
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
-    settings = get_settings()
-    on_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
-    explicit_aws = bool(settings.aws_access_key_id and settings.aws_secret_access_key)
     db_status = "not_configured"
-    if on_lambda or explicit_aws:
-        try:
-            storage = get_storage()
-            await storage.list_jobs(limit=1)
-            db_status = "connected"
-        except Exception:
-            db_status = "error"
-    return HealthResponse(status="ok", db=db_status, version="0.1.0")
+    try:
+        storage = get_storage()
+        await storage.list_jobs(limit=1)
+        db_status = "connected"
+    except Exception:
+        db_status = "error"
+    return HealthResponse(status="ok", db=db_status, version="0.2.0")
 
 
 _running_tasks: dict[str, asyncio.Task] = {}
@@ -218,12 +212,6 @@ async def resolve_channel(
         raise HTTPException(status_code=404, detail="Channel not found")
     return result
 
-
-try:
-    from mangum import Mangum
-    handler = Mangum(app, lifespan="off")
-except ImportError:
-    handler = None
 
 if __name__ == "__main__":
     import uvicorn

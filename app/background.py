@@ -44,8 +44,8 @@ def _log_activity(job_id: str, icon: str, text: str) -> None:
         "icon": icon,
         "text": text,
     })
-    if len(log) > 50:
-        log = log[-50:]
+    if len(log) > 100:
+        log = log[-100:]
     existing["activity_log"] = log
     _progress[job_id] = existing
 
@@ -64,16 +64,24 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
     try:
         # --- Stage 1: Translation ---
         _set_progress(job_id, "translating", 5, "Translating and segmenting script...")
-        _log_activity(job_id, "brain", "Reading your Tamil script and sending it to GPT-4o for translation")
-        translator = TranslatorService()
-        segments, english_translation = await translator.translate_and_segment(script, job_id)
+
 
         word_count = len(script.split())
         script_duration = max(1, round(word_count / 150))
 
-        _log_activity(job_id, "brain", f"GPT-4o translated {word_count} words and identified {len(segments)} distinct visual segments")
-        for seg in segments:
-            _log_activity(job_id, "sparkles", f"Segment \"{seg.title}\" — visual need: {seg.visual_need}")
+        async def _translator_progress(icon: str, text: str):
+            _log_activity(job_id, icon, text)
+    
+
+        translator = TranslatorService()
+        segments, english_translation = await translator.translate_and_segment(
+            script, job_id, on_progress=_translator_progress,
+        )
+
+        _log_activity(job_id, "brain", f"Translation done! Your ~{script_duration}-minute script has been broken into {len(segments)} scenes, each needing different B-roll footage")
+        for i, seg in enumerate(segments, 1):
+            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}")
+
 
         await storage.store_segments(job_id, segments)
         await storage.update_job_status(
@@ -84,35 +92,51 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         )
 
         # --- Stage 2: Searching ---
-        _set_progress(job_id, "searching", 20, f"Searching for B-roll across {len(segments)} segments...")
-        _log_activity(job_id, "search", f"Starting multi-source search across YouTube, Google, and Gemini for {len(segments)} segments")
+        est_search_sec = len(segments) * 8
+        est_min = est_search_sec // 60
+        est_sec = est_search_sec % 60
+        est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
+        _set_progress(job_id, "searching", 20, f"Searching YouTube, Google, and AI for B-roll clips...")
+        _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})")
+        _log_activity(job_id, "clock", f"For each scene, I search 4 sources: your preferred channels → YouTube → Google → then ask Gemini AI to suggest creative angles I might have missed")
+
         searcher = SearcherService()
+
+        search_start = time.time()
 
         async def search_progress(current: int, total: int, msg: str):
             pct = 20 + int(30 * current / max(total, 1))
-            _set_progress(job_id, "searching", pct, msg)
-            _log_activity(job_id, "globe", msg)
+            elapsed_s = time.time() - search_start
+            if current > 0:
+                per_seg = elapsed_s / current
+                remaining = int(per_seg * (total - current))
+                time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
+            else:
+                time_note = ""
+            _set_progress(job_id, "searching", pct, f"{msg}{time_note}")
+
+        async def search_activity(icon: str, text: str):
+            _log_activity(job_id, icon, text)
 
         candidates_by_segment = await searcher.search_batch(
             segments, job_id=job_id, progress_callback=search_progress,
+            on_activity=search_activity,
         )
 
+        search_elapsed = round(time.time() - search_start, 1)
         total_candidates = sum(len(v) for v in candidates_by_segment.values())
-        _log_activity(job_id, "check", f"Found {total_candidates} candidate videos across all segments")
-        for seg_id, cands in candidates_by_segment.items():
-            if cands:
-                tier1 = sum(1 for c in cands if c.is_preferred_tier1)
-                tier2 = sum(1 for c in cands if c.is_preferred_tier2)
-                tier_info = ""
-                if tier1:
-                    tier_info += f", {tier1} from preferred channels"
-                if tier2:
-                    tier_info += f", {tier2} from trusted channels"
-                _log_activity(job_id, "search", f"{seg_id}: {len(cands)} candidates{tier_info}")
+        _log_activity(job_id, "check", f"Search done in {search_elapsed}s! Found {total_candidates} potential B-roll videos across all {len(segments)} scenes")
+
 
         # --- Stage 3: Matching ---
-        _set_progress(job_id, "matching", 55, "Finding timestamps and peak visual moments...")
-        _log_activity(job_id, "eye", "Now analysing each video to find the exact moment that matches your script")
+        _set_progress(job_id, "matching", 55, "Watching videos and finding the exact moments you need...")
+        est_match_sec = total_candidates * 4
+        est_m_min = est_match_sec // 60
+        est_m_sec = est_match_sec % 60
+        est_m_str = f"{est_m_min}m {est_m_sec}s" if est_m_min else f"{est_m_sec}s"
+        _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})")
+        _log_activity(job_id, "clock", "For each video: reading the transcript → asking AI to find the peak visual moment → checking the timestamp makes sense")
+
         matcher = MatcherService()
         transcriber = TranscriberService()
         ranker = RankerService()
@@ -122,22 +146,29 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
 
         all_segment_results: Dict[str, List[RankedResult]] = {}
         total_segments = len(segments)
+        match_start = time.time()
 
         for seg_idx, segment in enumerate(segments):
             pct = 55 + int(35 * seg_idx / max(total_segments, 1))
+            if seg_idx > 0:
+                per_seg = (time.time() - match_start) / seg_idx
+                remaining = int(per_seg * (total_segments - seg_idx))
+                time_note = f" (~{remaining}s remaining)"
+            else:
+                time_note = ""
             _set_progress(
                 job_id, "matching", pct,
-                f"Processing segment {seg_idx + 1}/{total_segments}: {segment.title}",
+                f"Analyzing scene {seg_idx + 1} of {total_segments}: \"{segment.title}\"{time_note}",
             )
-            _log_activity(job_id, "zap", f"Processing segment {seg_idx + 1}/{total_segments}: \"{segment.title}\"")
+            _log_activity(job_id, "zap", f"Scene {seg_idx + 1}/{total_segments}: \"{segment.title}\" — scanning videos for the perfect clip")
 
             cands = candidates_by_segment.get(segment.segment_id, [])
             if not cands:
-                _log_activity(job_id, "alert", f"No candidates found for \"{segment.title}\" — skipping")
+                _log_activity(job_id, "alert", f"No matching videos were found for \"{segment.title}\" — skipping this scene")
                 all_segment_results[segment.segment_id] = []
                 continue
 
-            _log_activity(job_id, "mic", f"Fetching transcripts for {len(cands)} videos (checking cache → YouTube captions → auto-captions)")
+            _log_activity(job_id, "mic", f"Reading transcripts of {len(cands)} videos to understand what's said at each moment...")
 
             try:
                 matched = await asyncio.wait_for(
@@ -149,21 +180,24 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
                 )
             except asyncio.TimeoutError:
                 logger.warning("Segment %s timed out", segment.segment_id)
-                _log_activity(job_id, "alert", f"Segment \"{segment.title}\" timed out after {segment_timeout}s — moving on")
+                _log_activity(job_id, "alert", f"\"{segment.title}\" took too long ({segment_timeout}s) — moving to next scene")
                 matched = []
 
             if matched:
-                _log_activity(job_id, "eye", f"GPT-4o-mini found timestamps in {len(matched)} of {len(cands)} videos for \"{segment.title}\"")
+                _log_activity(job_id, "eye", f"Found relevant moments in {len(matched)} out of {len(cands)} videos for \"{segment.title}\"")
                 for cand, match in matched[:3]:
+                    ts_min = (match.start_time_seconds or 0) // 60
+                    ts_sec = (match.start_time_seconds or 0) % 60
                     hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""
-                    _log_activity(job_id, "sparkles", f"  {cand.video_title[:60]} @ {match.start_time_seconds}s (confidence: {match.confidence_score:.0%}){hook_text}")
+                    _log_activity(job_id, "sparkles", f"  ▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}")
 
             ranked = ranker.rank_and_filter(matched, segment)
-            _log_activity(job_id, "filter", f"Ranked and filtered to {len(ranked)} top clips for \"{segment.title}\"")
+            _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\"")
             all_segment_results[segment.segment_id] = ranked
+    
 
         # --- Cross-segment dedup ---
-        _log_activity(job_id, "shield", "Removing duplicate clips that appear across multiple segments")
+        _log_activity(job_id, "shield", "Removing duplicate clips — making sure the same video isn't suggested for multiple scenes")
         all_segment_results = ranker.deduplicate_across_segments(all_segment_results)
 
         all_results: List[RankedResult] = []
@@ -184,15 +218,15 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
                 if not all_segment_results.get(seg.segment_id)
             ]
             if empty_segments:
-                _set_progress(job_id, "matching", 92, "Running recovery search for missing segments...")
-                _log_activity(job_id, "alert", f"Only {len(all_results)} results found — below minimum. Re-searching {len(empty_segments)} empty segments with broader queries")
+                _set_progress(job_id, "matching", 92, "Not enough clips found — running a broader search...")
+                _log_activity(job_id, "alert", f"Only {len(all_results)} clips found so far — I need more. Re-searching {len(empty_segments)} scenes with broader, more creative queries")
                 recovery = await searcher.search_batch(
                     empty_segments, job_id=job_id,
                 )
                 for seg in empty_segments:
                     new_cands = recovery.get(seg.segment_id, [])
                     if new_cands:
-                        _log_activity(job_id, "search", f"Recovery found {len(new_cands)} new candidates for \"{seg.title}\"")
+                        _log_activity(job_id, "search", f"Broader search found {len(new_cands)} new videos for \"{seg.title}\"")
                         try:
                             matched = await asyncio.wait_for(
                                 _match_candidates(
@@ -210,8 +244,8 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         minimum_results_met = len(all_results) >= script_duration
 
         # --- Stage 4: Storing ---
-        _set_progress(job_id, "ranking", 95, "Storing results...")
-        _log_activity(job_id, "check", f"Final tally: {len(all_results)} timestamped B-roll clips across {total_segments} segments")
+        _set_progress(job_id, "ranking", 95, "Saving your results...")
+        _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)
@@ -230,6 +264,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         )
         _set_progress(job_id, "completed", 100, "Scouting complete!")
         _log_activity(job_id, "check", "Done! Your B-roll results are ready.")
+
         logger.info("Job %s complete: %d results in %.1fs", job_id, len(all_results), elapsed)
 
     except Exception as exc:
@@ -243,6 +278,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
             processing_time_seconds=elapsed,
         )
         _set_progress(job_id, "failed", 0, "Pipeline failed")
+
 
 
 async def _match_candidates(

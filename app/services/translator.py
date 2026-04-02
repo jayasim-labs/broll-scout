@@ -37,14 +37,29 @@ class TranslatorService:
         self.api_url = "https://api.openai.com/v1/chat/completions"
 
     async def translate_and_segment(
-        self, script: str, job_id: str | None = None
+        self,
+        script: str,
+        job_id: str | None = None,
+        on_progress=None,
     ) -> tuple[list[Segment], str]:
-        """Translate a Tamil script and return (segments, english_translation)."""
+        """Translate a Tamil script and return (segments, english_translation).
+        on_progress(icon, text) is called at each sub-step.
+        """
+        async def _emit(icon: str, text: str):
+            if on_progress:
+                try:
+                    await on_progress(icon, text)
+                except Exception:
+                    pass
+
         translation_model = DEFAULTS.get("translation_model", "gpt-4o")
         special_instructions = DEFAULTS.get("special_instructions", "")
 
         word_count = len(script.split())
         estimated_minutes = max(1, round(word_count / 150))
+
+        await _emit("brain", f"Your script is ~{word_count} words (~{estimated_minutes} minutes of video). Sending to GPT-4o to translate from Tamil to English")
+        await _emit("clock", f"GPT-4o will also break your script into scenes and figure out what B-roll each scene needs. This usually takes 15–30 seconds")
 
         system = SYSTEM_PROMPT
         if special_instructions:
@@ -55,15 +70,15 @@ class TranslatorService:
             {"role": "user", "content": script},
         ]
 
+        await _emit("brain", "Translating, identifying visual moments, and preparing YouTube search queries...")
         data = await self._call_openai(messages, translation_model)
+        await _emit("check", f"GPT-4o finished translating your script")
 
         segments_raw = data.get("segments", [])
+        await _emit("brain", f"Identified {len(segments_raw)} scenes (your {estimated_minutes}-min script needs at least {estimated_minutes} scenes for good B-roll coverage)")
+
         if len(segments_raw) < estimated_minutes:
-            logger.info(
-                "Segment count %d below estimated minutes %d, re-prompting",
-                len(segments_raw),
-                estimated_minutes,
-            )
+            await _emit("alert", f"Only {len(segments_raw)} scenes — not enough for a {estimated_minutes}-min video. Asking GPT-4o to break it into more fine-grained visual moments...")
             messages.append(
                 {"role": "assistant", "content": json.dumps(data)}
             )
@@ -78,6 +93,7 @@ class TranslatorService:
             })
             data = await self._call_openai(messages, translation_model)
             segments_raw = data.get("segments", [])
+            await _emit("check", f"Better! Now {len(segments_raw)} scenes — each focused on a specific visual moment")
 
         cost_tracker = get_cost_tracker()
         if job_id:

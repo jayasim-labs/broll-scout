@@ -28,9 +28,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# AWS SAM
-.aws-sam/
-
 # Python
 .venv/
 __pycache__/

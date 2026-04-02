@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const msg =
       error instanceof DOMException && error.name === "AbortError"
-        ? "Backend timed out — Lambda may be cold-starting. Please retry."
+        ? "Backend timed out — please retry in a moment."
         : "Backend unavailable"
     return NextResponse.json({ detail: msg }, { status: 502 })
   }

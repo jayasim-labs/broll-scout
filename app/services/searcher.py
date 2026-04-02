@@ -43,8 +43,15 @@ class SearcherService:
         return {name.lower() for name in blocked}
 
     async def search_for_segment(
-        self, segment: Segment, job_id: str | None = None
+        self, segment: Segment, job_id: str | None = None, on_progress=None,
     ) -> list[CandidateVideo]:
+        async def _emit(icon: str, text: str):
+            if on_progress:
+                try:
+                    await on_progress(icon, text)
+                except Exception:
+                    pass
+
         tier1_ids: list[str] = self._get_default("preferred_channels_tier1") or []
         tier2_names: list[str] = self._get_default("preferred_channels_tier2") or []
         results_per_query: int = self._get_default("youtube_results_per_query") or 5
@@ -56,39 +63,59 @@ class SearcherService:
         search_metadata: dict[str, dict] = {}
 
         query_text = " ".join(segment.key_terms)
+        seg_label = segment.title[:50]
 
         # (a) Preferred Channel Search (Tier 1)
+        if tier1_ids:
+            await _emit("search", f"🎬 \"{seg_label}\" — checking {len(tier1_ids)} preferred channels first")
         tier1_video_ids = await self._search_tier1_channels(
             tier1_ids, query_text, results_per_query, job_id
         )
         all_video_ids.extend(tier1_video_ids)
+        if tier1_video_ids:
+            await _emit("check", f"  ✓ Found {len(tier1_video_ids)} videos from your preferred channels")
 
         # (b) YouTube Data API (Primary)
+        queries_str = " → ".join(q[:40] for q in segment.search_queries[:3])
+        await _emit("globe", f"🎬 \"{seg_label}\" — searching YouTube for: {queries_str}")
         yt_video_ids = await self._search_youtube_primary(
             segment.search_queries, results_per_query, job_id
         )
         all_video_ids.extend(yt_video_ids)
+        await _emit("check", f"  ✓ YouTube returned {len(yt_video_ids)} videos")
 
         # (c) Google Custom Search API (Secondary)
+        await _emit("globe", f"  Searching Google for documentary & explainer videos...")
         cse_video_ids = await self._search_google_cse(segment.key_terms, job_id)
+        new_from_cse = 0
         for vid in cse_video_ids:
             if vid not in all_video_ids:
                 all_video_ids.append(vid)
+                new_from_cse += 1
+        if new_from_cse:
+            await _emit("check", f"  ✓ Google found {new_from_cse} additional videos not in YouTube results")
 
         # (d) Gemini Query Expansion
+        await _emit("sparkles", f"  Asking Gemini AI to suggest creative search angles I might have missed...")
         initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
         expanded_ids = await self._gemini_expand_and_search(
             segment.summary, initial_titles, results_per_query, job_id
         )
+        new_from_gemini = 0
         for vid in expanded_ids:
             if vid not in all_video_ids:
                 all_video_ids.append(vid)
+                new_from_gemini += 1
+        if new_from_gemini:
+            await _emit("sparkles", f"  ✓ Gemini's creative queries found {new_from_gemini} more videos")
 
         # (e) Batch Video Details
         unique_ids = list(dict.fromkeys(all_video_ids))
         if not unique_ids:
+            await _emit("alert", f"  No videos found for \"{seg_label}\" from any source")
             return []
 
+        await _emit("eye", f"  Loading details for {len(unique_ids)} videos (checking duration, views, channel)...")
         video_details = await get_video_details(unique_ids, job_id=job_id)
         channel_ids = list({v["channel_id"] for v in video_details if v.get("channel_id")})
         channel_stats = await get_channel_stats(channel_ids, job_id=job_id) if channel_ids else {}
@@ -100,6 +127,8 @@ class SearcherService:
 
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
+        blocked_count = 0
+        duration_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -109,6 +138,7 @@ class SearcherService:
 
             duration = v.get("duration_seconds", 0)
             if duration < min_duration or duration > max_duration:
+                duration_filtered += 1
                 continue
 
             ch_id = v.get("channel_id", "")
@@ -118,6 +148,7 @@ class SearcherService:
 
             is_blocked = ch_name.lower() in blocked_set
             if is_blocked:
+                blocked_count += 1
                 continue
 
             candidate = CandidateVideo(
@@ -137,7 +168,14 @@ class SearcherService:
             )
             candidates.append(candidate)
 
-        # (g) Limit to max_candidates_per_segment
+        filter_notes = []
+        if duration_filtered:
+            filter_notes.append(f"{duration_filtered} too short/long")
+        if blocked_count:
+            filter_notes.append(f"{blocked_count} from blocked channels")
+        filter_text = f" (removed {', '.join(filter_notes)})" if filter_notes else ""
+        await _emit("filter", f"  ✓ \"{seg_label}\" → {len(candidates)} usable videos{filter_text}")
+
         return candidates[:max_candidates]
 
     async def search_batch(
@@ -145,6 +183,7 @@ class SearcherService:
         segments: list[Segment],
         job_id: str | None = None,
         progress_callback=None,
+        on_activity=None,
     ) -> dict[str, list[CandidateVideo]]:
         max_concurrent: int = self._get_default("max_concurrent_segments") or 5
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -157,7 +196,9 @@ class SearcherService:
             nonlocal completed
             async with semaphore:
                 try:
-                    candidates = await self.search_for_segment(seg, job_id=job_id)
+                    candidates = await self.search_for_segment(
+                        seg, job_id=job_id, on_progress=on_activity,
+                    )
                 except Exception:
                     logger.exception("Failed to search segment %s", seg.segment_id)
                     candidates = []
@@ -166,8 +207,10 @@ class SearcherService:
                     completed += 1
                     if progress_callback:
                         try:
+                            found = sum(len(v) for v in results.values())
                             await progress_callback(
-                                completed, total, f"Searched {completed}/{total} segments"
+                                completed, total,
+                                f"Searched {completed} of {total} scenes — {found} videos found so far"
                             )
                         except Exception:
                             pass
