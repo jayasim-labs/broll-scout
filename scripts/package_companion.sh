@@ -19,6 +19,11 @@ cp "$PROJECT_DIR/broll-companion/start-companion.bat"  "$DIST_DIR/broll-companio
 cp "$PROJECT_DIR/broll-companion/stop.bat"             "$DIST_DIR/broll-companion/"
 cp "$PROJECT_DIR/broll-companion/update.bat"           "$DIST_DIR/broll-companion/"
 
+# Convert bat files to CRLF (cmd.exe silently crashes on LF-only)
+for bat in "$DIST_DIR/broll-companion"/*.bat; do
+    perl -pi -e 's/\r?\n/\r\n/' "$bat"
+done
+
 cd "$DIST_DIR"
 zip -r broll-companion.zip broll-companion/
 rm -rf broll-companion/

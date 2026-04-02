@@ -44,8 +44,12 @@ echo  Companion: http://127.0.0.1:9876
 echo  Web app:   http://localhost:3000
 echo.
 
-:: Open browser to localhost:3000 after a short delay
-start /min "" cmd /c "timeout /t 4 /nobreak >nul && start "" http://localhost:3000"
+:: Open browser to localhost:3000 after companion starts
+set "OPEN_BROWSER=%TEMP%\broll_open.bat"
+echo @timeout /t 4 /nobreak ^>nul > "%OPEN_BROWSER%"
+echo @start http://localhost:3000 >> "%OPEN_BROWSER%"
+echo @del "%%~f0" >> "%OPEN_BROWSER%"
+start /min "" "%OPEN_BROWSER%"
 
 :: Run companion in foreground (blocks until Ctrl+C or window close)
 python "%COMPANION_DIR%companion.py"

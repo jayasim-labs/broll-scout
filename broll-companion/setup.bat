@@ -127,14 +127,17 @@ echo.
 echo  [3/5] Setting up Python environment...
 
 if not exist "%VENV_DIR%\Scripts\activate.bat" (
-    %PYTHON% -m venv "%VENV_DIR%"
-    if %ERRORLEVEL% neq 0 (
-        echo  ERROR: Failed to create Python environment.
-        pause
-        exit /b 1
-    )
+    %PYTHON% -m venv "%VENV_DIR%" || goto :venv_failed
 )
 echo  OK: Environment ready
+goto :venv_ok
+
+:venv_failed
+echo  ERROR: Failed to create Python environment.
+pause
+exit /b 1
+
+:venv_ok
 
 call "%VENV_DIR%\Scripts\activate.bat"
 python -m pip install --upgrade pip --quiet 2>nul
@@ -142,24 +145,27 @@ python -m pip install --upgrade pip --quiet 2>nul
 echo.
 echo  [4/5] Installing packages (1-3 minutes)...
 echo.
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
-if %ERRORLEVEL% neq 0 (
-    echo  ERROR: Package installation failed. Check your internet connection.
-    pause
-    exit /b 1
-)
+pip install flask flask-cors yt-dlp youtube-transcript-api --quiet || goto :pip_failed
 echo  OK: Core packages installed
+goto :pip_ok
 
+:pip_failed
+echo  ERROR: Package installation failed. Check your internet connection.
+pause
+exit /b 1
+
+:pip_ok
 echo  Installing Whisper AI (speech-to-text)...
 pip install openai-whisper --quiet 2>nul
-if %ERRORLEVEL% neq 0 (
+if !ERRORLEVEL! neq 0 (
     echo  NOTE: Whisper install failed (optional). Videos with captions still work.
-) else (
-    echo  OK: Whisper installed
-    echo  Downloading Whisper model (77 MB, one-time)...
-    python -c "import whisper; whisper.load_model('base'); print('  OK: Model downloaded')" 2>nul
-    if %ERRORLEVEL% neq 0 echo  Skipped. Will download on first use.
+    goto :whisper_done
 )
+echo  OK: Whisper installed
+echo  Downloading Whisper model (77 MB, one-time)...
+python -c "import whisper; whisper.load_model('base'); print('  OK: Model downloaded')" 2>nul
+if !ERRORLEVEL! neq 0 echo  Skipped. Will download on first use.
+:whisper_done
 
 :: ===================================================================
 :: STEP 5: Create desktop shortcut

@@ -179,19 +179,32 @@ if %ERRORLEVEL% equ 0 (
 echo.
 echo  [3/4] Installing companion packages...
 if not exist "%VENV%\Scripts\activate.bat" (
-    %PYTHON% -m venv "%VENV%"
+    %PYTHON% -m venv "%VENV%" || goto :venv_fail
 )
+goto :venv_ok
+:venv_fail
+echo  ERROR: Failed to create Python environment.
+pause
+exit /b 1
+:venv_ok
 call "%VENV%\Scripts\activate.bat"
 python -m pip install --upgrade pip --quiet 2>nul
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
+pip install flask flask-cors yt-dlp youtube-transcript-api --quiet || goto :pip_fail
 echo  OK: Core packages
+goto :pip_ok
+:pip_fail
+echo  ERROR: Package install failed. Check your internet.
+pause
+exit /b 1
+:pip_ok
 pip install openai-whisper --quiet 2>nul
-if %ERRORLEVEL% equ 0 (
-    echo  OK: Whisper installed
-    python -c "import whisper; whisper.load_model('base')" 2>nul
-) else (
+if !ERRORLEVEL! neq 0 (
     echo  NOTE: Whisper install failed (optional).
+    goto :whisper_done
 )
+echo  OK: Whisper installed
+python -c "import whisper; whisper.load_model('base')" 2>nul
+:whisper_done
 
 echo.
 echo  [4/4] Creating desktop shortcut...
@@ -260,7 +273,11 @@ set HOSTNAME=127.0.0.1
 start /min "BRoll-WebApp" "%NODE%" "%SERVER%"
 
 :: Open browser after web app is ready
-start /min "" cmd /c "timeout /t 5 /nobreak >nul && start "" http://localhost:3000"
+set "OPEN_BROWSER=%TEMP%\broll_open.bat"
+echo @timeout /t 5 /nobreak ^>nul > "%OPEN_BROWSER%"
+echo @start http://localhost:3000 >> "%OPEN_BROWSER%"
+echo @del "%%~f0" >> "%OPEN_BROWSER%"
+start /min "" "%OPEN_BROWSER%"
 
 :: Start companion in foreground (port 9876)
 echo  Starting companion on http://127.0.0.1:9876 ...
@@ -283,8 +300,8 @@ BATEOF
 # ---------- stop.bat ----------
 cat > "$PKG_DIR/stop.bat" <<'BATEOF'
 @echo off
-:: Stops all B-Roll Scout processes.
-:: Double-click to force-stop, or called automatically by start.bat.
+:: Stops B-Roll Scout background processes.
+:: Safe to call even if nothing is running.
 
 set QUIET=0
 if /i "%~1"=="/quiet" set QUIET=1
@@ -295,25 +312,39 @@ if %QUIET%==0 (
     echo.
 )
 
-:: Kill web app on port 3000
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":3000 " 2^>nul') do (
-    taskkill /f /pid %%p >nul 2>&1
-    if %QUIET%==0 echo  Stopped web app (PID %%p)
+:: Write port scan results to a temp file to avoid for/f pipe issues
+set "TMPFILE=%TEMP%\broll_stop_pids.txt"
+
+:: Find PIDs on port 9876 (companion)
+netstat -ano 2>nul | findstr "LISTENING" | findstr ":9876 " > "%TMPFILE%" 2>nul
+if exist "%TMPFILE%" (
+    for /f "tokens=5" %%p in (%TMPFILE%) do (
+        if not "%%p"=="" (
+            taskkill /f /pid %%p >nul 2>&1
+            if %QUIET%==0 echo  Stopped companion (PID %%p)
+        )
+    )
 )
 
-:: Kill companion on port 9876
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":9876 " 2^>nul') do (
-    taskkill /f /pid %%p >nul 2>&1
-    if %QUIET%==0 echo  Stopped companion (PID %%p)
+:: Find PIDs on port 3000 (web app)
+netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMPFILE%" 2>nul
+if exist "%TMPFILE%" (
+    for /f "tokens=5" %%p in (%TMPFILE%) do (
+        if not "%%p"=="" (
+            taskkill /f /pid %%p >nul 2>&1
+            if %QUIET%==0 echo  Stopped web app (PID %%p)
+        )
+    )
 )
 
-:: Fallback: kill by window title
+del "%TMPFILE%" >nul 2>&1
+
+:: Fallback: kill by window title (only exact match targets)
 taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
-taskkill /f /fi "WINDOWTITLE eq B-Roll Scout" >nul 2>&1
 
 if %QUIET%==0 (
     echo.
-    echo  All B-Roll Scout processes stopped.
+    echo  Done.
     echo.
     pause
 )
@@ -322,7 +353,7 @@ BATEOF
 # ---------- update.bat ----------
 cat > "$PKG_DIR/update.bat" <<'BATEOF'
 @echo off
-title B-Roll Scout — Update
+title B-Roll Scout - Update
 color 0E
 
 set "COMPANION=%~dp0companion"
@@ -345,7 +376,11 @@ echo  Update complete!
 pause
 BATEOF
 
-echo "  OK: Batch files created"
+# Convert all .bat files to CRLF (cmd.exe silently crashes on LF-only)
+for bat in "$PKG_DIR"/*.bat; do
+    perl -pi -e 's/\r?\n/\r\n/' "$bat"
+done
+echo "  OK: Batch files created (CRLF)"
 
 # ---------------------------------------------------------------
 # 5. Zip it up
