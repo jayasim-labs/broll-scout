@@ -720,9 +720,9 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             help="After deduplication and duration filtering, keep at most this many videos per scene for transcript analysis. Higher = more thorough but slower (each candidate needs a transcript fetch + GPT-4o-mini call)."
           />
           <SliderSetting
-            label="Final results per segment" value={settings.top_results_per_segment} min={1} max={5}
+            label="Clips per scene" value={settings.top_results_per_segment} min={1} max={5}
             onChange={(v) => onChange("top_results_per_segment", v)}
-            help="Number of top-ranked clips to keep per scene in the final output. Set to 1 for a single best clip per scene, or higher to give editors more choices."
+            help="How many clip options to show per scene. Higher = more choices for the editor. 3 is recommended — gives variety without overwhelming."
           />
           <SliderSetting
             label="Target total results" value={settings.total_results_target} min={15} max={60}

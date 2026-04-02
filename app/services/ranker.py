@@ -39,29 +39,16 @@ class RankerService:
         threshold = float(cfg.get("confidence_threshold", 0.4))
         top_n = int(cfg.get("top_results_per_segment", 1))
 
-        discard_short = bool(cfg.get("discard_clips_shorter_than_10s", True))
         min_subs = int(cfg.get("prefer_min_subscribers", 0))
 
         scored: list[tuple[CandidateVideo, MatchResult, float]] = []
         for cand, match in candidates:
             if cand.is_blocked:
                 continue
-            if match.start_time_seconds == 0 and match.transcript_excerpt:
-                excerpt_lower = (match.transcript_excerpt[:200] or "").lower()
-                if not any(t.lower() in excerpt_lower for t in segment.key_terms):
-                    continue
             if not match.context_match_valid:
                 continue
-            if discard_short and match.start_time_seconds is not None and match.end_time_seconds is not None:
-                if (match.end_time_seconds - match.start_time_seconds) < 10:
-                    continue
-            if match.confidence_score < threshold:
-                has_others = any(
-                    m.confidence_score >= threshold and m.start_time_seconds is not None
-                    for _, m in candidates
-                )
-                if has_others:
-                    continue
+            if match.confidence_score <= 0 and match.start_time_seconds is None:
+                continue
 
             if match.source_flag == TranscriptSource.NONE:
                 relevance = 0.3
@@ -124,20 +111,17 @@ class RankerService:
     def deduplicate_across_segments(
         self, all_results: dict[str, list[RankedResult]]
     ) -> dict[str, list[RankedResult]]:
-        video_best: dict[str, tuple[str, float]] = {}
-
-        for seg_id, results in all_results.items():
-            for r in results:
-                existing = video_best.get(r.video_id)
-                if existing is None or r.relevance_score > existing[1]:
-                    video_best[r.video_id] = (seg_id, r.relevance_score)
-
+        """Light dedup: allow same video in different scenes if timestamps differ.
+        Only remove exact duplicates (same video + overlapping timestamp)."""
+        seen: set[tuple[str, int]] = set()
         deduped: dict[str, list[RankedResult]] = {}
+
         for seg_id, results in all_results.items():
             filtered = []
             for r in results:
-                best_seg, _ = video_best.get(r.video_id, (seg_id, 0))
-                if best_seg == seg_id:
+                key = (r.video_id, (r.start_time_seconds or 0) // 30)
+                if key not in seen:
+                    seen.add(key)
                     filtered.append(r)
             deduped[seg_id] = filtered if filtered else results[:1]
 

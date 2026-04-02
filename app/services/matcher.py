@@ -138,8 +138,7 @@ class MatcherService:
             end = match.end_time_seconds
 
         if start is not None and end is not None and (end - start) < 10:
-            match.context_match_valid = False
-            return match
+            match.confidence_score = max(0.0, match.confidence_score - 0.1)
 
         if verify_end_screen and start is not None and video_duration_seconds > 0:
             if start > video_duration_seconds - 30:
