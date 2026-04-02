@@ -88,6 +88,32 @@ class TranscriberService:
         except Exception:
             logger.info("Agent transcript fetch also failed for %s", video_id)
 
+        # Last resort: Whisper transcription via local companion
+        max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
+        if video_duration_seconds and video_duration_seconds <= max_whisper_duration:
+            try:
+                whisper_result = await self._whisper_via_agent(video_id, video_duration_seconds)
+                if whisper_result:
+                    await storage.store_transcript(
+                        video_id=video_id,
+                        transcript_text=whisper_result["text"],
+                        source=TranscriptSource.WHISPER,
+                        language="en",
+                        duration=video_duration_seconds,
+                    )
+                    logger.info("Whisper transcript stored for %s", video_id)
+                    return Transcript(
+                        video_id=video_id,
+                        transcript_text=whisper_result["text"],
+                        transcript_source=TranscriptSource.WHISPER,
+                        language="en",
+                        video_duration_seconds=video_duration_seconds,
+                    )
+            except Exception:
+                logger.info("Whisper transcription also failed for %s", video_id)
+        else:
+            logger.info("Skipping Whisper for %s — duration %ds exceeds max %ds", video_id, video_duration_seconds, max_whisper_duration)
+
         return no_transcript
 
     async def _fetch_via_agent(self, video_id: str) -> dict | None:
@@ -111,6 +137,23 @@ class TranscriberService:
         }
         source = source_map.get(source_str, TranscriptSource.YOUTUBE_MANUAL)
         return {"text": transcript_text, "source": source}
+
+    async def _whisper_via_agent(self, video_id: str, duration_seconds: int) -> dict | None:
+        """Ask the local companion to download audio and run Whisper transcription."""
+        max_dur_min = DEFAULTS.get("whisper_max_video_duration_min", 60)
+        task_id = await agent_queue.create_task("whisper", {
+            "video_id": video_id,
+            "max_duration_min": max_dur_min,
+        })
+        timeout = min(300, max(120, duration_seconds))
+        results = await agent_queue.wait_for_result(task_id, timeout=timeout)
+        if not results:
+            return None
+        data = results[0]
+        transcript_text = data.get("transcript")
+        if not transcript_text:
+            return None
+        return {"text": transcript_text}
 
     async def store_whisper_result(
         self,

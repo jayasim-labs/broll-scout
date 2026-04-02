@@ -1156,6 +1156,151 @@ class TestTranscriberAgentFallback:
 
 
 # ---------------------------------------------------------------------------
+# 19c. Transcriber — Whisper fallback via companion agent
+# ---------------------------------------------------------------------------
+
+class TestTranscriberWhisperFallback:
+
+    @pytest.mark.asyncio
+    async def test_whisper_fallback_when_no_captions(self):
+        """When both direct and agent transcript fetch fail, Whisper should be attempted."""
+        from app.services.transcriber import TranscriberService
+        from app.models.schemas import TranscriptSource
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        agent_no_transcript = [{"video_id": "vid789", "transcript": None, "source": "no_transcript"}]
+        whisper_result = [{"video_id": "vid789", "transcript": "0:00 Whisper transcription\n0:05 More text", "source": "whisper_transcription"}]
+
+        call_count = {"n": 0}
+        async def mock_create_task(task_type, payload):
+            call_count["n"] += 1
+            return f"task-{call_count['n']}"
+
+        async def mock_wait_for_result(task_id, timeout=60):
+            if task_id == "task-1":
+                return agent_no_transcript
+            elif task_id == "task-2":
+                return whisper_result
+            return []
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.create_task", side_effect=mock_create_task), \
+             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result):
+
+            mock_api.fetch.side_effect = Exception("RequestBlocked")
+            mock_api.list.side_effect = Exception("RequestBlocked")
+
+            ts = TranscriberService()
+            result = await ts.get_transcript("vid789", video_duration_seconds=600)
+
+            assert result.transcript_text is not None
+            assert "Whisper transcription" in result.transcript_text
+            assert result.transcript_source == TranscriptSource.WHISPER
+
+    @pytest.mark.asyncio
+    async def test_whisper_skipped_for_long_videos(self):
+        """Whisper should be skipped if video duration exceeds max."""
+        from app.services.transcriber import TranscriberService
+        from app.models.schemas import TranscriptSource
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        agent_no_transcript = [{"video_id": "vid_long", "transcript": None, "source": "no_transcript"}]
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-x"), \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=agent_no_transcript):
+
+            mock_api.fetch.side_effect = Exception("RequestBlocked")
+            mock_api.list.side_effect = Exception("RequestBlocked")
+
+            ts = TranscriberService()
+            # 7200s = 120 min, exceeds default 60 min max
+            result = await ts.get_transcript("vid_long", video_duration_seconds=7200)
+
+            assert result.transcript_source == TranscriptSource.NONE
+
+    @pytest.mark.asyncio
+    async def test_whisper_result_is_cached(self):
+        """Whisper transcription results should be stored via storage.store_transcript."""
+        from app.services.transcriber import TranscriberService
+        from app.models.schemas import TranscriptSource
+
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
+
+        agent_no_transcript = [{"video_id": "vid_cache", "transcript": None, "source": "no_transcript"}]
+        whisper_result = [{"video_id": "vid_cache", "transcript": "0:00 Cached text", "source": "whisper_transcription"}]
+
+        call_count = {"n": 0}
+        async def mock_create_task(task_type, payload):
+            call_count["n"] += 1
+            return f"task-{call_count['n']}"
+
+        async def mock_wait_for_result(task_id, timeout=60):
+            if task_id == "task-1":
+                return agent_no_transcript
+            elif task_id == "task-2":
+                return whisper_result
+            return []
+
+        with patch("app.services.transcriber._ytt_api") as mock_api, \
+             patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.create_task", side_effect=mock_create_task), \
+             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result):
+
+            mock_api.fetch.side_effect = Exception("RequestBlocked")
+            mock_api.list.side_effect = Exception("RequestBlocked")
+
+            ts = TranscriberService()
+            await ts.get_transcript("vid_cache", video_duration_seconds=600)
+
+            # store_transcript should have been called with Whisper source
+            whisper_store_calls = [
+                c for c in mock_storage.store_transcript.call_args_list
+                if c.kwargs.get("source") == TranscriptSource.WHISPER
+                or (len(c.args) > 2 and c.args[2] == TranscriptSource.WHISPER)
+            ]
+            assert len(whisper_store_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 19d. Gemini expansion toggle
+# ---------------------------------------------------------------------------
+
+class TestGeminiExpansionToggle:
+
+    def test_default_gemini_expansion_off(self):
+        from app.config import DEFAULTS
+        assert DEFAULTS["enable_gemini_expansion"] is False
+
+    def test_searcher_skips_gemini_when_off(self):
+        from app.services.searcher import SearcherService
+        svc = SearcherService(pipeline_settings={"enable_gemini_expansion": False})
+        assert svc._get("enable_gemini_expansion") is False
+
+    def test_searcher_enables_gemini_when_on(self):
+        from app.services.searcher import SearcherService
+        svc = SearcherService(pipeline_settings={"enable_gemini_expansion": True})
+        assert svc._get("enable_gemini_expansion") is True
+
+    def test_job_create_request_accepts_gemini_flag(self):
+        from app.models.schemas import JobCreateRequest
+        req = JobCreateRequest(script="x" * 200, enable_gemini_expansion=True)
+        assert req.enable_gemini_expansion is True
+
+    def test_job_create_request_defaults_gemini_off(self):
+        from app.models.schemas import JobCreateRequest
+        req = JobCreateRequest(script="x" * 200)
+        assert req.enable_gemini_expansion is False
+
+
+# ---------------------------------------------------------------------------
 # 20. Full pipeline mock — search -> match -> rank -> clip
 # ---------------------------------------------------------------------------
 

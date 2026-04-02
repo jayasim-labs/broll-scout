@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import re
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -21,7 +20,6 @@ from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 
@@ -178,7 +176,7 @@ async def _dispatch_channel_stats(
 # ---------------------------------------------------------------------------
 
 class SearcherService:
-    """Searches YouTube, Google CSE, and Gemini for candidate B-roll videos."""
+    """Searches YouTube/yt-dlp and optionally Gemini for candidate B-roll videos."""
 
     def __init__(self, pipeline_settings: dict | None = None):
         self._settings = get_settings()
@@ -263,20 +261,8 @@ class SearcherService:
         all_video_ids.extend(_collect(yt_results))
         await _emit("check", f"  ✓ {source_name} returned {len(yt_results)} videos")
 
-        # (c) Google Custom Search API (Secondary — only when using YouTube API)
-        if backend != "ytdlp_only":
-            await _emit("globe", f"  Searching Google for documentary & explainer videos...")
-            cse_video_ids = await self._search_google_cse(segment.key_terms, job_id)
-            new_from_cse = 0
-            for vid in cse_video_ids:
-                if vid not in all_video_ids:
-                    all_video_ids.append(vid)
-                    new_from_cse += 1
-            if new_from_cse:
-                await _emit("check", f"  ✓ Google found {new_from_cse} additional videos not in YouTube results")
-
-        # (d) Gemini Query Expansion
-        if not (qt.is_quota_exhausted and backend == "auto") or backend == "ytdlp_only":
+        # (c) Gemini Query Expansion (optional, off by default)
+        if self._get("enable_gemini_expansion"):
             await _emit("sparkles", f"  Asking Gemini AI to suggest creative search angles I might have missed...")
             initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
             expanded_results = await self._gemini_expand_and_search_full(
@@ -473,77 +459,6 @@ class SearcherService:
             except Exception:
                 logger.warning("Search failed for query: %s", q)
         return all_results
-
-    # ── Google CSE search ───────────────────────────────────────────────
-
-    async def _search_google_cse(
-        self, key_terms: list[str], job_id: str | None
-    ) -> list[str]:
-        api_key = self._settings.google_search_api_key
-        cx = self._settings.google_search_cx
-        if not api_key or not cx:
-            logger.info("Google CSE skipped — API key or CX not configured")
-            return []
-
-        queries = []
-        for term in key_terms:
-            queries.append(f"{term} documentary YouTube")
-            queries.append(f"{term} explainer video")
-
-        video_ids: list[str] = []
-        cse_failed = False
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for q in queries:
-                if cse_failed:
-                    break
-                try:
-                    resp = await client.get(
-                        GOOGLE_CSE_URL,
-                        params={"key": api_key, "cx": cx, "q": q},
-                    )
-                    if resp.status_code == 403:
-                        body = resp.json() if resp.content else {}
-                        errors = body.get("error", {}).get("errors", [])
-                        reasons = [e.get("reason", "") for e in errors]
-                        if any(r in ("quotaExceeded", "dailyLimitExceeded") for r in reasons):
-                            logger.warning("Google CSE API quota exceeded — skipping remaining CSE queries")
-                            cse_failed = True
-                            break
-                    if resp.status_code == 400:
-                        logger.error("Google CSE returned 400 — CX ID '%s' may be invalid", cx)
-                        cse_failed = True
-                        break
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if job_id:
-                        self._cost_tracker.track_google_cse(job_id)
-                    for item in data.get("items", []):
-                        vid = self._extract_youtube_id(item.get("link", ""))
-                        if vid and vid not in video_ids:
-                            video_ids.append(vid)
-                except httpx.HTTPStatusError as exc:
-                    logger.warning("Google CSE HTTP %d for query: %s", exc.response.status_code, q)
-                    if exc.response.status_code in (401, 403):
-                        cse_failed = True
-                        break
-                except Exception:
-                    logger.warning("Google CSE search failed for query: %s", q)
-        return video_ids
-
-    @staticmethod
-    def _extract_youtube_id(url: str) -> str | None:
-        try:
-            parsed = urlparse(url)
-            if "youtube.com" in parsed.netloc:
-                qs = parse_qs(parsed.query)
-                vid = qs.get("v", [None])[0]
-                if vid:
-                    return vid
-            if "youtu.be" in parsed.netloc:
-                return parsed.path.lstrip("/").split("/")[0] or None
-        except Exception:
-            pass
-        return None
 
     # ── Gemini query expansion ──────────────────────────────────────────
 

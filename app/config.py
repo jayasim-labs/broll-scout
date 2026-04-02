@@ -62,6 +62,8 @@ DEFAULTS = {
     "youtube_api_batch_size": 50,
     "low_result_threshold": 20,
     "search_backend": "auto",
+    "enable_gemini_expansion": False,
+    "min_total_results_for_long_scripts": 30,
 
     "preferred_channels_tier1": [
         "UC_5jTJ1XNWcq9FOWX6Q7hCg",

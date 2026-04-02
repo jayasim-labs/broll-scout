@@ -1,18 +1,21 @@
 "use client"
 
 import { useState, useMemo } from "react"
-import { Search, Loader2, Upload } from "lucide-react"
+import { Search, Loader2, Upload, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
 
 interface ScriptInputProps {
-  onSubmit: (script: string) => void
+  onSubmit: (script: string, options?: { enableGeminiExpansion: boolean }) => void
   isLoading: boolean
 }
 
 export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
   const [script, setScript] = useState("")
+  const [enableGeminiExpansion, setEnableGeminiExpansion] = useState(false)
 
   const charCount = script.length
   const wordCount = useMemo(() => {
@@ -24,7 +27,7 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
 
   const handleSubmit = () => {
     if (charCount < 100) return
-    onSubmit(script)
+    onSubmit(script, { enableGeminiExpansion })
   }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -89,7 +92,23 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
             )}
           </div>
 
-          <div className="flex justify-end pt-2">
+          <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center gap-3">
+              <Switch
+                id="gemini-toggle"
+                checked={enableGeminiExpansion}
+                onCheckedChange={setEnableGeminiExpansion}
+              />
+              <Label htmlFor="gemini-toggle" className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer">
+                <Sparkles className="w-3.5 h-3.5" />
+                Gemini AI Expansion
+              </Label>
+              {enableGeminiExpansion && (
+                <span className="text-[10px] text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                  Slower but finds more creative B-roll
+                </span>
+              )}
+            </div>
             <Button
               onClick={handleSubmit}
               disabled={isLoading || charCount < 100}

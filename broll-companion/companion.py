@@ -75,6 +75,8 @@ def execute():
         results = ytdlp_video_details(payload["video_ids"])
     elif task_type == "transcript":
         results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
+    elif task_type == "whisper":
+        results = whisper_transcribe(payload["video_id"], payload.get("max_duration_min", 60))
     else:
         return jsonify({"error": f"Unknown task type: {task_type}"}), 400
 
@@ -184,6 +186,57 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
     except Exception as e:
         log.warning("Transcript fetch failed for %s: %s", video_id, e)
         return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+
+def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
+    """Download audio via yt-dlp, transcribe with OpenAI Whisper locally."""
+    import tempfile
+    import os
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        cmd = [
+            "yt-dlp", url,
+            "-x", "--audio-format", "mp3",
+            "--no-playlist", "--no-warnings",
+            "-o", audio_path,
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0 or not os.path.exists(audio_path):
+                log.warning("yt-dlp audio download failed for %s: %s", video_id, proc.stderr[:300])
+                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+        except subprocess.TimeoutExpired:
+            log.warning("yt-dlp audio download timed out for %s", video_id)
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+
+        try:
+            import whisper
+        except ImportError:
+            log.error("openai-whisper not installed. Run: pip install openai-whisper")
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_not_installed"}]
+
+        try:
+            model = whisper.load_model("base")
+            result = model.transcribe(audio_path, language="en")
+        except Exception as e:
+            log.error("Whisper transcription failed for %s: %s", video_id, e)
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+
+        segments = result.get("segments", [])
+        lines = []
+        for seg in segments:
+            total_seconds = int(seg.get("start", 0))
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            text = seg.get("text", "").strip()
+            if text:
+                lines.append(f"{minutes}:{seconds:02d} {text}")
+
+        transcript_text = "\n".join(lines)
+        return [{"video_id": video_id, "transcript": transcript_text, "source": "whisper_transcription"}]
 
 
 def _normalize(data: dict) -> dict:

@@ -25,6 +25,7 @@ class TranscriptSource(str, Enum):
 class JobCreateRequest(BaseModel):
     script: str = Field(..., min_length=100)
     editor_id: str = Field(default="default_editor")
+    enable_gemini_expansion: bool = Field(default=False)
 
     @field_validator("script")
     @classmethod

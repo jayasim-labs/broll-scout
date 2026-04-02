@@ -90,7 +90,10 @@ async def create_job(
     _verify_key(x_api_key)
     job_id = str(uuid.uuid4())
 
-    task = asyncio.create_task(run_pipeline(job_id, body.script, body.editor_id))
+    task = asyncio.create_task(run_pipeline(
+        job_id, body.script, body.editor_id,
+        enable_gemini_expansion=body.enable_gemini_expansion,
+    ))
     _running_tasks[job_id] = task
     task.add_done_callback(lambda t: _running_tasks.pop(job_id, None))
 

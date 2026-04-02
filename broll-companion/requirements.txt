@@ -2,3 +2,4 @@ flask>=3.0.0
 flask-cors>=4.0.0
 yt-dlp>=2024.1.0
 youtube-transcript-api>=1.2.0
+openai-whisper>=20231117

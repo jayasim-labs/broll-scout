@@ -51,13 +51,19 @@ def _log_activity(job_id: str, icon: str, text: str) -> None:
     _progress[job_id] = existing
 
 
-async def run_pipeline(job_id: str, script: str, editor_id: str = "default_editor") -> None:
+async def run_pipeline(
+    job_id: str,
+    script: str,
+    editor_id: str = "default_editor",
+    enable_gemini_expansion: bool = False,
+) -> None:
     """Full pipeline: translate -> search -> match -> rank -> store."""
     storage = get_storage()
     cost_tracker = get_cost_tracker()
 
     settings_svc = get_settings_service()
     pipeline_cfg = await settings_svc.get_all_settings()
+    pipeline_cfg["enable_gemini_expansion"] = enable_gemini_expansion
 
     start_time = time.time()
     script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
@@ -103,7 +109,10 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
         _set_progress(job_id, "searching", 20, f"Searching YouTube, Google, and AI for B-roll clips...")
         _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})")
-        _log_activity(job_id, "clock", f"For each scene, I search 4 sources: your preferred channels → YouTube → Google → then ask Gemini AI to suggest creative angles I might have missed")
+        sources = "preferred channels → YouTube/yt-dlp"
+        if enable_gemini_expansion:
+            sources += " → Gemini AI creative expansion"
+        _log_activity(job_id, "clock", f"For each scene, I search: {sources}")
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
 
@@ -135,6 +144,42 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         if empty_segments:
             _log_activity(job_id, "alert", f"{empty_segments} of {len(segments)} scenes had no candidate videos from search")
         logger.info("Job %s search: %d candidates, %d empty segments", job_id, total_candidates, empty_segments)
+
+        # --- Retry search for long scripts until we have enough candidates ---
+        min_target = pipeline_cfg.get("min_total_results_for_long_scripts", 30)
+        max_retries = 3
+        retry_round = 0
+        if script_duration >= 25 and total_candidates < min_target:
+            _log_activity(job_id, "alert", f"Long script (~{script_duration} min) needs at least {min_target} candidate videos, but only {total_candidates} found so far — retrying sparse scenes")
+
+        while script_duration >= 25 and total_candidates < min_target and retry_round < max_retries:
+            retry_round += 1
+            sparse_segments = [
+                seg for seg in segments
+                if len(candidates_by_segment.get(seg.segment_id, [])) < 3
+            ]
+            if not sparse_segments:
+                break
+
+            _log_activity(job_id, "search", f"Retry round {retry_round}: re-searching {len(sparse_segments)} scenes that have <3 candidates")
+            _set_progress(job_id, "searching", 20 + retry_round * 5, f"Retry search round {retry_round} for sparse scenes...")
+
+            retry_results = await searcher.search_batch(
+                sparse_segments, job_id=job_id, progress_callback=search_progress,
+                on_activity=search_activity,
+            )
+            for seg_id, new_cands in retry_results.items():
+                existing = candidates_by_segment.get(seg_id, [])
+                existing_ids = {c.video_id for c in existing}
+                for c in new_cands:
+                    if c.video_id not in existing_ids:
+                        existing.append(c)
+                        existing_ids.add(c.video_id)
+                candidates_by_segment[seg_id] = existing
+
+            total_candidates = sum(len(v) for v in candidates_by_segment.values())
+            _log_activity(job_id, "check", f"After retry {retry_round}: {total_candidates} total candidates across {len(segments)} scenes")
+            logger.info("Job %s retry %d: %d total candidates", job_id, retry_round, total_candidates)
 
 
         # --- Stage 3: Matching ---

@@ -89,13 +89,17 @@ export default function HomePage() {
     return () => clearInterval(interval)
   }, [viewState, currentJobId, pollJobStatus])
 
-  const handleSubmit = async (script: string) => {
+  const handleSubmit = async (script: string, options?: { enableGeminiExpansion: boolean }) => {
     setIsLoading(true)
     try {
       const response = await fetch(`${API_BASE}/jobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ script, editor_id: 'default_editor' })
+        body: JSON.stringify({
+          script,
+          editor_id: 'default_editor',
+          enable_gemini_expansion: options?.enableGeminiExpansion ?? false,
+        })
       })
 
       if (!response.ok) {
