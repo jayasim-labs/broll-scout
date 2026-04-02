@@ -240,6 +240,12 @@ echo.
 
 :: Hand off to start.bat in THIS window
 call "%ROOT%start.bat"
+
+:: Safety net: if start.bat exited unexpectedly, keep window open
+echo.
+echo  Something went wrong. The window should not have reached this point.
+echo  Press any key to close...
+pause >nul
 BATEOF
 
 # ---------- start.bat ----------
@@ -261,7 +267,7 @@ set "VENV=%COMPANION%\.venv"
 set "NODE=%ROOT%node\node.exe"
 set "SERVER=%ROOT%webapp\server.js"
 
-:: Kill any previous instances (prevents duplicates)
+:: Kill any previous background instances (prevents duplicates)
 call "%ROOT%stop.bat" /quiet 2>nul
 
 :: First-time: run setup if venv missing
@@ -270,7 +276,7 @@ if exist "%VENV%\Scripts\activate.bat" goto pkg_venv_ready
 echo  First launch detected. Running setup...
 echo.
 call "%ROOT%setup.bat"
-goto pkg_done
+goto end_pause
 
 :pkg_venv_ready
 call "%VENV%\Scripts\activate.bat"
@@ -281,7 +287,7 @@ if not errorlevel 1 goto pkg_deps_ok
 
 echo  Dependencies missing. Running setup...
 call "%ROOT%setup.bat"
-goto pkg_done
+goto end_pause
 
 :pkg_deps_ok
 echo  Updating yt-dlp...
@@ -303,6 +309,12 @@ echo start http://localhost:3000 >> "%OPEN_BROWSER%"
 echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
 start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
 
+:: Verify companion.py exists
+if not exist "%COMPANION%\companion.py" (
+    echo  ERROR: companion.py not found in %COMPANION%
+    goto end_pause
+)
+
 :: Start companion in foreground (port 9876)
 echo  Starting companion on http://127.0.0.1:9876 ...
 echo.
@@ -314,7 +326,7 @@ python "%COMPANION%\companion.py"
 :: Companion exited -- clean up background Node.js
 call "%ROOT%stop.bat" /quiet 2>nul
 
-:pkg_done
+:end_pause
 echo.
 echo  B-Roll Scout stopped.
 echo  Press any key to close...
@@ -344,13 +356,15 @@ taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
 taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" >nul 2>&1
 
 :: Also kill any orphaned Node on port 3000 (in case title-based kill missed it)
-set "TMP_PIDS=%TEMP%\broll_pids.tmp"
+set "TMP_PIDS=%TEMP%\~brpid.tmp"
 netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMP_PIDS%" 2>nul
-for /f "tokens=5" %%P in (%TMP_PIDS%) do (
-    taskkill /f /pid %%P >nul 2>&1
-    if "%QUIET%"=="0" echo  Stopped web app PID %%P
+if exist "%TMP_PIDS%" (
+    for /f "usebackq tokens=5" %%P in ("%TMP_PIDS%") do (
+        taskkill /f /pid %%P >nul 2>&1
+        if "%QUIET%"=="0" echo  Stopped web app PID %%P
+    )
+    del "%TMP_PIDS%" >nul 2>&1
 )
-del "%TMP_PIDS%" >nul 2>&1
 
 if "%QUIET%"=="0" (
     echo.

@@ -192,3 +192,9 @@ echo.
 
 :: Hand off to start-companion.bat in THIS window
 call "%COMPANION_DIR%start-companion.bat"
+
+:: Safety net: if start-companion.bat exited unexpectedly, keep window open
+echo.
+echo  Something went wrong. The window should not have reached this point.
+echo  Press any key to close...
+pause >nul

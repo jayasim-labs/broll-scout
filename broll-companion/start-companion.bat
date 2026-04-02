@@ -12,7 +12,7 @@ echo.
 set "COMPANION_DIR=%~dp0"
 set "VENV_DIR=%COMPANION_DIR%.venv"
 
-:: Kill any previous instances (prevents duplicates)
+:: Kill any previous background instances (prevents duplicates)
 call "%COMPANION_DIR%stop.bat" /quiet 2>nul
 
 :: First-time: run setup if venv missing
@@ -21,7 +21,7 @@ if exist "%VENV_DIR%\Scripts\activate.bat" goto venv_ready
 echo  First launch detected. Running setup...
 echo.
 call "%COMPANION_DIR%setup.bat"
-goto done
+goto end_pause
 
 :venv_ready
 :: Activate venv
@@ -33,7 +33,7 @@ if not errorlevel 1 goto deps_ok
 
 echo  Dependencies missing. Running setup...
 call "%COMPANION_DIR%setup.bat"
-goto done
+goto end_pause
 
 :deps_ok
 :: Auto-update yt-dlp (YouTube changes frequently)
@@ -54,13 +54,21 @@ echo start http://localhost:3000 >> "%OPEN_BROWSER%"
 echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
 start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
 
+:: Verify companion.py exists before running
+if not exist "%COMPANION_DIR%companion.py" (
+    echo  ERROR: companion.py not found in %COMPANION_DIR%
+    goto end_pause
+)
+
 :: Run companion in foreground (blocks until Ctrl+C or window close)
+echo  Starting companion server...
+echo.
 python "%COMPANION_DIR%companion.py"
 
-:: Companion exited - clean up
+:: Companion exited - clean up background processes
 call "%COMPANION_DIR%stop.bat" /quiet 2>nul
 
-:done
+:end_pause
 echo.
 echo  B-Roll Scout stopped.
 echo  Press any key to close...

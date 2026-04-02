@@ -18,14 +18,17 @@ taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
 :: Kill browser-opener helper
 taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" >nul 2>&1
 
-:: Also kill any orphaned Node on port 3000 (in case title-based kill missed it)
-set "TMP_PIDS=%TEMP%\broll_pids.tmp"
+:: Also kill any orphaned Node on port 3000
+:: Use a short temp filename in %TEMP% root to avoid spaces-in-path issues
+set "TMP_PIDS=%TEMP%\~brpid.tmp"
 netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMP_PIDS%" 2>nul
-for /f "tokens=5" %%P in (%TMP_PIDS%) do (
-    taskkill /f /pid %%P >nul 2>&1
-    if "%QUIET%"=="0" echo  Stopped web app PID %%P
+if exist "%TMP_PIDS%" (
+    for /f "usebackq tokens=5" %%P in ("%TMP_PIDS%") do (
+        taskkill /f /pid %%P >nul 2>&1
+        if "%QUIET%"=="0" echo  Stopped web app PID %%P
+    )
+    del "%TMP_PIDS%" >nul 2>&1
 )
-del "%TMP_PIDS%" >nul 2>&1
 
 if "%QUIET%"=="0" (
     echo.
