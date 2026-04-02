@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 import logging
 
@@ -42,9 +43,11 @@ def _verify_key(x_api_key: str | None) -> None:
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
-    db_status = "not_configured"
     settings = get_settings()
-    if settings.aws_access_key_id and settings.aws_secret_access_key:
+    on_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    explicit_aws = bool(settings.aws_access_key_id and settings.aws_secret_access_key)
+    db_status = "not_configured"
+    if on_lambda or explicit_aws:
         try:
             storage = get_storage()
             await storage.list_jobs(limit=1)
