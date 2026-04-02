@@ -61,6 +61,7 @@ DEFAULTS = {
     "retry_backoff_base_sec": 1,
     "youtube_api_batch_size": 50,
     "low_result_threshold": 20,
+    "search_backend": "auto",
 
     "preferred_channels_tier1": [
         "UC_5jTJ1XNWcq9FOWX6Q7hCg",

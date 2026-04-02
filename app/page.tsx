@@ -7,6 +7,7 @@ import { ScriptInput } from "@/components/script-input"
 import { ProgressTracker } from "@/components/progress-tracker"
 import { ResultsDisplay } from "@/components/results-display"
 import { JobHistory } from "@/components/job-history"
+import { AgentOnboardingBanner, useAgentLoop } from "@/components/agent-status"
 import type { JobResponse, JobProgress, JobSummary } from "@/lib/types"
 
 const API_BASE = '/api/v1'
@@ -25,6 +26,7 @@ export default function HomePage() {
   })
   const [job, setJob] = useState<JobResponse | null>(null)
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
+  useAgentLoop(viewState === 'processing')
 
   useEffect(() => {
     loadJobHistory()
@@ -64,6 +66,10 @@ export default function HomePage() {
         return true
       } else if (status.status === 'failed') {
         toast.error('Job failed')
+        resetToInput()
+        return true
+      } else if (status.status === 'cancelled') {
+        toast.info('Job was cancelled')
         resetToInput()
         return true
       }
@@ -127,8 +133,22 @@ export default function HomePage() {
     }
   }
 
-  const handleCancel = () => {
-    toast.info('Job cancelled')
+  const handleCancel = async () => {
+    if (!currentJobId) {
+      resetToInput()
+      return
+    }
+    try {
+      const resp = await fetch(`/api/v1/jobs/${currentJobId}/cancel`, { method: 'POST' })
+      const data = await resp.json()
+      if (data.cancelled) {
+        toast.info('Job cancelled — pipeline stopped')
+      } else {
+        toast.info(data.message || 'Job already finished')
+      }
+    } catch {
+      toast.warning('Could not reach server, resetting locally')
+    }
     resetToInput()
   }
 
@@ -165,6 +185,7 @@ export default function HomePage() {
         </aside>
 
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-8 max-w-5xl">
+          <AgentOnboardingBanner />
           {viewState === 'input' && (
             <ScriptInput onSubmit={handleSubmit} isLoading={isLoading} />
           )}

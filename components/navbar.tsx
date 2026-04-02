@@ -4,6 +4,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Video, Settings, Home } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { AgentStatusBadge } from "@/components/agent-status"
 
 export function Navbar() {
   const pathname = usePathname()
@@ -23,6 +24,7 @@ export function Navbar() {
           </Link>
 
           <div className="flex items-center gap-4">
+            <AgentStatusBadge />
             <Link
               href="/"
               className={cn(

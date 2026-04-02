@@ -1,6 +1,6 @@
 "use client"
 
-import { Clock, CheckCircle, XCircle, Loader2, FileText } from "lucide-react"
+import { Clock, CheckCircle, XCircle, Loader2, FileText, Ban } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { JobSummary } from "@/lib/types"
 
@@ -59,6 +59,8 @@ function StatusIcon({ status }: { status: string }) {
       return <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
     case "failed":
       return <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+    case "cancelled":
+      return <Ban className="w-4 h-4 text-orange-500 flex-shrink-0" />
     case "processing":
       return <Loader2 className="w-4 h-4 text-yellow-500 animate-spin flex-shrink-0" />
     default:

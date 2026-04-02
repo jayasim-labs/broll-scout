@@ -1,7 +1,7 @@
 import re
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import httpx
 
@@ -15,16 +15,9 @@ TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRYABLE_STATUS_CODES = {500, 503}
 
-_quota_exhausted = False
 
-
-def is_quota_exhausted() -> bool:
-    return _quota_exhausted
-
-
-def reset_quota_flag() -> None:
-    global _quota_exhausted
-    _quota_exhausted = False
+class YouTubeQuotaExceeded(Exception):
+    """Raised when the YouTube Data API returns a 403 quotaExceeded error."""
 
 
 def _get_batch_size() -> int:
@@ -48,11 +41,8 @@ async def _request_with_retry(
     client: httpx.AsyncClient,
     url: str,
     params: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    global _quota_exhausted
-    if _quota_exhausted:
-        return None
-
+) -> Dict[str, Any]:
+    """Make an HTTP request with retries. Raises YouTubeQuotaExceeded on quota errors."""
     for attempt in range(MAX_RETRIES):
         try:
             resp = await client.get(url, params=params)
@@ -62,11 +52,9 @@ async def _request_with_retry(
                 errors = body.get("error", {}).get("errors", [])
                 reasons = [e.get("reason", "") for e in errors]
                 if any(r in ("quotaExceeded", "dailyLimitExceeded") for r in reasons):
-                    _quota_exhausted = True
-                    logger.warning("YouTube API quota exceeded — all further calls will be skipped until quota resets")
-                    return None
+                    raise YouTubeQuotaExceeded("YouTube API daily quota exceeded")
                 logger.warning("YouTube API 403: %s", reasons)
-                return None
+                return {}
 
             if resp.status_code in RETRYABLE_STATUS_CODES:
                 wait = (2 ** attempt)
@@ -80,6 +68,8 @@ async def _request_with_retry(
             resp.raise_for_status()
             return resp.json()
 
+        except YouTubeQuotaExceeded:
+            raise
         except httpx.TimeoutException:
             wait = (2 ** attempt)
             logger.warning(
@@ -89,13 +79,13 @@ async def _request_with_retry(
             await asyncio.sleep(wait)
         except httpx.HTTPStatusError as exc:
             logger.error("YouTube API HTTP error: %s", exc)
-            return None
+            return {}
         except Exception as exc:
             logger.error("YouTube API unexpected error: %s", exc)
-            return None
+            return {}
 
     logger.error("YouTube API request failed after %d attempts", MAX_RETRIES)
-    return None
+    return {}
 
 
 def _parse_search_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -128,7 +118,7 @@ async def search_videos(
     api_key: str = "",
     job_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Search YouTube for videos matching a query."""
+    """Search YouTube. Raises YouTubeQuotaExceeded if quota is hit."""
     key = api_key or get_settings().youtube_api_key
     if not key:
         logger.error("No YouTube API key configured")
@@ -161,7 +151,7 @@ async def search_channel_videos(
     api_key: str = "",
     job_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Search YouTube for videos within a specific channel."""
+    """Search within a channel. Raises YouTubeQuotaExceeded if quota is hit."""
     key = api_key or get_settings().youtube_api_key
     if not key:
         logger.error("No YouTube API key configured")
@@ -193,7 +183,7 @@ async def get_video_details(
     api_key: str = "",
     job_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch detailed info for a list of video IDs, batching in groups of 50."""
+    """Fetch detailed info. Raises YouTubeQuotaExceeded if quota is hit."""
     key = api_key or get_settings().youtube_api_key
     if not key:
         logger.error("No YouTube API key configured")
@@ -255,7 +245,7 @@ async def get_channel_stats(
     api_key: str = "",
     job_id: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Fetch channel statistics, batching in groups of 50."""
+    """Fetch channel statistics. Raises YouTubeQuotaExceeded if quota is hit."""
     key = api_key or get_settings().youtube_api_key
     if not key:
         logger.error("No YouTube API key configured")

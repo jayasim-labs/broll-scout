@@ -155,7 +155,8 @@ class RankerService:
             return 1.0
         if cand.is_preferred_tier2:
             return 0.9
-        if cand.channel_subscribers > 100_000:
+        subs = cand.channel_subscribers or 0
+        if subs > 100_000:
             return 0.7
         return 0.4
 

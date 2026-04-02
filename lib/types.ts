@@ -30,6 +30,10 @@ export interface APICosts {
   google_cse_calls: number
   gemini_calls: number
   estimated_cost_usd: number
+  ytdlp_searches_via_agent?: number
+  ytdlp_detail_lookups_via_agent?: number
+  search_mode?: string
+  quota_exhausted?: boolean
 }
 
 export interface RankedResult {
@@ -123,6 +127,7 @@ export interface PipelineSettings {
   max_concurrent_segments: number
   segment_timeout_sec: number
   low_result_threshold: number
+  search_backend: string
   preferred_channels_tier1: string[]
   preferred_channels_tier2: string[]
   blocked_networks: string[]

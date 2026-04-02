@@ -1,6 +1,8 @@
 import asyncio
 import uuid
 import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +12,7 @@ from app.models.schemas import (
     JobCreateRequest, JobListResponse, JobStatus,
     FeedbackRequest, SettingsUpdateRequest, BulkSettingsUpdateRequest,
     ChannelResolveRequest, SettingsResponse, HealthResponse,
-    LibrarySearchResponse,
+    LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
 )
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
@@ -18,10 +20,36 @@ from app.services.settings_service import get_settings_service
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await _cleanup_stale_jobs()
+    yield
+
+
+async def _cleanup_stale_jobs():
+    """Mark any 'processing' jobs as failed on startup — they were killed by a deploy/restart."""
+    try:
+        storage = get_storage()
+        jobs = await storage.list_jobs(limit=100)
+        stale = [j for j in jobs if j.status == JobStatus.PROCESSING]
+        for job in stale:
+            logger.warning("Cleaning up stale job %s (was processing when server restarted)", job.job_id)
+            await storage.update_job_status(
+                job.job_id, JobStatus.FAILED,
+                completed_at=datetime.utcnow().isoformat(),
+            )
+        if stale:
+            logger.info("Cleaned up %d stale processing jobs", len(stale))
+    except Exception:
+        logger.exception("Failed to clean up stale jobs on startup")
+
+
 app = FastAPI(
     title="B-Roll Scout API",
     version="0.2.0",
     description="AI-powered B-roll intelligence for video editors",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -73,6 +101,25 @@ async def create_job(
     }
 
 
+@app.post("/api/v1/jobs/{job_id}/cancel")
+async def cancel_job(
+    job_id: str,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    task = _running_tasks.get(job_id)
+    if not task:
+        storage = get_storage()
+        job = await storage.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"job_id": job_id, "status": job.status.value, "cancelled": False,
+                "message": "Job already finished"}
+
+    task.cancel()
+    return {"job_id": job_id, "status": "cancelled", "cancelled": True}
+
+
 @app.get("/api/v1/jobs/{job_id}")
 async def get_job(
     job_id: str,
@@ -93,6 +140,8 @@ async def get_job_status(job_id: str):
         status = "processing"
         if progress.get("stage") == "completed":
             status = "complete"
+        elif progress.get("stage") == "cancelled":
+            status = "cancelled"
         elif progress.get("stage") == "failed":
             status = "failed"
         return {"job_id": job_id, "status": status, "progress": progress}
@@ -211,6 +260,31 @@ async def resolve_channel(
     if not result:
         raise HTTPException(status_code=404, detail="Channel not found")
     return result
+
+
+# --- Local yt-dlp Agent Endpoints ---
+
+from app.utils import agent_queue
+
+
+@app.post("/api/v1/agent/poll")
+async def agent_poll(body: AgentPollRequest):
+    tasks = await agent_queue.poll_tasks(body.agent_id)
+    return {"tasks": tasks}
+
+
+@app.post("/api/v1/agent/result")
+async def agent_result(body: AgentResultRequest):
+    ok = await agent_queue.submit_result(body.task_id, body.status, body.result)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found or already completed")
+    return {"ok": True}
+
+
+@app.get("/api/v1/agent/status")
+async def agent_status():
+    status = await agent_queue.get_queue_status()
+    return status
 
 
 if __name__ == "__main__":

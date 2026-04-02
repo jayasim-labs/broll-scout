@@ -11,6 +11,7 @@ class JobStatus(str, Enum):
     COMPLETE = "complete"
     PARTIAL = "partial"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TranscriptSource(str, Enum):
@@ -213,3 +214,13 @@ class LibrarySearchParams(BaseModel):
 class LibrarySearchResponse(BaseModel):
     results: List[RankedResult] = Field(default_factory=list)
     total_count: int = 0
+
+
+class AgentPollRequest(BaseModel):
+    agent_id: str = Field(default="browser-agent")
+
+
+class AgentResultRequest(BaseModel):
+    task_id: str
+    status: str = Field(default="completed")
+    result: List[Dict[str, Any]] = Field(default_factory=list)

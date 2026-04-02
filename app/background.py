@@ -12,7 +12,7 @@ from app.services.matcher import MatcherService
 from app.services.ranker import RankerService
 from app.services.searcher import SearcherService
 from app.services.settings_service import get_settings_service
-from app.utils.youtube import reset_quota_flag
+from app.utils.quota_tracker import get_quota_tracker
 from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
@@ -62,7 +62,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
     start_time = time.time()
     script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
 
-    reset_quota_flag()
+    get_quota_tracker().reset_for_job()
     cost_tracker.start_job(job_id)
     await storage.create_job(job_id, script_hash, editor_id)
 
@@ -253,15 +253,16 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         if all_results:
             _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes")
         else:
-            from app.utils.youtube import is_quota_exhausted
-            if is_quota_exhausted():
-                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted — no clips could be found. Quota resets at midnight Pacific Time. Try again tomorrow or add a new YouTube API key in Settings.")
+            qt = get_quota_tracker()
+            if qt.is_quota_exhausted:
+                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted and no local agent connected — no clips could be found. Install the B-Roll Scout companion app or try again tomorrow.")
             else:
                 _log_activity(job_id, "alert", "No clips found. The search queries may be too specific, or the APIs returned no matching videos. Try adjusting key terms or broadening your script.")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
+        api_costs.update(get_quota_tracker().stats)
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
         _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}")
@@ -278,6 +279,18 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         _log_activity(job_id, "check", "Done! Your B-roll results are ready.")
 
         logger.info("Job %s complete: %d results in %.1fs", job_id, len(all_results), elapsed)
+
+    except asyncio.CancelledError:
+        logger.info("Job %s cancelled by user", job_id)
+        _log_activity(job_id, "alert", "Job cancelled by user.")
+        elapsed = round(time.time() - start_time, 2)
+        cost_tracker.end_job(job_id)
+        await storage.update_job_status(
+            job_id, JobStatus.CANCELLED,
+            completed_at=datetime.utcnow().isoformat(),
+            processing_time_seconds=elapsed,
+        )
+        _set_progress(job_id, "cancelled", 0, "Cancelled by user")
 
     except Exception as exc:
         logger.exception("Pipeline failed for job %s", job_id)

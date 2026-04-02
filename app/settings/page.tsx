@@ -361,6 +361,20 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
       <Card>
         <CardHeader><CardTitle className="text-base">Search Settings</CardTitle></CardHeader>
         <CardContent className="space-y-4">
+          <div>
+            <Label className="text-sm">Search backend</Label>
+            <Select value={(settings as Record<string, unknown>).search_backend as string || "auto"} onValueChange={(v) => onChange("search_backend", v)}>
+              <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (API first, yt-dlp fallback)</SelectItem>
+                <SelectItem value="ytdlp_only">yt-dlp only (zero quota usage)</SelectItem>
+                <SelectItem value="api_only">YouTube API only</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground mt-1">
+              Auto switches to yt-dlp when API quota runs out. Requires the companion app running locally.
+            </p>
+          </div>
           <SliderSetting label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5} onChange={(v) => onChange("search_queries_per_segment", v)} />
           <SliderSetting label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10} onChange={(v) => onChange("youtube_results_per_query", v)} />
           <SliderSetting label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20} onChange={(v) => onChange("max_candidates_per_segment", v)} />
