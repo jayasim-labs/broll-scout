@@ -8,47 +8,46 @@ echo  ──────────────────────
 echo  Keep this window open while using broll.jayasim.com
 echo.
 
-set VENV_DIR=%~dp0.venv
+set COMPANION_DIR=%~dp0
+set VENV_DIR=%COMPANION_DIR%.venv
 
-:: Check if venv exists
+:: Auto-run setup if not yet installed
 if not exist "%VENV_DIR%\Scripts\activate.bat" (
-    echo  ERROR: Virtual environment not found.
-    echo  Run install.bat first to set up the companion app.
+    echo  First launch detected — running setup...
     echo.
-    pause
-    exit /b 1
+    call "%COMPANION_DIR%setup.bat"
+    if %ERRORLEVEL% neq 0 (
+        echo  Setup failed. Please try running setup.bat manually.
+        pause
+        exit /b 1
+    )
+    echo.
+    echo  Setup complete! Starting companion now...
+    echo.
 )
 
 :: Activate venv
 call "%VENV_DIR%\Scripts\activate.bat"
 
-:: Quick dependency check
+:: Quick health check
 python -c "import flask" 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo  ERROR: Flask not installed. Run install.bat first.
-    pause
-    exit /b 1
+    echo  Dependencies missing. Re-running setup...
+    call "%COMPANION_DIR%setup.bat"
+    call "%VENV_DIR%\Scripts\activate.bat"
 )
 
-yt-dlp --version >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  WARNING: yt-dlp not found in PATH. Searches may fail.
-    echo  Fix: pip install yt-dlp
-    echo.
-)
-
-ffmpeg -version >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  WARNING: ffmpeg not found. Whisper transcription will not work.
-    echo  Fix: winget install Gyan.FFmpeg
-    echo.
-)
+:: Auto-update yt-dlp silently (YouTube changes frequently)
+echo  Checking for yt-dlp updates...
+pip install --upgrade yt-dlp --quiet 2>nul
+echo  OK
+echo.
 
 echo  Starting on http://127.0.0.1:9876 ...
 echo  Press Ctrl+C to stop.
 echo.
 
-python "%~dp0companion.py"
+python "%COMPANION_DIR%companion.py"
 
 echo.
 echo  Companion stopped.

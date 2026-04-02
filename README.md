@@ -57,9 +57,9 @@
 │  │  ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌──────────────┐  │  │
 │  │  │ 1. TRANSLATE│    │ 2. SEARCH  │    │ 3. MATCH   │    │ 4. RANK      │  │  │
 │  │  │            │    │            │    │            │    │              │  │  │
-│  │  │ GPT-4o     │ →  │ YouTube API│ →  │ Transcript │ →  │ 5-dimension  │  │  │
-│  │  │            │    │ yt-dlp     │    │ + GPT-4o-  │    │ scoring      │  │  │
-│  │  │ Tamil →    │    │ (via agent)│    │ mini       │    │              │  │  │
+│  │  │ GPT-4o     │ →  │ yt-dlp     │ →  │ Transcript │ →  │ 5-dimension  │  │  │
+│  │  │            │    │ (via       │    │ + GPT-4o-  │    │ scoring      │  │  │
+│  │  │ Tamil →    │    │ companion) │    │ mini       │    │              │  │  │
 │  │  │ English    │    │            │    │            │    │ Keyword 30%  │  │  │
 │  │  │ + segment  │    │ Optional:  │    │ Finds exact│    │ Viral   20%  │  │  │
 │  │  │ into scenes│    │ Gemini AI  │    │ start/end  │    │ Channel 20%  │  │  │
@@ -73,7 +73,7 @@
 │                                                                                 │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐          │
 │  │ Agent Task Queue │    │ DynamoDB         │    │ OpenAI API       │          │
-│  │ (in-memory)      │    │ (7 tables)       │    │ GPT-4o / mini    │          │
+│  │ (in-memory)      │    │ (9 tables)       │    │ GPT-4o / mini    │          │
 │  │                  │    │ jobs, segments,  │    │                  │          │
 │  │ EC2 creates tasks│    │ results,         │    │ Gemini 1.5 Flash │          │
 │  │ Browser polls &  │    │ transcripts,     │    │ (optional)       │          │
@@ -143,12 +143,12 @@ When you click **Scout B-Roll**, the system runs a 5-stage pipeline:
 
 ### Stage 2: Multi-Source Search — `yt-dlp` (Companion) + optional `Gemini 1.5 Flash` (EC2)
 
-For each scene, searches run concurrently (2 scenes at a time via companion, 5 via YouTube API):
+For each scene, searches run concurrently (3 scenes at a time via the companion app):
 
 | Source | Where It Runs | What It Does |
 |---|---|---|
-| **Preferred Channels** | Companion (yt-dlp) or EC2 (YouTube API) | Searches your whitelisted channels first |
-| **YouTube/yt-dlp** | Companion (yt-dlp) or EC2 (YouTube API) | Runs the AI-generated search queries |
+| **Preferred Channels** | Companion (yt-dlp) | Searches your whitelisted channels first |
+| **yt-dlp Search** | Companion (yt-dlp) | Runs the AI-generated search queries — no API quota |
 | **Gemini AI Expansion** (optional, off by default) | EC2 → Companion | Gemini suggests 5 creative lateral queries, then searches them via yt-dlp |
 
 **Long script retry logic:** For scripts >25 minutes, if fewer than 30 candidate videos are found, the pipeline automatically retries sparse scenes (up to 3 rounds) until it has enough candidates.
@@ -189,9 +189,10 @@ Each clip is scored on five weighted dimensions:
 **Hard filters applied:**
 - Duration: videos must be 2–90 minutes (configurable)
 - Blocked channels: substring match on channel name against blocked networks (CNN, BBC...), studios (Disney, Warner...), and sports leagues (FIFA, NFL...) — NOT matched against video title
-- Clips shorter than 10 seconds are discarded (configurable)
+- Timestamps in the first 15 seconds of long videos (likely intro) are confidence-penalized
 - Timestamps landing in the last 30s of a video (end-screen territory) are penalized
-- Cross-segment deduplication: same video kept only in the scene where it scored highest
+- Clips shorter than 10 seconds receive a confidence penalty (not discarded)
+- Cross-segment deduplication: same video allowed in multiple scenes if clip timestamps don't overlap (30s bucket)
 
 ### Stage 5: Store & Display
 
@@ -227,9 +228,9 @@ Results saved to DynamoDB and returned to the frontend. Each clip shows:
 | **Frontend** | Next.js 15, React, TypeScript, Tailwind CSS, shadcn/ui |
 | **Backend** | Python 3.12, FastAPI, Pydantic v2, asyncio |
 | **AI Models** | OpenAI GPT-4o (translation), GPT-4o-mini (timestamps), Google Gemini 1.5 Flash (optional query expansion), OpenAI Whisper base (local transcription) |
-| **Search** | YouTube Data API v3, yt-dlp (local companion) |
+| **Search** | yt-dlp (local companion) — no YouTube API quota needed |
 | **Transcripts** | `youtube-transcript-api`, OpenAI Whisper (local fallback) |
-| **Storage** | AWS DynamoDB (7 tables: jobs, segments, results, transcripts, feedback, settings, channel_cache) |
+| **Storage** | AWS DynamoDB (9 tables: jobs, segments, results, transcripts, feedback, settings, channel_cache, projects, usage) |
 | **Hosting** | AWS EC2 (t3.small, Ubuntu), Nginx reverse proxy, Let's Encrypt SSL |
 | **Domain** | `broll.jayasim.com` |
 
@@ -247,17 +248,16 @@ BRoll Scout/
 │   │   └── schemas.py           # Pydantic models (Job, Segment, Result, Transcript, etc.)
 │   ├── services/
 │   │   ├── translator.py        # GPT-4o script translation & segmentation
-│   │   ├── searcher.py          # Multi-source video search (YouTube API, yt-dlp, Gemini)
+│   │   ├── searcher.py          # Multi-source video search (yt-dlp via companion, Gemini expansion)
 │   │   ├── transcriber.py       # 4-level transcript cascade (cache → direct → agent → Whisper)
 │   │   ├── matcher.py           # GPT-4o-mini timestamp matching & validation
 │   │   ├── ranker.py            # 5-dimension relevance scoring, filtering, dedup
 │   │   ├── storage.py           # DynamoDB CRUD operations
-│   │   └── settings_service.py  # User settings (DynamoDB-backed overrides)
+│   │   ├── settings_service.py  # User settings (DynamoDB-backed overrides)
+│   │   └── usage_service.py     # API + AWS cost aggregation and reporting
 │   ├── utils/
-│   │   ├── youtube.py           # YouTube Data API wrapper
 │   │   ├── agent_queue.py       # In-memory task queue for browser↔companion relay
-│   │   ├── quota_tracker.py     # YouTube API daily quota tracking
-│   │   └── cost_tracker.py      # Per-job API cost tracking
+│   │   └── cost_tracker.py      # Per-job API cost tracking (OpenAI, Gemini, AWS)
 │   ├── api/v1/                  # Next.js API routes (proxy to FastAPI)
 │   ├── page.tsx                 # Main page (script input → progress → results)
 │   ├── settings/page.tsx        # Settings page (4-tab configuration UI)
@@ -273,8 +273,9 @@ BRoll Scout/
 ├── broll-companion/
 │   ├── companion.py             # Flask app: yt-dlp search, transcript fetch, Whisper, clip download, Chrome cookies
 │   ├── requirements.txt         # flask, flask-cors, yt-dlp, youtube-transcript-api, openai-whisper
-│   ├── install.bat              # Windows one-click installer (Python venv, ffmpeg, yt-dlp, Whisper)
-│   ├── start-companion.bat      # Windows launcher (double-click to start)
+│   ├── setup.bat                # Windows one-click setup (installs Python, ffmpeg, all deps, desktop shortcut)
+│   ├── install.bat              # Windows installer (advanced — called by setup.bat, assumes Python exists)
+│   ├── start-companion.bat      # Windows launcher (auto-runs setup on first launch)
 │   └── update.bat               # Windows updater (keeps yt-dlp and packages current)
 ├── tests/
 │   └── test_integration.py      # 70 integration tests
@@ -284,7 +285,8 @@ BRoll Scout/
 │   ├── create_tables.py         # DynamoDB table creation
 │   ├── cleanup_dynamo.sh        # Clean up stale DynamoDB data
 │   ├── populate_channels_local.py  # One-time: populate channel_cache with avatars via yt-dlp
-│   └── test_e2e_flow.py         # Standalone E2E pipeline test
+│   ├── test_e2e_flow.py         # Standalone E2E pipeline test
+│   └── package_companion.sh    # Package broll-companion into a zip for editor distribution
 ├── requirements.txt             # Python backend dependencies
 ├── package.json                 # Node.js frontend dependencies
 └── pyproject.toml               # Python project config + pytest settings
@@ -294,15 +296,72 @@ BRoll Scout/
 
 ## Getting Started
 
-### Prerequisites
+There are two setup paths: one for **editors** (non-technical, Windows) and one for **developers** who want to run or modify the full stack.
+
+---
+
+### Editor Setup (Windows — One Click)
+
+Editors only need the **companion app** running on their Windows machine. The backend and frontend are already hosted at [https://broll.jayasim.com](https://broll.jayasim.com).
+
+#### First-time setup
+
+1. Download the companion app: [**Download broll-companion.zip**](https://github.com/jayasim-labs/broll-scout/releases/latest/download/broll-companion.zip)
+   *(or ask your admin to share the `broll-companion` folder)*
+2. Unzip to any folder (e.g., Desktop or Documents)
+3. Open the `broll-companion` folder and **double-click `setup.bat`** — that's it
+
+The installer automatically handles everything:
+- Installs Python if missing (via `winget`)
+- Installs `ffmpeg` (audio processing)
+- Creates an isolated Python environment
+- Installs `yt-dlp`, `youtube-transcript-api`, `openai-whisper`, `Flask`
+- Downloads the Whisper AI model (77 MB, one-time)
+- Creates a **"B-Roll Scout Companion"** shortcut on your Desktop
+
+Total time: ~3-5 minutes on first run. No terminal commands needed.
+
+#### Daily use
+
+1. Double-click **"B-Roll Scout Companion"** on your Desktop (or `start-companion.bat`)
+2. Keep the black window open
+3. Go to [https://broll.jayasim.com](https://broll.jayasim.com) in your browser
+4. Paste your script and click **Scout B-Roll**
+5. Close the companion window when you're done for the day
+
+The `start-companion.bat` launcher is smart:
+- If setup hasn't been run yet, it runs setup automatically
+- It auto-updates `yt-dlp` each launch (YouTube changes frequently)
+- It checks dependencies and re-installs if anything is missing
+
+#### Updating
+
+Double-click `update.bat` to update all packages to the latest versions. This is useful if YouTube search or downloads stop working (YouTube changes their site frequently, and `yt-dlp` releases updates to keep up).
+
+#### Troubleshooting (editors)
+
+| Problem | Fix |
+|---|---|
+| "Python is not installed" | The setup will try to install it. If it fails, download from [python.org](https://www.python.org/downloads/) — check **"Add Python to PATH"** during install, then re-run `setup.bat` |
+| "ffmpeg not found" warning | Whisper transcription won't work, but everything else will. Install later: open a terminal and run `winget install Gyan.FFmpeg` |
+| Companion starts but browser says "Companion not connected" | Make sure the companion window shows `Starting on http://127.0.0.1:9876`. If not, try running `setup.bat` again |
+| YouTube search returns no results | Run `update.bat` to get the latest `yt-dlp` |
+
+---
+
+### Developer Setup (Full Stack)
+
+For running the entire stack locally (backend + frontend + companion) or contributing to the project.
+
+#### Prerequisites
 
 - **Node.js** 18+ and **npm**
 - **Python** 3.12+
-- API keys: OpenAI, YouTube Data API v3
+- API keys: OpenAI
 - Optional: Google Gemini API key (only if you want Gemini expansion)
 - AWS account with DynamoDB access
 
-### 1. Clone & Install
+#### 1. Clone & Install
 
 ```bash
 git clone https://github.com/jayasim-labs/BRoll-Scout.git
@@ -317,15 +376,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Install Companion App (Editor's Machine)
-
-**Windows (editor's machine):**
-```
-cd broll-companion
-install.bat
-```
-
-The installer automatically sets up: Python venv, yt-dlp, ffmpeg, youtube-transcript-api, openai-whisper, Flask. Then use `start-companion.bat` to launch, `update.bat` to keep yt-dlp current.
+#### 2. Install Companion App
 
 **macOS:**
 ```bash
@@ -335,7 +386,13 @@ pip install -r requirements.txt
 brew install ffmpeg
 ```
 
-### 3. Configure Environment
+**Windows:**
+```
+cd broll-companion
+setup.bat
+```
+
+#### 3. Configure Environment
 
 ```bash
 cp .env.example .env
@@ -345,7 +402,6 @@ Required variables in `.env`:
 
 ```
 OPENAI_API_KEY=sk-proj-...
-YOUTUBE_API_KEY=AIzaSy...
 AWS_REGION=us-east-1
 ```
 
@@ -354,13 +410,13 @@ Optional (only needed if you enable Gemini expansion):
 GEMINI_API_KEY=AIzaSy...
 ```
 
-### 4. Create DynamoDB Tables
+#### 4. Create DynamoDB Tables
 
 ```bash
 python scripts/create_tables.py
 ```
 
-### 5. Run Locally
+#### 5. Run Locally
 
 Start all three services:
 
@@ -373,10 +429,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 npm run dev
 
 # Terminal 3: Companion (required for yt-dlp and Whisper)
-cd broll-companion && python companion.py
+cd broll-companion && source .venv/bin/activate && python companion.py
 ```
-
-**Windows editors** — just double-click `broll-companion\start-companion.bat` instead of Terminal 3.
 
 Open [http://localhost:3000](http://localhost:3000).
 
@@ -472,6 +526,8 @@ Navigate to `/settings` to configure:
 | `broll_feedback` | `result_id` | — | Editor ratings, clip-used tracking & notes |
 | `broll_settings` | `setting_key` | — | User-configured pipeline settings (overrides defaults) |
 | `broll_channel_cache` | `channel_id` | — | YouTube channel metadata cache (name, subscribers, avatar URL) |
+| `broll_projects` | `project_id` | — | Project groupings for jobs |
+| `broll_usage` | `period` | — | Aggregated API cost tracking per month/day |
 
 ---
 
@@ -483,11 +539,11 @@ All parameters are configurable via the Settings page (`/settings` → Pipeline 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `search_backend` | `auto` | `auto` (API first, yt-dlp fallback), `ytdlp_only`, `api_only` |
+| `search_backend` | `ytdlp_only` | All searches via yt-dlp on the companion. No YouTube API quota consumed |
 | `search_queries_per_segment` | 3 | YouTube search queries generated per scene |
 | `youtube_results_per_query` | 5 | Results fetched per search query |
 | `max_candidates_per_segment` | 12 | Max videos kept per scene for transcript analysis |
-| `top_results_per_segment` | 1 | Final clips kept per scene after ranking |
+| `top_results_per_segment` | 3 | Clips shown per scene — more choices for the editor |
 | `total_results_target` | 30 | Target total clips — triggers recovery search if below |
 | `gemini_expanded_queries` | 5 | Creative lateral queries from Gemini (only when toggled on) |
 
@@ -497,7 +553,7 @@ All parameters are configurable via the Settings page (`/settings` → Pipeline 
 |---|---|---|
 | `timestamp_model` | `gpt-4o-mini` | AI model for reading transcripts and finding timestamps |
 | `translation_model` | `gpt-4o` | AI model for script translation and scene segmentation |
-| `confidence_threshold` | 0.4 | Minimum AI confidence to include a clip (0.0–1.0) |
+| `confidence_threshold` | 0.15 | Minimum AI confidence to include a clip (0.0–1.0) |
 | `whisper_max_video_duration_min` | 60 | Max video length for Whisper fallback transcription |
 | `whisper_audio_trim_min` | 20 | Only transcribe first N minutes of audio |
 
@@ -509,7 +565,6 @@ All parameters are configurable via the Settings page (`/settings` → Pipeline 
 | `max_video_duration_sec` | 5400 | Exclude videos longer than this |
 | `prefer_min_subscribers` | 10000 | Channels below this get lower authority score (not excluded) |
 | `recency_full_score_years` | 2 | Videos within this age get full recency score |
-| `discard_clips_shorter_than_10s` | true | Filter out clips under 10 seconds |
 | `cap_end_timestamp` | true | Cap end timestamp at video duration - 5s |
 | `verify_timestamp_not_end_screen` | true | Penalize timestamps in last 30s of video |
 
@@ -539,10 +594,12 @@ All parameters are configurable via the Settings page (`/settings` → Pipeline 
 |---|---|---|
 | GPT-4o (translation) | ~$0.01–0.05 | 1 call |
 | GPT-4o-mini (timestamps) | ~$0.001 per video | 30–80 videos |
-| YouTube Data API | Free (10,000 units/day quota) | ~1,500 units (auto-falls back to yt-dlp) |
 | Gemini 1.5 Flash (if enabled) | ~$0.0001/call | 5–15 calls |
-| Whisper (local) | Free | Only for videos without captions |
-| yt-dlp (local) | Free | All searches when YouTube API quota exhausted |
+| Whisper base (local) | Free | Only for videos without captions |
+| yt-dlp (local) | Free | All YouTube searches and downloads |
+| AWS EC2 (t3.small) | ~$16.56/month | Always running |
+| AWS DynamoDB | ~$1.00/month | Storage + read/write |
+| AWS Route 53 | ~$0.50/month | DNS hosted zone |
 
 **Typical job cost: $0.03–0.10** (lower than before — Google CSE removed, Gemini off by default)
 
