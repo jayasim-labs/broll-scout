@@ -110,7 +110,6 @@ cd "$PROJECT_DIR"
 # ---------- setup.bat ----------
 cat > "$PKG_DIR/setup.bat" <<'BATEOF'
 @echo off
-setlocal enabledelayedexpansion
 title B-Roll Scout - Setup
 color 0A
 
@@ -129,82 +128,93 @@ pause
 set "ROOT=%~dp0"
 set "COMPANION=%ROOT%companion"
 set "VENV=%COMPANION%\.venv"
-set PYTHON=
+set "PYTHON="
 
 echo.
 echo  [1/4] Checking for Python...
 
 python --version >nul 2>&1
-if %ERRORLEVEL% equ 0 ( set PYTHON=python& goto :py_ok )
+if not errorlevel 1 (
+    set "PYTHON=python"
+    goto py_ok
+)
 py --version >nul 2>&1
-if %ERRORLEVEL% equ 0 ( set PYTHON=py& goto :py_ok )
-
-echo  Python not found. Installing via winget...
-winget --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
-    for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USER_PATH=%%B"
-    for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "SYS_PATH=%%B"
-    set "PATH=!USER_PATH!;!SYS_PATH!"
-    python --version >nul 2>&1 && ( set PYTHON=python& goto :py_ok )
-    py --version >nul 2>&1 && ( set PYTHON=py& goto :py_ok )
-    echo  Python installed but not in PATH yet. Close this window and re-run setup.bat.
-    pause
-    exit /b 0
-) else (
-    echo  Cannot auto-install Python. Download from https://www.python.org/downloads/
-    echo  IMPORTANT: Check "Add Python to PATH" during install, then re-run setup.bat.
-    pause
-    exit /b 1
+if not errorlevel 1 (
+    set "PYTHON=py"
+    goto py_ok
 )
 
+echo  Python not found. Trying winget...
+winget --version >nul 2>&1
+if errorlevel 1 goto no_winget_pkg
+
+echo  Installing Python via winget (1-2 minutes)...
+winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
+if errorlevel 1 goto no_winget_pkg
+
+echo  Python installed. Close this window and re-run setup.bat so PATH takes effect.
+pause
+exit /b 0
+
+:no_winget_pkg
+echo  Cannot auto-install Python. Download from https://www.python.org/downloads/
+echo  IMPORTANT: Check "Add Python to PATH" during install, then re-run setup.bat.
+pause
+exit /b 1
+
 :py_ok
-for /f "tokens=*" %%i in ('%PYTHON% --version 2^>^&1') do echo  OK: %%i
+echo  OK: Python found
+%PYTHON% --version
 
 echo.
 echo  [2/4] Checking ffmpeg...
 ffmpeg -version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
+if not errorlevel 1 (
     echo  OK: ffmpeg installed
-) else (
-    winget --version >nul 2>&1
-    if !ERRORLEVEL! equ 0 (
-        winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent 2>nul
-        echo  OK: ffmpeg installed
-    ) else (
-        echo  WARNING: ffmpeg not found. Whisper will not work until installed.
-    )
+    goto ffmpeg_done
 )
+
+echo  ffmpeg not found. Trying winget...
+winget --version >nul 2>&1
+if errorlevel 1 goto ffmpeg_warn
+winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent >nul 2>&1
+if not errorlevel 1 (
+    echo  OK: ffmpeg installed
+    goto ffmpeg_done
+)
+:ffmpeg_warn
+echo  WARNING: ffmpeg not found. Whisper will not work until installed.
+:ffmpeg_done
 
 echo.
 echo  [3/4] Installing companion packages...
-if not exist "%VENV%\Scripts\activate.bat" (
-    %PYTHON% -m venv "%VENV%" || goto :venv_fail
+
+if exist "%VENV%\Scripts\activate.bat" goto pkg_venv_exists
+%PYTHON% -m venv "%VENV%"
+if errorlevel 1 (
+    echo  ERROR: Failed to create Python environment.
+    pause
+    exit /b 1
 )
-goto :venv_ok
-:venv_fail
-echo  ERROR: Failed to create Python environment.
-pause
-exit /b 1
-:venv_ok
+:pkg_venv_exists
 call "%VENV%\Scripts\activate.bat"
 python -m pip install --upgrade pip --quiet 2>nul
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet || goto :pip_fail
+pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
+if errorlevel 1 (
+    echo  ERROR: Package install failed. Check your internet.
+    pause
+    exit /b 1
+)
 echo  OK: Core packages
-goto :pip_ok
-:pip_fail
-echo  ERROR: Package install failed. Check your internet.
-pause
-exit /b 1
-:pip_ok
+
 pip install openai-whisper --quiet 2>nul
-if !ERRORLEVEL! neq 0 (
+if errorlevel 1 (
     echo  NOTE: Whisper install failed (optional).
-    goto :whisper_done
+    goto whisper_done_pkg
 )
 echo  OK: Whisper installed
 python -c "import whisper; whisper.load_model('base')" 2>nul
-:whisper_done
+:whisper_done_pkg
 
 echo.
 echo  [4/4] Creating desktop shortcut...
@@ -228,7 +238,7 @@ echo.
 echo  Next time, just double-click "B-Roll Scout" on your Desktop.
 echo.
 
-:: Hand off to start.bat in THIS window (not a new one)
+:: Hand off to start.bat in THIS window
 call "%ROOT%start.bat"
 BATEOF
 
@@ -241,6 +251,8 @@ color 0A
 echo.
 echo  B-Roll Scout
 echo  ============
+echo  Keep this window open while using B-Roll Scout.
+echo  To stop: close this window or press Ctrl+C.
 echo.
 
 set "ROOT=%~dp0"
@@ -252,15 +264,26 @@ set "SERVER=%ROOT%webapp\server.js"
 :: Kill any previous instances (prevents duplicates)
 call "%ROOT%stop.bat" /quiet 2>nul
 
-:: First-time: run setup
-if not exist "%VENV%\Scripts\activate.bat" (
-    echo  First launch detected. Running setup...
-    call "%ROOT%setup.bat"
-    exit /b 0
-)
+:: First-time: run setup if venv missing
+if exist "%VENV%\Scripts\activate.bat" goto pkg_venv_ready
 
+echo  First launch detected. Running setup...
+echo.
+call "%ROOT%setup.bat"
+goto pkg_done
+
+:pkg_venv_ready
 call "%VENV%\Scripts\activate.bat"
 
+:: Quick health check
+python -c "import flask" 2>nul
+if not errorlevel 1 goto pkg_deps_ok
+
+echo  Dependencies missing. Running setup...
+call "%ROOT%setup.bat"
+goto pkg_done
+
+:pkg_deps_ok
 echo  Updating yt-dlp...
 pip install --upgrade yt-dlp --quiet 2>nul
 echo  OK
@@ -268,29 +291,30 @@ echo.
 
 :: Start Next.js web app in background (port 3000)
 echo  Starting web app on http://localhost:3000 ...
-set PORT=3000
-set HOSTNAME=127.0.0.1
+set "PORT=3000"
+set "HOSTNAME=127.0.0.1"
 start /min "BRoll-WebApp" "%NODE%" "%SERVER%"
 
 :: Open browser after web app is ready
 set "OPEN_BROWSER=%TEMP%\broll_open.bat"
-echo @timeout /t 5 /nobreak ^>nul > "%OPEN_BROWSER%"
-echo @start http://localhost:3000 >> "%OPEN_BROWSER%"
-echo @del "%%~f0" >> "%OPEN_BROWSER%"
-start /min "" "%OPEN_BROWSER%"
+echo @echo off > "%OPEN_BROWSER%"
+echo timeout /t 5 /nobreak ^>nul >> "%OPEN_BROWSER%"
+echo start http://localhost:3000 >> "%OPEN_BROWSER%"
+echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
+start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
 
 :: Start companion in foreground (port 9876)
 echo  Starting companion on http://127.0.0.1:9876 ...
 echo.
 echo  Browser will open to http://localhost:3000 in a few seconds.
-echo  Keep this window open while you work.
-echo  To stop: close this window or press Ctrl+C.
 echo.
 
 python "%COMPANION%\companion.py"
 
 :: Companion exited -- clean up background Node.js
 call "%ROOT%stop.bat" /quiet 2>nul
+
+:pkg_done
 echo.
 echo  B-Roll Scout stopped.
 echo  Press any key to close...
@@ -300,49 +324,35 @@ BATEOF
 # ---------- stop.bat ----------
 cat > "$PKG_DIR/stop.bat" <<'BATEOF'
 @echo off
-:: Stops B-Roll Scout background processes.
-:: Safe to call even if nothing is running.
+:: Stops B-Roll Scout BACKGROUND processes (web app, browser helper).
+:: Does NOT kill the companion (it runs in the foreground of the caller).
+:: Safe to call even when nothing is running.
 
-set QUIET=0
-if /i "%~1"=="/quiet" set QUIET=1
+set "QUIET=0"
+if /i "%~1"=="/quiet" set "QUIET=1"
 
-if %QUIET%==0 (
+if "%QUIET%"=="0" (
     echo.
-    echo  Stopping B-Roll Scout...
+    echo  Stopping B-Roll Scout background processes...
     echo.
 )
 
-:: Write port scan results to a temp file to avoid for/f pipe issues
-set "TMPFILE=%TEMP%\broll_stop_pids.txt"
-
-:: Find PIDs on port 9876 (companion)
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":9876 " > "%TMPFILE%" 2>nul
-if exist "%TMPFILE%" (
-    for /f "tokens=5" %%p in (%TMPFILE%) do (
-        if not "%%p"=="" (
-            taskkill /f /pid %%p >nul 2>&1
-            if %QUIET%==0 echo  Stopped companion (PID %%p)
-        )
-    )
-)
-
-:: Find PIDs on port 3000 (web app)
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMPFILE%" 2>nul
-if exist "%TMPFILE%" (
-    for /f "tokens=5" %%p in (%TMPFILE%) do (
-        if not "%%p"=="" (
-            taskkill /f /pid %%p >nul 2>&1
-            if %QUIET%==0 echo  Stopped web app (PID %%p)
-        )
-    )
-)
-
-del "%TMPFILE%" >nul 2>&1
-
-:: Fallback: kill by window title (only exact match targets)
+:: Kill background Node.js web app by window title
 taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
 
-if %QUIET%==0 (
+:: Kill browser-opener helper
+taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" >nul 2>&1
+
+:: Also kill any orphaned Node on port 3000 (in case title-based kill missed it)
+set "TMP_PIDS=%TEMP%\broll_pids.tmp"
+netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMP_PIDS%" 2>nul
+for /f "tokens=5" %%P in (%TMP_PIDS%) do (
+    taskkill /f /pid %%P >nul 2>&1
+    if "%QUIET%"=="0" echo  Stopped web app PID %%P
+)
+del "%TMP_PIDS%" >nul 2>&1
+
+if "%QUIET%"=="0" (
     echo.
     echo  Done.
     echo.

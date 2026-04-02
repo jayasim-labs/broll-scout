@@ -1,5 +1,4 @@
 @echo off
-setlocal enabledelayedexpansion
 title B-Roll Scout - Setup
 color 0A
 
@@ -22,53 +21,42 @@ pause
 
 set "COMPANION_DIR=%~dp0"
 set "VENV_DIR=%COMPANION_DIR%.venv"
-set PYTHON=
+set "PYTHON="
 
 :: ===================================================================
-:: STEP 1: Find or install Python
+:: STEP 1: Find Python
 :: ===================================================================
 echo.
 echo  [1/5] Checking for Python...
 
 python --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    set PYTHON=python
-    goto :python_found
+if not errorlevel 1 (
+    set "PYTHON=python"
+    goto python_found
 )
 
 py --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    set PYTHON=py
-    goto :python_found
+if not errorlevel 1 (
+    set "PYTHON=py"
+    goto python_found
 )
 
-echo  Python not found. Installing automatically...
+echo  Python not found. Trying to install via winget...
 echo.
-
 winget --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    echo  Installing Python via winget (1-2 minutes)...
-    winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
-    if !ERRORLEVEL! equ 0 (
-        echo  Python installed. Refreshing PATH...
-        for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USER_PATH=%%B"
-        for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "SYS_PATH=%%B"
-        set "PATH=!USER_PATH!;!SYS_PATH!"
+if errorlevel 1 goto no_winget
 
-        python --version >nul 2>&1
-        if !ERRORLEVEL! equ 0 ( set PYTHON=python& goto :python_found )
-        py --version >nul 2>&1
-        if !ERRORLEVEL! equ 0 ( set PYTHON=py& goto :python_found )
+echo  Installing Python via winget (1-2 minutes)...
+winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
+if errorlevel 1 goto no_winget
 
-        echo.
-        echo  Python installed but not in PATH yet.
-        echo  Please CLOSE this window and DOUBLE-CLICK setup.bat again.
-        echo.
-        pause
-        exit /b 0
-    )
-)
+echo  Python installed. You MUST close this window and re-run setup.bat
+echo  so the new PATH takes effect.
+echo.
+pause
+exit /b 0
 
+:no_winget
 echo.
 echo  ============================================================
 echo   Could not auto-install Python.
@@ -84,7 +72,8 @@ pause
 exit /b 1
 
 :python_found
-for /f "tokens=*" %%i in ('%PYTHON% --version 2^>^&1') do echo  OK: %%i
+echo  OK: Python found
+%PYTHON% --version
 
 :: ===================================================================
 :: STEP 2: Install ffmpeg
@@ -93,78 +82,83 @@ echo.
 echo  [2/5] Checking ffmpeg...
 
 ffmpeg -version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
+if not errorlevel 1 (
     echo  OK: ffmpeg is installed
-    goto :ffmpeg_done
+    goto ffmpeg_done
 )
 
-echo  ffmpeg not found. Installing...
+echo  ffmpeg not found. Trying winget...
 winget --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent
-    if !ERRORLEVEL! equ 0 (
-        echo  OK: ffmpeg installed
-        goto :ffmpeg_done
-    )
+if errorlevel 1 goto try_choco
+winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent >nul 2>&1
+if not errorlevel 1 (
+    echo  OK: ffmpeg installed via winget
+    goto ffmpeg_done
 )
+
+:try_choco
 choco --version >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    choco install ffmpeg -y >nul 2>&1
-    if !ERRORLEVEL! equ 0 (
-        echo  OK: ffmpeg installed via chocolatey
-        goto :ffmpeg_done
-    )
+if errorlevel 1 goto ffmpeg_warn
+choco install ffmpeg -y >nul 2>&1
+if not errorlevel 1 (
+    echo  OK: ffmpeg installed via chocolatey
+    goto ffmpeg_done
 )
+
+:ffmpeg_warn
 echo  WARNING: ffmpeg not found. Whisper will not work until installed.
 echo  You can install later: winget install Gyan.FFmpeg
 
 :ffmpeg_done
 
 :: ===================================================================
-:: STEP 3: Create virtual environment + install packages
+:: STEP 3: Create virtual environment
 :: ===================================================================
 echo.
 echo  [3/5] Setting up Python environment...
 
-if not exist "%VENV_DIR%\Scripts\activate.bat" (
-    %PYTHON% -m venv "%VENV_DIR%" || goto :venv_failed
+if exist "%VENV_DIR%\Scripts\activate.bat" goto venv_exists
+
+%PYTHON% -m venv "%VENV_DIR%"
+if errorlevel 1 (
+    echo  ERROR: Failed to create Python environment.
+    echo  Make sure Python is installed correctly.
+    pause
+    exit /b 1
 )
-echo  OK: Environment ready
-goto :venv_ok
 
-:venv_failed
-echo  ERROR: Failed to create Python environment.
-pause
-exit /b 1
-
-:venv_ok
+:venv_exists
+echo  OK: Virtual environment ready
 
 call "%VENV_DIR%\Scripts\activate.bat"
 python -m pip install --upgrade pip --quiet 2>nul
 
+:: ===================================================================
+:: STEP 4: Install packages
+:: ===================================================================
 echo.
 echo  [4/5] Installing packages (1-3 minutes)...
 echo.
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet || goto :pip_failed
+
+pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
+if errorlevel 1 (
+    echo  ERROR: Package installation failed. Check your internet connection.
+    pause
+    exit /b 1
+)
 echo  OK: Core packages installed
-goto :pip_ok
 
-:pip_failed
-echo  ERROR: Package installation failed. Check your internet connection.
-pause
-exit /b 1
-
-:pip_ok
 echo  Installing Whisper AI (speech-to-text)...
 pip install openai-whisper --quiet 2>nul
-if !ERRORLEVEL! neq 0 (
+if errorlevel 1 (
     echo  NOTE: Whisper install failed (optional). Videos with captions still work.
-    goto :whisper_done
+    goto whisper_done
 )
 echo  OK: Whisper installed
 echo  Downloading Whisper model (77 MB, one-time)...
 python -c "import whisper; whisper.load_model('base'); print('  OK: Model downloaded')" 2>nul
-if !ERRORLEVEL! neq 0 echo  Skipped. Will download on first use.
+if errorlevel 1 echo  Skipped model download. Will download on first use.
+
 :whisper_done
 
 :: ===================================================================
@@ -186,7 +180,7 @@ del "%SHORTCUT_VBS%" 2>nul
 echo  OK: "B-Roll Scout" shortcut on Desktop
 
 :: ===================================================================
-:: DONE - now start the companion in THIS window
+:: DONE
 :: ===================================================================
 echo.
 echo  ============================================================
@@ -196,5 +190,5 @@ echo.
 echo  Next time, just double-click "B-Roll Scout" on your Desktop.
 echo.
 
-:: Hand off to start-companion.bat (runs in THIS window, not a new one)
+:: Hand off to start-companion.bat in THIS window
 call "%COMPANION_DIR%start-companion.bat"

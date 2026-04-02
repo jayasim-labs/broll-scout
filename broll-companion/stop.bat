@@ -1,47 +1,33 @@
 @echo off
-:: Stops B-Roll Scout background processes.
-:: Safe to call even if nothing is running.
+:: Stops B-Roll Scout BACKGROUND processes (web app, browser helper).
+:: Does NOT kill the companion (it runs in the foreground of the caller).
+:: Safe to call even when nothing is running.
 
-set QUIET=0
-if /i "%~1"=="/quiet" set QUIET=1
+set "QUIET=0"
+if /i "%~1"=="/quiet" set "QUIET=1"
 
-if %QUIET%==0 (
+if "%QUIET%"=="0" (
     echo.
-    echo  Stopping B-Roll Scout...
+    echo  Stopping B-Roll Scout background processes...
     echo.
 )
 
-:: Write port scan results to a temp file to avoid for/f pipe issues
-set "TMPFILE=%TEMP%\broll_stop_pids.txt"
-
-:: Find PIDs on port 9876 (companion)
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":9876 " > "%TMPFILE%" 2>nul
-if exist "%TMPFILE%" (
-    for /f "tokens=5" %%p in (%TMPFILE%) do (
-        if not "%%p"=="" (
-            taskkill /f /pid %%p >nul 2>&1
-            if %QUIET%==0 echo  Stopped companion (PID %%p)
-        )
-    )
-)
-
-:: Find PIDs on port 3000 (web app)
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMPFILE%" 2>nul
-if exist "%TMPFILE%" (
-    for /f "tokens=5" %%p in (%TMPFILE%) do (
-        if not "%%p"=="" (
-            taskkill /f /pid %%p >nul 2>&1
-            if %QUIET%==0 echo  Stopped web app (PID %%p)
-        )
-    )
-)
-
-del "%TMPFILE%" >nul 2>&1
-
-:: Fallback: kill by window title (only exact match targets)
+:: Kill background Node.js web app by window title
 taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
 
-if %QUIET%==0 (
+:: Kill browser-opener helper
+taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" >nul 2>&1
+
+:: Also kill any orphaned Node on port 3000 (in case title-based kill missed it)
+set "TMP_PIDS=%TEMP%\broll_pids.tmp"
+netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMP_PIDS%" 2>nul
+for /f "tokens=5" %%P in (%TMP_PIDS%) do (
+    taskkill /f /pid %%P >nul 2>&1
+    if "%QUIET%"=="0" echo  Stopped web app PID %%P
+)
+del "%TMP_PIDS%" >nul 2>&1
+
+if "%QUIET%"=="0" (
     echo.
     echo  Done.
     echo.

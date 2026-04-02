@@ -15,25 +15,27 @@ set "VENV_DIR=%COMPANION_DIR%.venv"
 :: Kill any previous instances (prevents duplicates)
 call "%COMPANION_DIR%stop.bat" /quiet 2>nul
 
-:: First-time: run setup
-if not exist "%VENV_DIR%\Scripts\activate.bat" (
-    echo  First launch detected. Running setup...
-    echo.
-    call "%COMPANION_DIR%setup.bat"
-    exit /b 0
-)
+:: First-time: run setup if venv missing
+if exist "%VENV_DIR%\Scripts\activate.bat" goto venv_ready
 
+echo  First launch detected. Running setup...
+echo.
+call "%COMPANION_DIR%setup.bat"
+goto done
+
+:venv_ready
 :: Activate venv
 call "%VENV_DIR%\Scripts\activate.bat"
 
 :: Quick health check
 python -c "import flask" 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo  Dependencies missing. Running setup...
-    call "%COMPANION_DIR%setup.bat"
-    exit /b 0
-)
+if not errorlevel 1 goto deps_ok
 
+echo  Dependencies missing. Running setup...
+call "%COMPANION_DIR%setup.bat"
+goto done
+
+:deps_ok
 :: Auto-update yt-dlp (YouTube changes frequently)
 echo  Checking for yt-dlp updates...
 pip install --upgrade yt-dlp --quiet 2>nul
@@ -46,10 +48,11 @@ echo.
 
 :: Open browser to localhost:3000 after companion starts
 set "OPEN_BROWSER=%TEMP%\broll_open.bat"
-echo @timeout /t 4 /nobreak ^>nul > "%OPEN_BROWSER%"
-echo @start http://localhost:3000 >> "%OPEN_BROWSER%"
-echo @del "%%~f0" >> "%OPEN_BROWSER%"
-start /min "" "%OPEN_BROWSER%"
+echo @echo off > "%OPEN_BROWSER%"
+echo timeout /t 4 /nobreak ^>nul >> "%OPEN_BROWSER%"
+echo start http://localhost:3000 >> "%OPEN_BROWSER%"
+echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
+start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
 
 :: Run companion in foreground (blocks until Ctrl+C or window close)
 python "%COMPANION_DIR%companion.py"
@@ -57,6 +60,7 @@ python "%COMPANION_DIR%companion.py"
 :: Companion exited - clean up
 call "%COMPANION_DIR%stop.bat" /quiet 2>nul
 
+:done
 echo.
 echo  B-Roll Scout stopped.
 echo  Press any key to close...
