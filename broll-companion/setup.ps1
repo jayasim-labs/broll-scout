@@ -1,9 +1,10 @@
-# B-Roll Scout - Companion Setup (PowerShell)
-# Called by setup.bat. Do not run directly unless you know what you are doing.
-# ASCII-only messages to avoid UTF-8 parsing bugs in Windows PowerShell 5.1
+# B-Roll Scout - Full Editor Setup (PowerShell)
+# Called by setup.bat. Installs BOTH the Next.js web app AND the Python companion.
+# ASCII-only to avoid UTF-8 parsing bugs in Windows PowerShell 5.1
 
 $ErrorActionPreference = "Stop"
 $CompanionDir = $PSScriptRoot
+$ProjectRoot = (Resolve-Path (Join-Path $CompanionDir "..")).Path
 $VenvDir = Join-Path $CompanionDir ".venv"
 
 Write-Host ""
@@ -12,20 +13,37 @@ Write-Host "  B-Roll Scout - Editor Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# --- 1. Check Python ---
-Write-Host "[1/5] Checking Python..." -ForegroundColor Yellow
+# --- 1. Check Node.js ---
+Write-Host "[1/6] Checking Node.js..." -ForegroundColor Yellow
+
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCmd) {
+    Write-Host "  Node.js is not installed." -ForegroundColor Red
+    Write-Host "  Please install Node.js 20+ from: https://nodejs.org/" -ForegroundColor White
+    Write-Host "  Then run setup.bat again." -ForegroundColor White
+    exit 1
+}
+$nodeVer = (node -v) -replace 'v', ''
+$major = [int]($nodeVer.Split('.')[0])
+if ($major -lt 18) {
+    Write-Host "  Node.js $nodeVer found. Node 18+ is recommended." -ForegroundColor Yellow
+} else {
+    Write-Host "  OK - Node.js $nodeVer" -ForegroundColor Green
+}
+
+# --- 2. Check Python ---
+Write-Host ""
+Write-Host "[2/6] Checking Python..." -ForegroundColor Yellow
 
 $pythonCmd = $null
 $pythonExe = Get-Command python -ErrorAction SilentlyContinue
 if ($pythonExe) {
     $ver = & python --version 2>&1
-    # Make sure it is real Python, not the Microsoft Store stub
     if ($ver -match "Python \d") {
         $pythonCmd = "python"
         Write-Host "  OK - $ver" -ForegroundColor Green
     }
 }
-
 if (-not $pythonCmd) {
     $pyExe = Get-Command py -ErrorAction SilentlyContinue
     if ($pyExe) {
@@ -36,55 +54,87 @@ if (-not $pythonCmd) {
         }
     }
 }
-
 if (-not $pythonCmd) {
-    Write-Host "  Python not found. Trying to install via winget..." -ForegroundColor Yellow
     $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     if ($wingetCmd) {
-        Write-Host "  Installing Python 3.12 (this may take 1-2 minutes)..." -ForegroundColor White
+        Write-Host "  Python not found. Installing via winget (1-2 min)..." -ForegroundColor Yellow
         winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
         Write-Host ""
-        Write-Host "  Python installed. Please CLOSE this window and double-click setup.bat again" -ForegroundColor Cyan
-        Write-Host "  so the new PATH takes effect." -ForegroundColor Cyan
-        Write-Host ""
+        Write-Host "  Python installed. CLOSE this window and re-run setup.bat." -ForegroundColor Cyan
         exit 0
-    } else {
-        Write-Host "  Python is not installed." -ForegroundColor Red
-        Write-Host "  Please install Python 3.12+ from: https://www.python.org/downloads/" -ForegroundColor White
-        Write-Host "  IMPORTANT: Check 'Add Python to PATH' during install." -ForegroundColor White
-        Write-Host "  Then run setup.bat again." -ForegroundColor White
-        exit 1
     }
+    Write-Host "  Python not installed." -ForegroundColor Red
+    Write-Host "  Download from: https://www.python.org/downloads/" -ForegroundColor White
+    Write-Host "  IMPORTANT: Check 'Add Python to PATH' during install." -ForegroundColor White
+    exit 1
 }
 
-# --- 2. Check ffmpeg ---
+# --- 3. Check yt-dlp and ffmpeg ---
 Write-Host ""
-Write-Host "[2/5] Checking ffmpeg..." -ForegroundColor Yellow
+Write-Host "[3/6] Checking yt-dlp and ffmpeg..." -ForegroundColor Yellow
 
-$ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
-if ($ffmpegCmd) {
-    Write-Host "  OK - ffmpeg is installed" -ForegroundColor Green
-} else {
-    Write-Host "  ffmpeg not found. Trying to install..." -ForegroundColor Yellow
-    $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-    if ($wingetCmd) {
-        winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  OK - ffmpeg installed via winget" -ForegroundColor Green
-        } else {
-            Write-Host "  Could not install ffmpeg via winget." -ForegroundColor Yellow
-            Write-Host "  Whisper transcription will not work until ffmpeg is installed." -ForegroundColor Yellow
-            Write-Host "  Install later: winget install Gyan.FFmpeg" -ForegroundColor White
+$ytdlp = Get-Command yt-dlp -ErrorAction SilentlyContinue
+$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+
+if (-not $ytdlp -or -not $ffmpeg) {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "  Installing missing tools via winget..." -ForegroundColor White
+        if (-not $ytdlp) {
+            winget install --id yt-dlp.yt-dlp --accept-source-agreements --accept-package-agreements 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Host "  Could not install yt-dlp via winget." -ForegroundColor Yellow }
+        }
+        if (-not $ffmpeg) {
+            winget install --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Host "  Could not install ffmpeg via winget." -ForegroundColor Yellow }
         }
     } else {
-        Write-Host "  WARNING: ffmpeg not found. Whisper will not work." -ForegroundColor Yellow
-        Write-Host "  Install from: https://ffmpeg.org/download.html" -ForegroundColor White
+        if (-not $ytdlp) { Write-Host "  yt-dlp not found. Install from: https://github.com/yt-dlp/yt-dlp/releases" -ForegroundColor Yellow }
+        if (-not $ffmpeg) { Write-Host "  ffmpeg not found. Install from: https://ffmpeg.org/download.html" -ForegroundColor Yellow }
     }
+} else {
+    Write-Host "  OK - yt-dlp and ffmpeg are installed" -ForegroundColor Green
 }
 
-# --- 3. Create virtual environment ---
+# --- 4. npm install ---
 Write-Host ""
-Write-Host "[3/5] Setting up Python environment..." -ForegroundColor Yellow
+Write-Host "[4/6] Installing npm dependencies..." -ForegroundColor Yellow
+
+Set-Location $ProjectRoot
+npm install --legacy-peer-deps
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  npm install failed. Fix errors above and re-run setup.bat." -ForegroundColor Red
+    exit 1
+}
+Write-Host "  OK - npm dependencies installed" -ForegroundColor Green
+
+# --- 5. Environment file ---
+Write-Host ""
+Write-Host "[5/6] Setting up environment (.env.local)..." -ForegroundColor Yellow
+
+$envLocal = Join-Path $ProjectRoot ".env.local"
+$envExample = Join-Path $ProjectRoot ".env.example"
+
+if (-not (Test-Path $envExample)) {
+    Write-Host "  .env.example not found. Skipping env setup." -ForegroundColor Yellow
+} elseif (Test-Path $envLocal) {
+    Write-Host "  OK - .env.local already exists (keeping your keys)" -ForegroundColor Green
+} else {
+    Copy-Item $envExample $envLocal
+    $secret = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+    $raw = Get-Content $envLocal -Raw
+    $updated = $raw -replace 'SESSION_SECRET=change-me-to-random-32-char-string', "SESSION_SECRET=$secret"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($envLocal, $updated, $utf8NoBom)
+    Write-Host "  OK - Created .env.local with a random SESSION_SECRET" -ForegroundColor Green
+    Write-Host "  IMPORTANT: Open .env.local and add your API keys:" -ForegroundColor Cyan
+    Write-Host "    OPENAI_API_KEY - https://platform.openai.com/api-keys" -ForegroundColor White
+    Write-Host "    GOOGLE_GENERATIVE_AI_API_KEY - https://aistudio.google.com/app/apikey" -ForegroundColor White
+}
+
+# --- 6. Python companion venv + packages ---
+Write-Host ""
+Write-Host "[6/6] Setting up Python companion..." -ForegroundColor Yellow
 
 $activateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
 
@@ -95,7 +145,6 @@ if (Test-Path $activateScript) {
     & $pythonCmd -m venv $VenvDir
     if (-not (Test-Path $activateScript)) {
         Write-Host "  ERROR: Failed to create virtual environment." -ForegroundColor Red
-        Write-Host "  Make sure Python is installed correctly." -ForegroundColor Red
         exit 1
     }
     Write-Host "  OK - Virtual environment created" -ForegroundColor Green
@@ -107,62 +156,31 @@ Write-Host "  Activating environment..." -ForegroundColor White
 Write-Host "  Upgrading pip..." -ForegroundColor White
 & python -m pip install --upgrade pip --quiet 2>$null
 
-# --- 4. Install packages ---
-Write-Host ""
-Write-Host "[4/5] Installing packages (1-3 minutes)..." -ForegroundColor Yellow
-
 Write-Host "  Installing flask, flask-cors, yt-dlp, youtube-transcript-api..." -ForegroundColor White
 pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ERROR: Package installation failed." -ForegroundColor Red
-    Write-Host "  Check your internet connection and try again." -ForegroundColor Red
+    Write-Host "  ERROR: Companion package installation failed." -ForegroundColor Red
     exit 1
 }
-Write-Host "  OK - Core packages installed" -ForegroundColor Green
+Write-Host "  OK - Companion packages installed" -ForegroundColor Green
 
-Write-Host "  Installing Whisper AI (speech-to-text)..." -ForegroundColor White
+Write-Host "  Installing Whisper AI (optional, speech-to-text)..." -ForegroundColor White
 pip install openai-whisper --quiet 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
-    Write-Host "  Videos with existing captions will still work." -ForegroundColor Yellow
 } else {
     Write-Host "  OK - Whisper installed" -ForegroundColor Green
-    Write-Host "  Downloading Whisper base model (77 MB)..." -ForegroundColor White
-    Write-Host "  Source: openaipublic.azureedge.net" -ForegroundColor Gray
-
-    $modelUrl = "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt"
-    $cacheDir = Join-Path $env:USERPROFILE ".cache\whisper"
-    $modelFile = Join-Path $cacheDir "base.pt"
-
-    if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
-
-    # Check if already downloaded
+    $modelFile = Join-Path $env:USERPROFILE ".cache\whisper\base.pt"
     if ((Test-Path $modelFile) -and (Get-Item $modelFile).Length -gt 70000000) {
-        Write-Host "  OK - Model already downloaded" -ForegroundColor Green
+        Write-Host "  OK - Whisper model already downloaded" -ForegroundColor Green
     } else {
-        # Download with progress and timeout using Invoke-WebRequest
-        try {
-            Write-Host "  Downloading... (this may take a few minutes)" -ForegroundColor White
-            $ProgressPreference = 'Continue'
-            Invoke-WebRequest -Uri $modelUrl -OutFile $modelFile -TimeoutSec 120 -UseBasicParsing
-            if ((Test-Path $modelFile) -and (Get-Item $modelFile).Length -gt 70000000) {
-                Write-Host "  OK - Model downloaded" -ForegroundColor Green
-            } else {
-                Write-Host "  Download incomplete. Will retry on first use." -ForegroundColor Yellow
-                Remove-Item $modelFile -Force -ErrorAction SilentlyContinue
-            }
-        } catch {
-            Write-Host "  Download failed: $_" -ForegroundColor Yellow
-            Write-Host "  Skipping. Will download on first use." -ForegroundColor Yellow
-            Remove-Item $modelFile -Force -ErrorAction SilentlyContinue
-        }
+        Write-Host "  Skipping model pre-download. Will download on first use." -ForegroundColor Gray
     }
 }
 
-# --- 5. Create desktop shortcut ---
+# --- 7. Desktop shortcut ---
 Write-Host ""
-Write-Host "[5/5] Creating desktop shortcut..." -ForegroundColor Yellow
-
+Write-Host "  Creating desktop shortcut..." -ForegroundColor Yellow
 try {
     $WshShell = New-Object -ComObject WScript.Shell
     $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "B-Roll Scout.lnk"
@@ -171,9 +189,9 @@ try {
     $shortcut.WorkingDirectory = $CompanionDir
     $shortcut.Description = "Start B-Roll Scout"
     $shortcut.Save()
-    Write-Host "  OK - 'B-Roll Scout' shortcut created on Desktop" -ForegroundColor Green
+    Write-Host "  OK - 'B-Roll Scout' shortcut on Desktop" -ForegroundColor Green
 } catch {
-    Write-Host "  Could not create shortcut (non-critical): $_" -ForegroundColor Yellow
+    Write-Host "  Could not create shortcut: $_" -ForegroundColor Yellow
 }
 
 # --- Done ---
@@ -182,11 +200,10 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host "  Setup complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Starting the companion now..." -ForegroundColor White
+Write-Host "  Starting B-Roll Scout now..." -ForegroundColor White
 Write-Host "  Next time, double-click 'B-Roll Scout' on your Desktop." -ForegroundColor White
 Write-Host ""
 
-# Hand off to start-companion.ps1
 $startScript = Join-Path $CompanionDir "start-companion.ps1"
 if (Test-Path $startScript) {
     & $startScript

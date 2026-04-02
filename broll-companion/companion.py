@@ -46,7 +46,7 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 # Browser cookie configuration
 # ---------------------------------------------------------------------------
-COOKIE_BROWSER = os.environ.get("BROLL_COOKIE_BROWSER", "chrome")
+COOKIE_BROWSER = os.environ.get("BROLL_COOKIE_BROWSER", "none")
 _cookie_args: list[str] = []
 _cookie_status: str = "untested"
 
