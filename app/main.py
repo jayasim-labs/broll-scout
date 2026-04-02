@@ -269,7 +269,7 @@ from app.utils import agent_queue
 
 @app.post("/api/v1/agent/poll")
 async def agent_poll(body: AgentPollRequest):
-    tasks = await agent_queue.poll_tasks(body.agent_id)
+    tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=10)
     return {"tasks": tasks}
 
 

@@ -580,3 +580,289 @@ class TestProgressTracking:
         p = get_job_progress("test-job")
         assert len(p["activity_log"]) == 100
         _progress.clear()
+
+
+# ---------------------------------------------------------------------------
+# 13. Agent relay flow (critical end-to-end)
+# ---------------------------------------------------------------------------
+
+class TestAgentRelayFlow:
+    """Tests the full agent task queue relay: create → poll → execute → submit → receive."""
+
+    @pytest.mark.asyncio
+    async def test_full_relay_cycle(self):
+        """Simulates the browser agent: create task, poll it, submit result, receive it."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("search", {
+            "query": "Epstein island footage",
+            "max_results": 5,
+        })
+
+        # Browser agent polls and claims the task
+        tasks = await agent_queue.poll_tasks("browser-agent", max_tasks=10)
+        assert len(tasks) >= 1
+        claimed = next(t for t in tasks if t["task_id"] == task_id)
+        assert claimed["task_type"] == "search"
+        assert claimed["payload"]["query"] == "Epstein island footage"
+
+        # Browser agent posts result (simulating companion response)
+        companion_results = [
+            {"video_id": "wBzUZWLqN4k", "title": "Drone Footage of Epstein Island", "duration_seconds": 356},
+            {"video_id": "lLes27m1irE", "title": "Complete Epstein Island Drone", "duration_seconds": 13132},
+        ]
+
+        async def submit_soon():
+            await asyncio.sleep(0.05)
+            await agent_queue.submit_result(task_id, "completed", companion_results)
+
+        asyncio.create_task(submit_soon())
+        results = await agent_queue.wait_for_result(task_id, timeout=5)
+
+        assert len(results) == 2
+        assert results[0]["video_id"] == "wBzUZWLqN4k"
+        assert results[1]["video_id"] == "lLes27m1irE"
+
+    @pytest.mark.asyncio
+    async def test_multiple_tasks_batched(self):
+        """Multiple tasks created concurrently are all claimable in one poll."""
+        from app.utils import agent_queue
+
+        ids = []
+        for q in ["query A", "query B", "query C"]:
+            tid = await agent_queue.create_task("search", {"query": q, "max_results": 3})
+            ids.append(tid)
+
+        tasks = await agent_queue.poll_tasks("batch-agent", max_tasks=10)
+        claimed_ids = {t["task_id"] for t in tasks}
+        for tid in ids:
+            assert tid in claimed_ids
+
+        # Clean up
+        for tid in ids:
+            await agent_queue.submit_result(tid, "completed", [])
+
+    @pytest.mark.asyncio
+    async def test_channel_search_task_type(self):
+        """Channel search tasks carry the right payload."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("channel_search", {
+            "channel_id": "UC_5jTJ1XNWcq9FOWX6Q7hCg",
+            "query": "documentary footage",
+            "max_results": 5,
+        })
+
+        tasks = await agent_queue.poll_tasks("ch-agent")
+        claimed = next(t for t in tasks if t["task_id"] == task_id)
+        assert claimed["task_type"] == "channel_search"
+        assert claimed["payload"]["channel_id"] == "UC_5jTJ1XNWcq9FOWX6Q7hCg"
+
+        await agent_queue.submit_result(task_id, "completed", [])
+
+    @pytest.mark.asyncio
+    async def test_video_details_task_type(self):
+        """Video details tasks carry a list of video IDs."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("video_details", {
+            "video_ids": ["wBzUZWLqN4k", "lLes27m1irE"],
+        })
+
+        tasks = await agent_queue.poll_tasks("details-agent")
+        claimed = next(t for t in tasks if t["task_id"] == task_id)
+        assert claimed["task_type"] == "video_details"
+        assert len(claimed["payload"]["video_ids"]) == 2
+
+        await agent_queue.submit_result(task_id, "completed", [])
+
+    @pytest.mark.asyncio
+    async def test_failed_task_returns_empty(self):
+        """When agent reports failure, wait_for_result returns empty list."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("search", {"query": "fail test"})
+        await agent_queue.poll_tasks("fail-agent")
+
+        async def submit_failure():
+            await asyncio.sleep(0.05)
+            await agent_queue.submit_result(task_id, "failed", [])
+
+        asyncio.create_task(submit_failure())
+        results = await agent_queue.wait_for_result(task_id, timeout=5)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_task_timeout_returns_empty(self):
+        """Unclaimed tasks timeout gracefully."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("search", {"query": "timeout test"})
+        # Nobody polls — task sits unclaimed
+        results = await agent_queue.wait_for_result(task_id, timeout=0.2)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_concurrent_segments_via_dispatchers(self):
+        """Two segments searching concurrently via dispatchers both get results."""
+        from app.services.searcher import _dispatch_search
+        from app.utils.quota_tracker import QuotaTracker
+        from app.utils import agent_queue
+
+        mock_qt = QuotaTracker()
+        mock_qt.mark_quota_exhausted()
+
+        async def fake_agent_consumer():
+            """Simulates the browser agent loop — poll and submit results."""
+            for _ in range(20):
+                await asyncio.sleep(0.05)
+                tasks = await agent_queue.poll_tasks("test-consumer", max_tasks=10)
+                for task in tasks:
+                    fake_results = [{"video_id": f"vid_{task['payload']['query'][:5]}"}]
+                    await agent_queue.submit_result(task["task_id"], "completed", fake_results)
+
+        consumer = asyncio.create_task(fake_agent_consumer())
+
+        with patch("app.services.searcher.get_quota_tracker", return_value=mock_qt):
+            r1, r2 = await asyncio.gather(
+                _dispatch_search("alpha query", max_results=3, backend="ytdlp_only"),
+                _dispatch_search("beta query", max_results=3, backend="ytdlp_only"),
+            )
+
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+
+        assert len(r1) >= 1
+        assert len(r2) >= 1
+        assert r1[0]["video_id"] == "vid_alpha"
+        assert r2[0]["video_id"] == "vid_beta "
+
+
+# ---------------------------------------------------------------------------
+# 14. Cancel job flow
+# ---------------------------------------------------------------------------
+
+class TestCancelJobFlow:
+
+    @pytest.fixture
+    def client(self):
+        from httpx import AsyncClient, ASGITransport
+        from app.main import app
+        transport = ASGITransport(app=app)
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent_returns_404(self, client):
+        async with client as c:
+            resp = await c.post("/api/v1/jobs/nonexistent-uuid/cancel")
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_job(self, client):
+        """Create a job with a slow pipeline, cancel it, verify it stops."""
+        from app.main import _running_tasks
+
+        async def slow_pipeline(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        with patch("app.main.run_pipeline", side_effect=slow_pipeline):
+            async with client as c:
+                resp = await c.post("/api/v1/jobs", json={
+                    "script": SAMPLE_SCRIPT,
+                    "editor_id": "cancel_test",
+                })
+                assert resp.status_code == 200
+                job_id = resp.json()["job_id"]
+
+                # Task should be running
+                assert job_id in _running_tasks
+
+                # Cancel it
+                cancel_resp = await c.post(f"/api/v1/jobs/{job_id}/cancel")
+                assert cancel_resp.status_code == 200
+                data = cancel_resp.json()
+                assert data["cancelled"] is True
+
+                # Give the task a moment to be cancelled
+                await asyncio.sleep(0.2)
+                assert job_id not in _running_tasks
+
+    @pytest.mark.asyncio
+    async def test_cancel_finished_job(self, client):
+        """Cancelling an already-finished job returns cancelled=false."""
+        with patch("app.main.run_pipeline", new_callable=AsyncMock) as mock_pipe, \
+             patch("app.main.get_storage") as mock_storage_fn:
+            mock_pipe.return_value = None
+
+            mock_storage = AsyncMock()
+            mock_job = MagicMock()
+            mock_job.status.value = "complete"
+            mock_storage.get_job.return_value = mock_job
+            mock_storage_fn.return_value = mock_storage
+
+            async with client as c:
+                resp = await c.post("/api/v1/jobs", json={
+                    "script": SAMPLE_SCRIPT,
+                    "editor_id": "done_test",
+                })
+                job_id = resp.json()["job_id"]
+
+                # Wait for mock pipeline to finish
+                await asyncio.sleep(0.2)
+
+                cancel_resp = await c.post(f"/api/v1/jobs/{job_id}/cancel")
+                assert cancel_resp.status_code == 200
+                data = cancel_resp.json()
+                assert data["cancelled"] is False
+
+
+# ---------------------------------------------------------------------------
+# 15. JobStatus enum includes cancelled
+# ---------------------------------------------------------------------------
+
+class TestJobStatusEnum:
+
+    def test_cancelled_status_exists(self):
+        from app.models.schemas import JobStatus
+        assert JobStatus.CANCELLED.value == "cancelled"
+
+    def test_all_statuses(self):
+        from app.models.schemas import JobStatus
+        expected = {"pending", "processing", "complete", "partial", "failed", "cancelled"}
+        actual = {s.value for s in JobStatus}
+        assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# 16. Stale job cleanup on startup
+# ---------------------------------------------------------------------------
+
+class TestStaleJobCleanup:
+
+    @pytest.mark.asyncio
+    async def test_cleanup_marks_processing_as_failed(self):
+        from app.main import _cleanup_stale_jobs
+        from app.models.schemas import JobStatus, JobSummary
+
+        stale_job = JobSummary(
+            job_id="stale-123", status=JobStatus.PROCESSING,
+            created_at="2026-04-01T00:00:00Z", segment_count=5, result_count=0,
+        )
+        complete_job = JobSummary(
+            job_id="done-456", status=JobStatus.COMPLETE,
+            created_at="2026-04-01T00:00:00Z", segment_count=10, result_count=20,
+        )
+
+        mock_storage = AsyncMock()
+        mock_storage.list_jobs.return_value = [stale_job, complete_job]
+
+        with patch("app.main.get_storage", return_value=mock_storage):
+            await _cleanup_stale_jobs()
+
+        mock_storage.update_job_status.assert_called_once()
+        call_args = mock_storage.update_job_status.call_args
+        assert call_args[0][0] == "stale-123"
+        assert call_args[0][1] == JobStatus.FAILED

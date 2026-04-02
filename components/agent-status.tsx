@@ -5,8 +5,8 @@ import { Wifi, WifiOff, Download, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const COMPANION_URL = "http://localhost:9876"
-const POLL_INTERVAL_ACTIVE = 2000   // fast polling when tasks exist
-const POLL_INTERVAL_IDLE = 10000    // slow polling when no tasks
+const POLL_INTERVAL_ACTIVE = 500    // fast polling when job is running
+const POLL_INTERVAL_IDLE = 10000    // slow polling when no job
 const HEALTH_CHECK_INTERVAL = 15000
 
 type AgentState = "connected" | "disconnected" | "checking"
@@ -158,11 +158,6 @@ export function useAgentLoop(jobActive: boolean) {
 
     async function loop() {
       while (!cancelled) {
-        if (!jobActiveRef.current) {
-          await sleep(POLL_INTERVAL_IDLE)
-          continue
-        }
-
         try {
           let companionOk = false
           try {
@@ -183,14 +178,14 @@ export function useAgentLoop(jobActive: boolean) {
           })
 
           if (!pollResp.ok) {
-            await sleep(POLL_INTERVAL_IDLE)
+            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
             continue
           }
 
           const { tasks } = await pollResp.json()
 
           if (!tasks || tasks.length === 0) {
-            await sleep(POLL_INTERVAL_ACTIVE)
+            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
             continue
           }
 

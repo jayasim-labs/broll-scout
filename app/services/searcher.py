@@ -30,9 +30,6 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5
 # ---------------------------------------------------------------------------
 
 async def _search_via_agent(query: str, max_results: int = 10) -> list[dict]:
-    if not agent_queue.is_agent_available():
-        logger.warning("No agent connected — cannot run yt-dlp search for: %s", query)
-        return []
     task_id = await agent_queue.create_task("search", {
         "query": query,
         "max_results": max_results,
@@ -41,9 +38,6 @@ async def _search_via_agent(query: str, max_results: int = 10) -> list[dict]:
 
 
 async def _channel_search_via_agent(channel_id: str, query: str, max_results: int = 5) -> list[dict]:
-    if not agent_queue.is_agent_available():
-        logger.warning("No agent connected — cannot run yt-dlp channel search")
-        return []
     task_id = await agent_queue.create_task("channel_search", {
         "channel_id": channel_id,
         "query": query,
@@ -53,9 +47,6 @@ async def _channel_search_via_agent(channel_id: str, query: str, max_results: in
 
 
 async def _details_via_agent(video_ids: list[str]) -> list[dict]:
-    if not agent_queue.is_agent_available():
-        logger.warning("No agent connected — cannot fetch video details via yt-dlp")
-        return []
     task_id = await agent_queue.create_task("video_details", {
         "video_ids": video_ids,
     })
@@ -239,18 +230,26 @@ class SearcherService:
         qt = get_quota_tracker()
         using_agent = (backend == "ytdlp_only") or (backend == "auto" and qt.is_quota_exhausted)
         if using_agent:
-            if agent_queue.is_agent_available():
-                await _emit("zap", f"Using local yt-dlp agent for \"{seg_label}\" (YouTube API quota {"exhausted" if backend == "auto" else "bypassed"})")
-            else:
-                await _emit("alert", f"YouTube API quota exhausted and no companion app running — searches will return empty for \"{seg_label}\". Start the companion app (python companion.py) to continue.")
+            await _emit("zap", f"Using local yt-dlp agent for \"{seg_label}\" (YouTube API quota {"exhausted" if backend == "auto" else "bypassed"})")
+
+        def _collect(results: list[dict]) -> list[str]:
+            """Extract video IDs and stash full metadata when using yt-dlp."""
+            ids = []
+            for r in results:
+                vid = r.get("video_id", "")
+                if vid:
+                    ids.append(vid)
+                    if using_agent and vid not in search_metadata:
+                        search_metadata[vid] = r
+            return ids
 
         # (a) Preferred Channel Search (Tier 1)
         if tier1_ids:
             await _emit("search", f"🎬 \"{seg_label}\" — checking {len(tier1_ids)} preferred channels first")
-        tier1_video_ids = await self._search_tier1_channels(
-            tier1_ids, query_text, results_per_query, job_id, backend
+        tier1_video_ids = await self._search_tier1_channels_full(
+            tier1_ids, query_text, results_per_query, job_id, backend, _emit if using_agent else None
         )
-        all_video_ids.extend(tier1_video_ids)
+        all_video_ids.extend(_collect(tier1_video_ids))
         if tier1_video_ids:
             await _emit("check", f"  ✓ Found {len(tier1_video_ids)} videos from your preferred channels")
 
@@ -258,11 +257,11 @@ class SearcherService:
         queries_str = " → ".join(q[:40] for q in segment.search_queries[:3])
         source_name = "yt-dlp" if using_agent else "YouTube"
         await _emit("globe", f"🎬 \"{seg_label}\" — searching {source_name} for: {queries_str}")
-        yt_video_ids = await self._search_youtube_primary(
-            segment.search_queries, results_per_query, job_id, backend
+        yt_results = await self._search_youtube_primary_full(
+            segment.search_queries, results_per_query, job_id, backend, _emit if using_agent else None
         )
-        all_video_ids.extend(yt_video_ids)
-        await _emit("check", f"  ✓ {source_name} returned {len(yt_video_ids)} videos")
+        all_video_ids.extend(_collect(yt_results))
+        await _emit("check", f"  ✓ {source_name} returned {len(yt_results)} videos")
 
         # (c) Google Custom Search API (Secondary — only when using YouTube API)
         if backend != "ytdlp_only":
@@ -280,14 +279,18 @@ class SearcherService:
         if not (qt.is_quota_exhausted and backend == "auto") or backend == "ytdlp_only":
             await _emit("sparkles", f"  Asking Gemini AI to suggest creative search angles I might have missed...")
             initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
-            expanded_ids = await self._gemini_expand_and_search(
-                segment.summary, initial_titles, results_per_query, job_id, backend
+            expanded_results = await self._gemini_expand_and_search_full(
+                segment.summary, initial_titles, results_per_query, job_id, backend,
+                _emit if using_agent else None
             )
             new_from_gemini = 0
-            for vid in expanded_ids:
-                if vid not in all_video_ids:
+            for r in expanded_results:
+                vid = r.get("video_id", "")
+                if vid and vid not in all_video_ids:
                     all_video_ids.append(vid)
                     new_from_gemini += 1
+                    if using_agent and vid not in search_metadata:
+                        search_metadata[vid] = r
             if new_from_gemini:
                 await _emit("sparkles", f"  ✓ Gemini's creative queries found {new_from_gemini} more videos")
 
@@ -297,8 +300,21 @@ class SearcherService:
             await _emit("alert", f"  No videos found for \"{seg_label}\" from any source")
             return []
 
-        await _emit("eye", f"  Loading details for {len(unique_ids)} videos (checking duration, views, channel)...")
-        video_details = await _dispatch_video_details(unique_ids, job_id=job_id, backend=backend)
+        if using_agent and search_metadata:
+            # yt-dlp search already returned full metadata — skip the expensive per-video fetch
+            video_details = [search_metadata[vid] for vid in unique_ids if vid in search_metadata]
+            ids_missing = [vid for vid in unique_ids if vid not in search_metadata]
+            if ids_missing:
+                await _emit("eye", f"  Fetching details for {len(ids_missing)} videos not yet cached...")
+                await _emit("terminal", f"  ▸ yt-dlp --dump-json for {len(ids_missing)} video IDs")
+                extra = await _dispatch_video_details(ids_missing, job_id=job_id, backend=backend)
+                video_details.extend(extra)
+            else:
+                await _emit("eye", f"  ✓ Already have full metadata for all {len(video_details)} videos from search results (skipped {len(video_details)} redundant fetches)")
+        else:
+            await _emit("eye", f"  Loading details for {len(unique_ids)} videos (checking duration, views, channel)...")
+            video_details = await _dispatch_video_details(unique_ids, job_id=job_id, backend=backend)
+
         channel_ids = list({v.get("channel_id", "") for v in video_details if v.get("channel_id")})
         channel_stats = await _dispatch_channel_stats(channel_ids, job_id=job_id, backend=backend) if channel_ids else {}
 
@@ -367,7 +383,10 @@ class SearcherService:
         progress_callback=None,
         on_activity=None,
     ) -> dict[str, list[CandidateVideo]]:
-        max_concurrent: int = self._get("max_concurrent_segments") or 5
+        backend = self._backend()
+        qt = get_quota_tracker()
+        using_agent = (backend == "ytdlp_only") or (backend == "auto" and qt.is_quota_exhausted)
+        max_concurrent: int = 2 if using_agent else (self._get("max_concurrent_segments") or 5)
         semaphore = asyncio.Semaphore(max_concurrent)
         results: dict[str, list[CandidateVideo]] = {}
         total = len(segments)
@@ -402,45 +421,58 @@ class SearcherService:
 
     # ── Tier 1 channel search ───────────────────────────────────────────
 
-    async def _search_tier1_channels(
+    async def _search_tier1_channels_full(
         self,
         channel_ids: list[str],
         query: str,
         max_results: int,
         job_id: str | None,
         backend: str = "auto",
-    ) -> list[str]:
-        video_ids: list[str] = []
+        emit=None,
+    ) -> list[dict]:
+        all_results: list[dict] = []
         for ch_id in channel_ids:
             try:
+                if emit:
+                    url = f"https://www.youtube.com/channel/{ch_id}/search?query={query}"
+                    await emit("terminal", f"  ▸ yt-dlp \"{url}\" --flat-playlist --playlist-end {max_results}")
                 results = await _dispatch_channel_search(
                     channel_id=ch_id, query=query,
                     max_results=max_results, job_id=job_id, backend=backend,
                 )
-                video_ids.extend(r.get("video_id", "") for r in results if r.get("video_id"))
+                found = [r for r in results if r.get("video_id")]
+                all_results.extend(found)
+                if emit and found:
+                    await emit("check", f"    → {len(found)} videos from channel {ch_id[:15]}…")
             except Exception:
                 logger.warning("Tier 1 channel search failed for %s", ch_id)
-        return video_ids
+        return all_results
 
     # ── YouTube / yt-dlp primary search ─────────────────────────────────
 
-    async def _search_youtube_primary(
+    async def _search_youtube_primary_full(
         self,
         queries: list[str],
         max_results: int,
         job_id: str | None,
         backend: str = "auto",
-    ) -> list[str]:
-        video_ids: list[str] = []
+        emit=None,
+    ) -> list[dict]:
+        all_results: list[dict] = []
         for q in queries:
             try:
+                if emit:
+                    await emit("terminal", f"  ▸ yt-dlp \"ytsearch{max_results}:{q}\" --dump-json --flat-playlist")
                 results = await _dispatch_search(
                     query=q, max_results=max_results, job_id=job_id, backend=backend,
                 )
-                video_ids.extend(r.get("video_id", "") for r in results if r.get("video_id"))
+                found = [r for r in results if r.get("video_id")]
+                all_results.extend(found)
+                if emit:
+                    await emit("check", f"    → {len(found)} results for \"{q[:50]}\"")
             except Exception:
                 logger.warning("Search failed for query: %s", q)
-        return video_ids
+        return all_results
 
     # ── Google CSE search ───────────────────────────────────────────────
 
@@ -515,14 +547,15 @@ class SearcherService:
 
     # ── Gemini query expansion ──────────────────────────────────────────
 
-    async def _gemini_expand_and_search(
+    async def _gemini_expand_and_search_full(
         self,
         summary: str,
         initial_titles: list[str],
         max_results: int,
         job_id: str | None,
         backend: str = "auto",
-    ) -> list[str]:
+        emit=None,
+    ) -> list[dict]:
         api_key = self._settings.gemini_api_key
         if not api_key:
             return []
@@ -542,16 +575,25 @@ class SearcherService:
         if not expanded_queries:
             return []
 
-        video_ids: list[str] = []
+        if emit:
+            queries_preview = ", ".join(f'"{q[:35]}"' for q in expanded_queries[:3])
+            await emit("sparkles", f"  Gemini suggested: {queries_preview}{'…' if len(expanded_queries) > 3 else ''}")
+
+        all_results: list[dict] = []
         for q in expanded_queries:
             try:
+                if emit:
+                    await emit("terminal", f"  ▸ yt-dlp \"ytsearch{max_results}:{q}\" --dump-json --flat-playlist")
                 results = await _dispatch_search(
                     query=q, max_results=max_results, job_id=job_id, backend=backend,
                 )
-                video_ids.extend(r.get("video_id", "") for r in results if r.get("video_id"))
+                found = [r for r in results if r.get("video_id")]
+                all_results.extend(found)
+                if emit and found:
+                    await emit("check", f"    → {len(found)} results for \"{q[:50]}\"")
             except Exception:
                 logger.warning("Expanded query search failed for: %s", q)
-        return video_ids
+        return all_results
 
     async def _call_gemini(
         self, prompt: str, api_key: str, job_id: str | None

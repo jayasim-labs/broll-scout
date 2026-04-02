@@ -16,6 +16,7 @@ import {
   Shield,
   FileText,
   ClipboardList,
+  Terminal,
   type LucideIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -42,6 +43,7 @@ const iconMap: Record<string, LucideIcon> = {
   mic: Mic,
   clock: Clock,
   shield: Shield,
+  terminal: Terminal,
 }
 
 const iconColor: Record<string, string> = {
@@ -57,6 +59,7 @@ const iconColor: Record<string, string> = {
   mic: "text-teal-400",
   clock: "text-slate-400",
   shield: "text-indigo-400",
+  terminal: "text-lime-400",
 }
 
 const stages = [
@@ -172,7 +175,8 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
                           "text-xs leading-relaxed",
                           isLatest
                             ? "text-foreground"
-                            : "text-muted-foreground"
+                            : "text-muted-foreground",
+                          entry.icon === "terminal" && "font-mono text-[11px] text-lime-400/80"
                         )}
                       >
                         {entry.text}
