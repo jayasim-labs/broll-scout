@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "dev": "next dev",
+    "dev": "lsof -ti:3000,3001 | xargs kill -9 2>/dev/null; next dev",
     "lint": "eslint .",
     "start": "next start"
   },

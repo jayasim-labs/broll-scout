@@ -3,7 +3,7 @@ import os
 import uuid
 import logging
 
-from fastapi import FastAPI, HTTPException, Header, BackgroundTasks, Query, Request
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -57,15 +57,21 @@ async def health_check():
     return HealthResponse(status="ok", db=db_status, version="0.1.0")
 
 
+_running_tasks: dict[str, asyncio.Task] = {}
+
+
 @app.post("/api/v1/jobs")
 async def create_job(
     body: JobCreateRequest,
-    background_tasks: BackgroundTasks,
     x_api_key: str | None = Header(default=None),
 ):
     _verify_key(x_api_key)
     job_id = str(uuid.uuid4())
-    background_tasks.add_task(run_pipeline, job_id, body.script, body.editor_id)
+
+    task = asyncio.create_task(run_pipeline(job_id, body.script, body.editor_id))
+    _running_tasks[job_id] = task
+    task.add_done_callback(lambda t: _running_tasks.pop(job_id, None))
+
     return {
         "job_id": job_id,
         "status": "processing",
@@ -108,6 +114,7 @@ async def get_job_status(job_id: str):
             "stage": "completed" if job.status == JobStatus.COMPLETE else job.status.value,
             "percent_complete": 100 if job.status == JobStatus.COMPLETE else 0,
             "message": "Complete" if job.status == JobStatus.COMPLETE else job.status.value,
+            "activity_log": [],
         },
     }
 

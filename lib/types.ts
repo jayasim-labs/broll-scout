@@ -7,10 +7,17 @@ export type TranscriptSource =
   | "whisper_transcription"
   | "no_transcript"
 
+export interface ActivityEntry {
+  time: string
+  icon: "brain" | "search" | "globe" | "sparkles" | "filter" | "check" | "alert" | "zap" | "eye" | "mic" | "clock" | "shield"
+  text: string
+}
+
 export interface JobProgress {
   stage: "queued" | "translating" | "searching" | "matching" | "ranking" | "completed" | "failed"
   percent_complete: number
   message: string
+  activity_log: ActivityEntry[]
 }
 
 export interface APICosts {

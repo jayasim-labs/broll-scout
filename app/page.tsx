@@ -20,7 +20,8 @@ export default function HomePage() {
   const [progress, setProgress] = useState<JobProgress>({
     stage: 'queued',
     percent_complete: 0,
-    message: 'Initializing...'
+    message: 'Initializing...',
+    activity_log: [],
   })
   const [job, setJob] = useState<JobResponse | null>(null)
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
@@ -102,7 +103,8 @@ export default function HomePage() {
       setProgress({
         stage: 'queued',
         percent_complete: 0,
-        message: 'Starting pipeline...'
+        message: 'Starting pipeline...',
+        activity_log: [{ time: new Date().toLocaleTimeString('en-GB'), icon: 'zap', text: 'Submitting your script to the pipeline...' }],
       })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to start scouting')
@@ -146,7 +148,7 @@ export default function HomePage() {
     setViewState('input')
     setCurrentJobId(null)
     setJob(null)
-    setProgress({ stage: 'queued', percent_complete: 0, message: 'Initializing...' })
+    setProgress({ stage: 'queued', percent_complete: 0, message: 'Initializing...', activity_log: [] })
   }
 
   return (
