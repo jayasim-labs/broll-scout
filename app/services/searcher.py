@@ -304,12 +304,13 @@ class SearcherService:
 
         # (e) Batch Video Details
         unique_ids = list(dict.fromkeys(all_video_ids))
+        dupes_removed = len(all_video_ids) - len(unique_ids)
         if not unique_ids:
             await _emit("alert", f"  No videos found for \"{seg_label}\" from any source")
             return []
 
+        dupe_note = f" ({dupes_removed} duplicates removed)" if dupes_removed else ""
         if using_agent and search_metadata:
-            # yt-dlp search already returned full metadata — skip the expensive per-video fetch
             video_details = [search_metadata[vid] for vid in unique_ids if vid in search_metadata]
             ids_missing = [vid for vid in unique_ids if vid not in search_metadata]
             if ids_missing:
@@ -318,9 +319,9 @@ class SearcherService:
                 extra = await _dispatch_video_details(ids_missing, job_id=job_id, backend=backend)
                 video_details.extend(extra)
             else:
-                await _emit("eye", f"  ✓ Already have full metadata for all {len(video_details)} videos from search results (skipped {len(video_details)} redundant fetches)")
+                await _emit("eye", f"  ✓ Already have full metadata for all {len(video_details)} videos from search results")
         else:
-            await _emit("eye", f"  Loading details for {len(unique_ids)} videos (checking duration, views, channel)...")
+            await _emit("eye", f"  Loading details for {len(unique_ids)} unique videos{dupe_note} (checking duration, views, channel)...")
             video_details = await _dispatch_video_details(unique_ids, job_id=job_id, backend=backend)
 
         channel_ids = list({v.get("channel_id", "") for v in video_details if v.get("channel_id")})

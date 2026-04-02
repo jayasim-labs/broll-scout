@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, useCallback } from "react"
+import { Navbar } from "@/components/navbar"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -163,14 +164,14 @@ function ServiceBreakdown({ period, pricing }: { period: UsagePeriod; pricing: R
             <p className="font-mono text-sm font-medium">
               {svc.cost > 0 ? `$${svc.cost.toFixed(4)}` : "—"}
             </p>
-            <p className="text-xs text-muted-foreground">
-              {svc.calls} call{svc.calls !== 1 ? "s" : ""}
+            <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <span>{svc.calls} call{svc.calls !== 1 ? "s" : ""}</span>
               {svc.note && (
-                <Badge variant="outline" className="ml-2 text-[10px] py-0 px-1">
+                <Badge variant="outline" className="text-[10px] py-0 px-1">
                   {svc.note}
                 </Badge>
               )}
-            </p>
+            </div>
           </div>
         </div>
       ))}
@@ -265,14 +266,19 @@ export default function UsagePage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+      <div className="min-h-screen bg-background">
+        <Navbar />
+        <div className="flex items-center justify-center h-[60vh]">
+          <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div className="min-h-screen bg-background">
+      <Navbar />
+      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">API Usage & Costs</h1>
@@ -375,6 +381,7 @@ export default function UsagePage() {
             </CardContent>
           </Card>
         </div>
+      </div>
       </div>
     </div>
   )
