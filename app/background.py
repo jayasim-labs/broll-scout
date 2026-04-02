@@ -89,7 +89,8 @@ async def run_pipeline(
             script, job_id, on_progress=_translator_progress,
         )
 
-        _log_activity(job_id, "brain", f"Translation done! Your ~{script_duration}-minute script has been broken into {len(segments)} scenes, each needing different B-roll footage")
+        translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
+        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} scenes, each needing different B-roll footage")
         for i, seg in enumerate(segments, 1):
             _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}")
 
@@ -107,7 +108,7 @@ async def run_pipeline(
         est_min = est_search_sec // 60
         est_sec = est_search_sec % 60
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
-        _set_progress(job_id, "searching", 20, f"Searching YouTube, Google, and AI for B-roll clips...")
+        _set_progress(job_id, "searching", 20, f"Searching YouTube & yt-dlp for B-roll clips...")
         _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})")
         sources = "preferred channels → YouTube/yt-dlp"
         if enable_gemini_expansion:
@@ -188,8 +189,9 @@ async def run_pipeline(
         est_m_min = est_match_sec // 60
         est_m_sec = est_match_sec % 60
         est_m_str = f"{est_m_min}m {est_m_sec}s" if est_m_min else f"{est_m_sec}s"
+        timestamp_model = pipeline_cfg.get("timestamp_model", "gpt-4o-mini")
         _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})")
-        _log_activity(job_id, "clock", "For each video: reading the transcript → asking AI to find the peak visual moment → checking the timestamp makes sense")
+        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {timestamp_model} finds peak visual moment → validate timestamp")
 
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService()
@@ -222,13 +224,18 @@ async def run_pipeline(
                 all_segment_results[segment.segment_id] = []
                 continue
 
-            _log_activity(job_id, "mic", f"Reading transcripts of {len(cands)} videos to understand what's said at each moment...")
+            _log_activity(job_id, "mic", f"Fetching transcripts for {len(cands)} videos (cache → YouTube captions → companion → Whisper base)")
+
+            async def _match_activity(icon: str, text: str):
+                _log_activity(job_id, icon, text)
 
             try:
                 matched = await asyncio.wait_for(
                     _match_candidates(
                         cands, segment, matcher, transcriber, job_id,
                         max_concurrent_candidates,
+                        on_activity=_match_activity,
+                        timestamp_model_name=timestamp_model,
                     ),
                     timeout=segment_timeout,
                 )
@@ -246,7 +253,12 @@ async def run_pipeline(
                     _log_activity(job_id, "sparkles", f"  ▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}")
 
             ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg)
-            _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\"")
+            if ranked:
+                top = ranked[0]
+                source_label = _TRANSCRIPT_SOURCE_LABELS.get(top.source_flag.value, top.source_flag.value) if hasattr(top, 'source_flag') else ""
+                _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\" (ranked by keyword density, views, channel, caption quality, recency)")
+            else:
+                _log_activity(job_id, "filter", f"No clips passed quality filters for \"{segment.title}\"")
             all_segment_results[segment.segment_id] = ranked
     
 
@@ -311,7 +323,11 @@ async def run_pipeline(
 
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
-        api_costs.update(get_quota_tracker().stats)
+        qt_stats = get_quota_tracker().stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        api_costs["quota_exhausted"] = qt_stats.get("quota_exhausted", False)
+        api_costs["search_mode"] = qt_stats.get("search_mode", "unknown")
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
         _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}")
@@ -355,6 +371,15 @@ async def run_pipeline(
 
 
 
+_TRANSCRIPT_SOURCE_LABELS = {
+    "cached_transcript": "DynamoDB cache",
+    "youtube_captions": "YouTube manual captions",
+    "youtube_auto_captions": "YouTube auto-captions",
+    "whisper_transcription": "Whisper base (local)",
+    "no_transcript": "no transcript available",
+}
+
+
 async def _match_candidates(
     candidates: List[CandidateVideo],
     segment: Segment,
@@ -362,10 +387,19 @@ async def _match_candidates(
     transcriber: TranscriberService,
     job_id: str,
     max_concurrent: int,
+    on_activity=None,
+    timestamp_model_name: str = "gpt-4o-mini",
 ) -> List[Tuple[CandidateVideo, MatchResult]]:
     semaphore = asyncio.Semaphore(max_concurrent)
     results: List[Tuple[CandidateVideo, MatchResult]] = []
     lock = asyncio.Lock()
+
+    async def _emit(icon: str, text: str):
+        if on_activity:
+            try:
+                await on_activity(icon, text)
+            except Exception:
+                pass
 
     async def process_one(cand: CandidateVideo):
         async with semaphore:
@@ -376,11 +410,21 @@ async def _match_candidates(
                     job_id=job_id,
                 )
 
+                source_label = _TRANSCRIPT_SOURCE_LABELS.get(
+                    transcript.transcript_source.value, transcript.transcript_source.value
+                )
+
                 logger.info(
                     "Transcript for %s: source=%s has_text=%s",
                     cand.video_id, transcript.transcript_source.value,
                     bool(transcript.transcript_text),
                 )
+
+                short_title = cand.video_title[:45]
+                if transcript.transcript_text:
+                    await _emit("mic", f"  📄 \"{short_title}\" — transcript via {source_label}")
+                else:
+                    await _emit("alert", f"  ✗ \"{short_title}\" — {source_label}, skipping timestamp analysis")
 
                 video_meta = {
                     "video_duration_seconds": cand.video_duration_seconds,
@@ -401,6 +445,11 @@ async def _match_candidates(
                     cand.video_id, match.confidence_score,
                     match.context_match_valid, match.start_time_seconds,
                 )
+
+                if transcript.transcript_text and match.confidence_score > 0:
+                    ts_min = (match.start_time_seconds or 0) // 60
+                    ts_sec = (match.start_time_seconds or 0) % 60
+                    await _emit("brain", f"  🤖 {timestamp_model_name} → \"{short_title}\" → {match.confidence_score:.0%} confidence at {ts_min}:{ts_sec:02d}")
 
                 async with lock:
                     results.append((cand, match))

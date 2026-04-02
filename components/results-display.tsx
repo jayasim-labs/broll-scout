@@ -1,13 +1,15 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useRef, useCallback } from "react"
 import {
   Download, ChevronDown, ChevronUp, ExternalLink, RefreshCw,
-  ThumbsUp, ThumbsDown, Clock, Eye, Star,
+  ThumbsUp, ThumbsDown, Clock, Eye, Play, Scissors,
+  Check, Pause, SkipBack, SkipForward, X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
 import type { JobResponse, Segment, RankedResult } from "@/lib/types"
@@ -77,18 +79,28 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
 
       <Card>
         <CardContent className="pt-4">
-          <p className="text-sm text-muted-foreground mb-2">API Usage</p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-            <span>GPT-4o: {job.api_costs.openai_calls} calls</span>
-            <span>GPT-4o-mini: {job.api_costs.openai_mini_calls} calls</span>
-            <span>YouTube: {job.api_costs.youtube_api_units} units</span>
-            <span>Gemini: {job.api_costs.gemini_calls} calls</span>
+          <p className="text-sm text-muted-foreground mb-2">API & Resource Usage</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1.5 text-xs">
+            <span className="text-muted-foreground">GPT-4o <span className="text-foreground/70">(translation)</span>: <span className="text-foreground">{job.api_costs.openai_calls}</span> calls</span>
+            <span className="text-muted-foreground">GPT-4o-mini <span className="text-foreground/70">(timestamps)</span>: <span className="text-foreground">{job.api_costs.openai_mini_calls}</span> calls</span>
+            <span className="text-muted-foreground">Whisper base <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.whisper_calls || 0}</span> videos{job.api_costs.whisper_minutes > 0 ? ` (${job.api_costs.whisper_minutes.toFixed(1)} min audio)` : ''}</span>
+            <span className="text-muted-foreground">yt-dlp searches <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.ytdlp_searches || 0}</span></span>
+            <span className="text-muted-foreground">YouTube API: <span className="text-foreground">{job.api_costs.youtube_api_units}</span> units</span>
+            {job.api_costs.gemini_calls > 0 && (
+              <span className="text-muted-foreground">Gemini <span className="text-foreground/70">(expansion)</span>: <span className="text-foreground">{job.api_costs.gemini_calls}</span> calls</span>
+            )}
           </div>
-          {job.processing_time_seconds && (
-            <p className="text-xs text-muted-foreground mt-2">
-              Processed in {job.processing_time_seconds.toFixed(1)}s
-            </p>
-          )}
+          <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+            {job.processing_time_seconds && (
+              <span>Processed in {job.processing_time_seconds.toFixed(1)}s</span>
+            )}
+            {job.api_costs.estimated_cost_usd > 0 && (
+              <span>Est. cost: ${job.api_costs.estimated_cost_usd.toFixed(4)}</span>
+            )}
+            {job.api_costs.search_mode && (
+              <span className="capitalize">Search: {job.api_costs.search_mode}</span>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>
@@ -162,109 +174,377 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
   )
 }
 
+const COMPANION_URL = "http://localhost:9876"
+
+type DownloadState = "idle" | "downloading" | "done" | "error"
+
 function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) {
+  const [showPreview, setShowPreview] = useState(false)
+  const [markedUsed, setMarkedUsed] = useState(result.clip_used)
   const [feedbackSent, setFeedbackSent] = useState(false)
+  const [clipStart, setClipStart] = useState(result.start_time_seconds ?? 0)
+  const [clipEnd, setClipEnd] = useState(result.end_time_seconds ?? (result.start_time_seconds ?? 0) + 45)
+  const [dlState, setDlState] = useState<DownloadState>("idle")
+  const [dlInfo, setDlInfo] = useState<string>("")
+  const playerRef = useRef<HTMLIFrameElement>(null)
 
   const sendFeedback = async (rating: number, clipUsed: boolean) => {
     try {
-      await fetch(`/api/v1/feedback/${result.result_id}?job_id=${jobId}`, {
+      await fetch(`/api/v1/results/${result.result_id}/feedback?job_id=${jobId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating, clip_used: clipUsed }),
       })
+      if (clipUsed) setMarkedUsed(true)
       setFeedbackSent(true)
     } catch {}
   }
 
+  const clipDuration = Math.max(0, clipEnd - clipStart)
+  const embedUrl = `https://www.youtube.com/embed/${result.video_id}?start=${clipStart}&end=${clipEnd}&autoplay=1&rel=0&modestbranding=1`
+
+  const handleClipDownload = useCallback(async () => {
+    setDlState("downloading")
+    setDlInfo("Sending clip request to companion app...")
+
+    try {
+      const resp = await fetch(`${COMPANION_URL}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_type: "clip",
+          payload: {
+            video_id: result.video_id,
+            start_seconds: clipStart,
+            end_seconds: clipEnd,
+          },
+        }),
+        mode: "cors",
+      })
+      const data = await resp.json()
+      if (data.status === "ok") {
+        setDlState("done")
+        setDlInfo(`Saved to ${data.file_path} (${data.file_size_mb} MB)`)
+      } else {
+        setDlState("error")
+        setDlInfo(data.message || "Download failed")
+      }
+    } catch {
+      setDlState("error")
+      const ytdlpCmd = `yt-dlp "${result.video_url}" --download-sections "*${formatTime(clipStart)}-${formatTime(clipEnd)}" --force-keyframes-at-cuts -o "clip_${result.video_id}_${clipStart}-${clipEnd}.mp4"`
+      try { await navigator.clipboard.writeText(ytdlpCmd) } catch {}
+      setDlInfo("Companion not running. yt-dlp command copied to clipboard.")
+    }
+  }, [result.video_id, result.video_url, clipStart, clipEnd])
+
   return (
-    <div className="flex gap-3 p-3 bg-secondary/30 rounded-lg border border-border">
-      {result.thumbnail_url && (
-        <a
-          href={result.clip_url || result.video_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex-shrink-0"
-        >
-          <img
-            src={result.thumbnail_url}
-            alt={result.video_title}
-            className="w-40 h-24 rounded object-cover hover:opacity-80 transition-opacity"
-          />
-        </a>
-      )}
-      <div className="flex-1 min-w-0 space-y-2">
-        <div className="flex items-start justify-between gap-2">
-          <div>
+    <div className="bg-secondary/30 rounded-lg border border-border overflow-hidden">
+      {/* Main card row */}
+      <div className="flex gap-3 p-3">
+        {/* Thumbnail / Preview toggle */}
+        <div className="flex-shrink-0 relative group">
+          {result.thumbnail_url && (
+            <button onClick={() => setShowPreview(!showPreview)} className="relative block">
+              <img
+                src={result.thumbnail_url}
+                alt={result.video_title}
+                className="w-44 h-[100px] rounded object-cover transition-opacity group-hover:opacity-80"
+              />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                {showPreview ? (
+                  <X className="w-8 h-8 text-white" />
+                ) : (
+                  <Play className="w-8 h-8 text-white fill-white" />
+                )}
+              </div>
+              {result.start_time_seconds != null && (
+                <span className="absolute bottom-1 left-1 bg-black/80 text-white text-[10px] px-1.5 py-0.5 rounded font-mono">
+                  {formatTime(result.start_time_seconds)}
+                </span>
+              )}
+            </button>
+          )}
+        </div>
+
+        {/* Info */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <a
+                href={result.clip_url || result.video_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-medium hover:text-primary transition-colors line-clamp-1"
+              >
+                {result.video_title}
+              </a>
+              <p className="text-xs text-muted-foreground">{result.channel_name}</p>
+            </div>
+            <Badge className={cn("text-xs border shrink-0", scoreColor(result.relevance_score))}>
+              {(result.relevance_score * 100).toFixed(0)}%
+            </Badge>
+          </div>
+
+          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+            {result.start_time_seconds != null && (
+              <span className="inline-flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                {formatTime(result.start_time_seconds)}
+                {result.end_time_seconds != null && ` – ${formatTime(result.end_time_seconds)}`}
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              <Eye className="w-3 h-3" />
+              {formatViews(result.view_count)} views
+            </span>
+            <Badge variant="outline" className="text-xs">
+              {result.source_flag.replace(/_/g, ' ')}
+            </Badge>
+          </div>
+
+          {result.the_hook && (
+            <p className="text-xs text-primary italic line-clamp-1">&quot;{result.the_hook}&quot;</p>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-1.5 pt-1 flex-wrap">
+            <Button
+              variant={showPreview ? "secondary" : "default"}
+              size="sm"
+              className="h-7 text-xs gap-1.5 px-2.5"
+              onClick={() => setShowPreview(!showPreview)}
+            >
+              {showPreview ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+              {showPreview ? 'Close Preview' : 'Preview'}
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1.5 px-2.5"
+              onClick={handleClipDownload}
+            >
+              <Scissors className="w-3 h-3" />
+              Clip & Download
+            </Button>
+
             <a
               href={result.clip_url || result.video_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-sm font-medium hover:text-primary transition-colors line-clamp-1"
             >
-              {result.video_title}
+              <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 px-2.5">
+                <ExternalLink className="w-3 h-3" />
+                YouTube
+              </Button>
             </a>
-            <p className="text-xs text-muted-foreground">{result.channel_name}</p>
-          </div>
-          <Badge className={cn("text-xs border", scoreColor(result.relevance_score))}>
-            {(result.relevance_score * 100).toFixed(0)}%
-          </Badge>
-        </div>
 
-        <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-          {result.start_time_seconds != null && (
-            <span className="inline-flex items-center gap-1">
-              <Clock className="w-3 h-3" />
-              {formatTime(result.start_time_seconds)}
-              {result.end_time_seconds != null && ` – ${formatTime(result.end_time_seconds)}`}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1">
-            <Eye className="w-3 h-3" />
-            {formatViews(result.view_count)} views
-          </span>
-          <Badge variant="outline" className="text-xs">
-            {result.source_flag.replace(/_/g, ' ')}
-          </Badge>
-        </div>
-
-        {result.the_hook && (
-          <p className="text-xs text-primary italic">&quot;{result.the_hook}&quot;</p>
-        )}
-
-        {result.transcript_excerpt && (
-          <p className="text-xs text-muted-foreground line-clamp-2">
-            {result.transcript_excerpt}
-          </p>
-        )}
-
-        <div className="flex items-center gap-2 pt-1">
-          <a
-            href={result.clip_url || result.video_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-          >
-            <ExternalLink className="w-3 h-3" />
-            Open clip
-          </a>
-          {!feedbackSent ? (
             <div className="flex items-center gap-1 ml-auto">
-              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => sendFeedback(5, true)}>
-                <ThumbsUp className="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => sendFeedback(1, false)}>
-                <ThumbsDown className="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => sendFeedback(5, true)}>
-                <Star className="w-3 h-3 mr-1" />
-                Used
-              </Button>
+              {!markedUsed ? (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    onClick={() => sendFeedback(5, false)}
+                    title="Good clip"
+                  >
+                    <ThumbsUp className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    onClick={() => sendFeedback(1, false)}
+                    title="Bad clip"
+                  >
+                    <ThumbsDown className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs gap-1.5 px-2.5 border-green-500/40 text-green-400 hover:bg-green-500/10"
+                    onClick={() => sendFeedback(5, true)}
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Mark Used
+                  </Button>
+                </>
+              ) : (
+                <Badge className="bg-green-500/20 text-green-400 border-green-500/30 text-xs gap-1">
+                  <Check className="w-3 h-3" />
+                  Used in project
+                </Badge>
+              )}
             </div>
-          ) : (
-            <span className="text-xs text-muted-foreground ml-auto">Feedback sent</span>
-          )}
+          </div>
         </div>
       </div>
+
+      {/* Expandable preview + clip controls */}
+      {showPreview && (
+        <div className="border-t border-border bg-black/20 p-3 space-y-3">
+          {/* Embedded YouTube player */}
+          <div className="aspect-video w-full max-w-2xl mx-auto rounded-lg overflow-hidden bg-black">
+            <iframe
+              ref={playerRef}
+              src={embedUrl}
+              className="w-full h-full"
+              allow="autoplay; encrypted-media"
+              allowFullScreen
+              title={`Preview: ${result.video_title}`}
+            />
+          </div>
+
+          {/* Clip range controls */}
+          <div className="max-w-2xl mx-auto space-y-2">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-muted-foreground w-20">Clip range:</span>
+              <div className="flex items-center gap-2 flex-1">
+                <div className="flex items-center gap-1">
+                  <label className="text-[10px] text-muted-foreground uppercase">Start</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={result.video_duration_seconds}
+                    value={clipStart}
+                    onChange={(e) => setClipStart(Math.max(0, parseInt(e.target.value) || 0))}
+                    className="w-20 h-7 text-xs font-mono"
+                  />
+                  <span className="text-[10px] text-muted-foreground">{formatTime(clipStart)}</span>
+                </div>
+                <span className="text-muted-foreground">–</span>
+                <div className="flex items-center gap-1">
+                  <label className="text-[10px] text-muted-foreground uppercase">End</label>
+                  <Input
+                    type="number"
+                    min={clipStart}
+                    max={result.video_duration_seconds}
+                    value={clipEnd}
+                    onChange={(e) => setClipEnd(Math.max(clipStart, parseInt(e.target.value) || 0))}
+                    className="w-20 h-7 text-xs font-mono"
+                  />
+                  <span className="text-[10px] text-muted-foreground">{formatTime(clipEnd)}</span>
+                </div>
+                <Badge variant="secondary" className="text-[10px] ml-1">
+                  {clipDuration}s clip
+                </Badge>
+              </div>
+            </div>
+
+            {/* Quick adjust buttons */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground w-20">Quick adjust:</span>
+              <div className="flex gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2"
+                  onClick={() => { setClipStart(Math.max(0, clipStart - 10)) }}
+                >
+                  <SkipBack className="w-3 h-3 mr-0.5" /> -10s
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2"
+                  onClick={() => { setClipStart(clipStart + 10) }}
+                >
+                  +10s <SkipForward className="w-3 h-3 ml-0.5" />
+                </Button>
+                <span className="text-muted-foreground/40 mx-1">|</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2"
+                  onClick={() => { setClipEnd(Math.max(clipStart, clipEnd - 10)) }}
+                >
+                  <SkipBack className="w-3 h-3 mr-0.5" /> -10s end
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2"
+                  onClick={() => { setClipEnd(clipEnd + 10) }}
+                >
+                  +10s end <SkipForward className="w-3 h-3 ml-0.5" />
+                </Button>
+                <span className="text-muted-foreground/40 mx-1">|</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] px-2"
+                  onClick={() => {
+                    setClipStart(result.start_time_seconds ?? 0)
+                    setClipEnd(result.end_time_seconds ?? (result.start_time_seconds ?? 0) + 45)
+                  }}
+                >
+                  Reset
+                </Button>
+              </div>
+            </div>
+
+            {/* Download row */}
+            <div className="space-y-2 pt-1 border-t border-border/50">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button
+                  size="sm"
+                  className="h-8 text-xs gap-2 bg-primary"
+                  onClick={handleClipDownload}
+                  disabled={dlState === "downloading"}
+                >
+                  {dlState === "downloading" ? (
+                    <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                  {dlState === "downloading"
+                    ? "Downloading..."
+                    : `Clip & Download (${formatTime(clipStart)} – ${formatTime(clipEnd)})`}
+                </Button>
+                {!markedUsed && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 text-xs gap-2 border-green-500/40 text-green-400 hover:bg-green-500/10"
+                    onClick={() => sendFeedback(5, true)}
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Mark as Used & Save to Library
+                  </Button>
+                )}
+                {markedUsed && (
+                  <Badge className="bg-green-500/20 text-green-400 border-green-500/30 text-xs gap-1 h-8 px-3">
+                    <Check className="w-3.5 h-3.5" />
+                    Saved to library
+                  </Badge>
+                )}
+              </div>
+              {dlInfo && (
+                <p className={cn(
+                  "text-xs px-2 py-1.5 rounded",
+                  dlState === "done" && "bg-green-500/10 text-green-400",
+                  dlState === "error" && "bg-amber-500/10 text-amber-400",
+                  dlState === "downloading" && "bg-blue-500/10 text-blue-400",
+                )}>
+                  {dlState === "done" && <Check className="w-3 h-3 inline mr-1" />}
+                  {dlInfo}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Transcript excerpt for context */}
+          {result.transcript_excerpt && (
+            <div className="max-w-2xl mx-auto">
+              <p className="text-[10px] text-muted-foreground uppercase mb-1">Transcript at this moment</p>
+              <p className="text-xs text-muted-foreground bg-black/30 rounded p-2 font-mono leading-relaxed">
+                {result.transcript_excerpt}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

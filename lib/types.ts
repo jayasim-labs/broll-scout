@@ -26,12 +26,13 @@ export interface APICosts {
   openai_input_tokens: number
   openai_output_tokens: number
   whisper_minutes: number
+  whisper_calls: number
   youtube_api_units: number
   google_cse_calls: number
   gemini_calls: number
+  ytdlp_searches: number
+  ytdlp_detail_lookups: number
   estimated_cost_usd: number
-  ytdlp_searches_via_agent?: number
-  ytdlp_detail_lookups_via_agent?: number
   search_mode?: string
   quota_exhausted?: boolean
 }

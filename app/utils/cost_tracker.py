@@ -28,6 +28,7 @@ class JobCosts:
     openai_gpt4o_mini_input_tokens: int = 0
     openai_gpt4o_mini_output_tokens: int = 0
     whisper_minutes: float = 0.0
+    whisper_calls: int = 0
     youtube_api_units: int = 0
     google_cse_calls: int = 0
     gemini_calls: int = 0
@@ -47,6 +48,7 @@ class JobCosts:
 
     def add_whisper(self, minutes: float) -> None:
         with self._lock:
+            self.whisper_calls += 1
             self.whisper_minutes += minutes
 
     def add_youtube_search(self) -> None:
@@ -83,6 +85,7 @@ class JobCosts:
             "openai_input_tokens": self.openai_gpt4o_input_tokens + self.openai_gpt4o_mini_input_tokens,
             "openai_output_tokens": self.openai_gpt4o_output_tokens + self.openai_gpt4o_mini_output_tokens,
             "whisper_minutes": self.whisper_minutes,
+            "whisper_calls": self.whisper_calls,
             "youtube_api_units": self.youtube_api_units,
             "google_cse_calls": self.google_cse_calls,
             "gemini_calls": self.gemini_calls,

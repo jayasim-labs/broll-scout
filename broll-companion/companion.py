@@ -77,6 +77,14 @@ def execute():
         results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
     elif task_type == "whisper":
         results = whisper_transcribe(payload["video_id"], payload.get("max_duration_min", 60))
+    elif task_type == "clip":
+        result = clip_download(
+            payload["video_id"],
+            payload.get("start_seconds", 0),
+            payload.get("end_seconds", 60),
+            payload.get("output_dir"),
+        )
+        return jsonify(result)
     else:
         return jsonify({"error": f"Unknown task type: {task_type}"}), 400
 
@@ -237,6 +245,61 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
 
         transcript_text = "\n".join(lines)
         return [{"video_id": video_id, "transcript": transcript_text, "source": "whisper_transcription"}]
+
+
+def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_dir: str | None = None) -> dict:
+    """Download a clipped section of a YouTube video using yt-dlp --download-sections."""
+    import os
+
+    if output_dir is None:
+        output_dir = os.path.join(os.path.expanduser("~"), "Downloads", "BRoll Clips")
+    os.makedirs(output_dir, exist_ok=True)
+
+    start_ts = _seconds_to_hms(start_seconds)
+    end_ts = _seconds_to_hms(end_seconds)
+
+    filename = f"clip_{video_id}_{start_seconds}-{end_seconds}.mp4"
+    output_path = os.path.join(output_dir, filename)
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    cmd = [
+        "yt-dlp", url,
+        "--download-sections", f"*{start_ts}-{end_ts}",
+        "--force-keyframes-at-cuts",
+        "--merge-output-format", "mp4",
+        "--no-playlist", "--no-warnings",
+        "-o", output_path,
+    ]
+
+    log.info("Clip download: %s [%s – %s]", video_id, start_ts, end_ts)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if proc.returncode == 0 and os.path.exists(output_path):
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            log.info("Clip saved: %s (%.1f MB)", output_path, file_size_mb)
+            return {
+                "status": "ok",
+                "file_path": output_path,
+                "file_name": filename,
+                "file_size_mb": round(file_size_mb, 2),
+                "duration_seconds": end_seconds - start_seconds,
+            }
+        else:
+            log.warning("Clip download failed for %s: %s", video_id, proc.stderr[:500])
+            return {"status": "error", "message": proc.stderr[:500] or "Download failed"}
+    except subprocess.TimeoutExpired:
+        log.warning("Clip download timed out for %s", video_id)
+        return {"status": "error", "message": "Download timed out (3 min limit)"}
+    except Exception as e:
+        log.error("Clip download error: %s", e)
+        return {"status": "error", "message": str(e)}
+
+
+def _seconds_to_hms(total_seconds: int) -> str:
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    s = total_seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def _normalize(data: dict) -> dict:

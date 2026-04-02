@@ -150,9 +150,12 @@ class APICosts(BaseModel):
     openai_input_tokens: int = 0
     openai_output_tokens: int = 0
     whisper_minutes: float = 0.0
+    whisper_calls: int = 0
     youtube_api_units: int = 0
     google_cse_calls: int = 0
     gemini_calls: int = 0
+    ytdlp_searches: int = 0
+    ytdlp_detail_lookups: int = 0
     estimated_cost_usd: float = 0.0
 
 

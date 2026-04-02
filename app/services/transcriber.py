@@ -101,6 +101,11 @@ class TranscriberService:
                         language="en",
                         duration=video_duration_seconds,
                     )
+                    if job_id:
+                        whisper_min = round(video_duration_seconds / 60, 1)
+                        costs = get_cost_tracker().get_job_costs(job_id)
+                        if costs:
+                            costs.add_whisper(whisper_min)
                     logger.info("Whisper transcript stored for %s", video_id)
                     return Transcript(
                         video_id=video_id,
