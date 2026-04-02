@@ -263,11 +263,11 @@ class SearcherService:
                         search_metadata[vid] = r
             return ids
 
-        # (a) Preferred Channel Search (Tier 1)
+        # (a) Preferred Channel Search (Tier 1) — always via yt-dlp to save API quota
         if tier1_ids:
-            await _emit("search", f"🎬 \"{seg_label}\" — checking {len(tier1_ids)} preferred channels first")
+            await _emit("search", f"🎬 \"{seg_label}\" — checking {len(tier1_ids)} preferred channels via yt-dlp")
             tier1_video_ids = await self._search_tier1_channels_full(
-                tier1_ids, query_text, results_per_query, job_id, backend, _emit if using_agent else None
+                tier1_ids, query_text, results_per_query, job_id, "ytdlp_only", _emit
             )
             all_video_ids.extend(_collect(tier1_video_ids))
             if tier1_video_ids:
@@ -396,10 +396,17 @@ class SearcherService:
         progress_callback=None,
         on_activity=None,
     ) -> dict[str, list[CandidateVideo]]:
+        tier1_ids = self._get("preferred_channels_tier1") or []
+        has_preferred = len(tier1_ids) > 0
         backend = self._backend()
         qt = get_quota_tracker()
         using_agent = (backend == "ytdlp_only") or (backend == "auto" and qt.is_quota_exhausted)
-        max_concurrent: int = 2 if using_agent else (self._get("max_concurrent_segments") or 5)
+        if has_preferred:
+            max_concurrent = 3
+        elif using_agent:
+            max_concurrent = 2
+        else:
+            max_concurrent = self._get("max_concurrent_segments") or 5
         semaphore = asyncio.Semaphore(max_concurrent)
         results: dict[str, list[CandidateVideo]] = {}
         total = len(segments)
