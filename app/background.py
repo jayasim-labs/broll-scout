@@ -89,7 +89,7 @@ async def run_pipeline(
 
 
         word_count = len(script.split())
-        script_duration = max(1, round(word_count / 150))
+        script_duration = max(1, round(word_count / 100))
 
         async def _translator_progress(icon: str, text: str):
             _log_activity(job_id, icon, text, depth=1, group="translate")
@@ -157,14 +157,15 @@ async def run_pipeline(
             _log_activity(job_id, "alert", f"{empty_segments} of {len(segments)} scenes had no candidate videos from search", depth=1, group="search")
         logger.info("Job %s search: %d candidates, %d empty segments", job_id, total_candidates, empty_segments)
 
-        # --- Retry search for long scripts until we have enough candidates ---
-        min_target = pipeline_cfg.get("min_total_results_for_long_scripts", 30)
+        # --- Retry search until we have enough candidates (proportional to script length) ---
+        # 1 candidate per 100 words: 3000 words → 30 target, 1500 words → 15 target
+        min_target = max(10, round(word_count / 100))
         max_retries = 3
         retry_round = 0
-        if script_duration >= 25 and total_candidates < min_target:
-            _log_activity(job_id, "alert", f"Long script (~{script_duration} min) needs at least {min_target} candidate videos, but only {total_candidates} found so far — retrying sparse scenes", group="search")
+        if total_candidates < min_target:
+            _log_activity(job_id, "alert", f"Your ~{word_count}-word script needs at least {min_target} candidate videos, but only {total_candidates} found so far — retrying sparse scenes", group="search")
 
-        while script_duration >= 25 and total_candidates < min_target and retry_round < max_retries:
+        while total_candidates < min_target and retry_round < max_retries:
             retry_round += 1
             sparse_segments = [
                 seg for seg in segments
@@ -282,7 +283,7 @@ async def run_pipeline(
         for results in all_segment_results.values():
             all_results.extend(results)
 
-        low_threshold = pipeline_cfg.get("low_result_threshold", 20)
+        low_threshold = max(5, round(word_count / 100))
         minimum_results_met = len(all_results) >= script_duration
 
         # --- Recovery search ---

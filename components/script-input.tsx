@@ -35,7 +35,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
     return text ? text.split(/\s+/).length : 0
   }, [script])
 
-  const estimatedMinutes = useMemo(() => Math.ceil(wordCount / 150), [wordCount])
+  const estimatedMinutes = useMemo(() => Math.ceil(wordCount / 100), [wordCount])
 
   const handleSubmit = () => {
     if (charCount < 100) return

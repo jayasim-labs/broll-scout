@@ -56,7 +56,7 @@ class TranslatorService:
         special_instructions = DEFAULTS.get("special_instructions", "")
 
         word_count = len(script.split())
-        estimated_minutes = max(1, round(word_count / 150))
+        estimated_minutes = max(1, round(word_count / 100))
 
         await _emit("brain", f"Your script is ~{word_count} words (~{estimated_minutes} minutes of video). Sending to GPT-4o to translate from Tamil to English")
         await _emit("clock", f"GPT-4o will also break your script into scenes and figure out what B-roll each scene needs. This usually takes 15–30 seconds")
