@@ -13,6 +13,7 @@ from app.models.schemas import (
     FeedbackRequest, SettingsUpdateRequest, BulkSettingsUpdateRequest,
     ChannelResolveRequest, SettingsResponse, HealthResponse,
     LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
+    ProjectCreateRequest, ProjectListResponse, ProjectResponse, ProjectSummary,
 )
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
@@ -89,16 +90,32 @@ async def create_job(
 ):
     _verify_key(x_api_key)
     job_id = str(uuid.uuid4())
+    storage = get_storage()
+
+    project_id = body.project_id
+    title = body.title.strip() if body.title else ""
+
+    if not project_id and title:
+        project_id = str(uuid.uuid4())
+        await storage.create_project(project_id, title)
+    elif project_id:
+        existing = await storage.get_project(project_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Project not found")
 
     task = asyncio.create_task(run_pipeline(
         job_id, body.script, body.editor_id,
         enable_gemini_expansion=body.enable_gemini_expansion,
+        project_id=project_id,
+        title=title,
     ))
     _running_tasks[job_id] = task
     task.add_done_callback(lambda t: _running_tasks.pop(job_id, None))
 
     return {
         "job_id": job_id,
+        "project_id": project_id,
+        "title": title,
         "status": "processing",
         "estimated_time_seconds": 120,
     }
@@ -309,6 +326,85 @@ async def resolve_channels_by_name(
             for name, r in results.items()
         }
     }
+
+
+# --- Project Endpoints ---
+
+
+@app.get("/api/v1/projects")
+async def list_projects(
+    limit: int = Query(default=50, ge=1, le=200),
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    projects = await storage.list_projects(limit=limit)
+    return ProjectListResponse(projects=projects)
+
+
+@app.post("/api/v1/projects")
+async def create_project(
+    body: ProjectCreateRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    project_id = str(uuid.uuid4())
+    await storage.create_project(project_id, body.title.strip())
+    return {"project_id": project_id, "title": body.title.strip()}
+
+
+@app.get("/api/v1/projects/{project_id}")
+async def get_project(
+    project_id: str,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    proj = await storage.get_project(project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    jobs = await storage.list_jobs(limit=100)
+    project_jobs = [j for j in jobs if j.project_id == project_id]
+    project_jobs.sort(key=lambda j: j.created_at, reverse=True)
+
+    return ProjectResponse(
+        project_id=proj.get("project_id", ""),
+        title=proj.get("title", ""),
+        created_at=proj.get("created_at", ""),
+        updated_at=proj.get("updated_at", ""),
+        job_count=len(project_jobs),
+        total_clips=sum(j.result_count for j in project_jobs),
+        jobs=project_jobs,
+    )
+
+
+@app.put("/api/v1/projects/{project_id}")
+async def rename_project(
+    project_id: str,
+    body: ProjectCreateRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    ok = await storage.rename_project(project_id, body.title.strip())
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to rename project")
+    return {"status": "ok", "project_id": project_id, "title": body.title.strip()}
+
+
+@app.delete("/api/v1/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    ok = await storage.delete_project(project_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete project")
+    return {"status": "ok"}
 
 
 # --- Local yt-dlp Agent Endpoints ---

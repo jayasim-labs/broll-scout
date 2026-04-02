@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Video, Settings, Home } from "lucide-react"
+import { Video, Settings, Home, FolderOpen } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { AgentStatusBadge } from "@/components/agent-status"
 
@@ -34,6 +34,16 @@ export function Navbar() {
             >
               <Home className="w-5 h-5" />
               <span className="hidden sm:inline">Scout</span>
+            </Link>
+            <Link
+              href="/projects"
+              className={cn(
+                "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",
+                pathname === "/projects" && "text-foreground"
+              )}
+            >
+              <FolderOpen className="w-5 h-5" />
+              <span className="hidden sm:inline">Projects</span>
             </Link>
             <Link
               href="/settings"

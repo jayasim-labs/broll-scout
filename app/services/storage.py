@@ -10,8 +10,8 @@ from botocore.exceptions import ClientError
 
 from app.config import get_settings
 from app.models.schemas import (
-    APICosts, JobResponse, JobStatus, JobSummary, RankedResult, Segment,
-    SegmentWithResults, Transcript, TranscriptSource,
+    APICosts, JobResponse, JobStatus, JobSummary, ProjectSummary, RankedResult,
+    Segment, SegmentWithResults, Transcript, TranscriptSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ class StorageService:
     async def create_job(
         self, job_id: str, script_hash: str,
         editor_id: str = "default_editor", script_language: str = "ta",
+        project_id: Optional[str] = None, title: Optional[str] = None,
     ) -> Dict[str, Any]:
         item = {
             "job_id": job_id,
@@ -69,6 +70,8 @@ class StorageService:
             "api_costs": {},
             "editor_id": editor_id,
             "english_translation": None,
+            "project_id": project_id,
+            "title": title,
         }
         try:
             await self._run(self._table("jobs").put_item, Item=item)
@@ -192,6 +195,8 @@ class StorageService:
                 api_costs=APICosts(**{k: (int(v) if isinstance(v, int) else _from_dynamo_float(v)) for k, v in costs_data.items()}) if costs_data else APICosts(),
                 segments=segments_with_results,
                 english_translation=item.get("english_translation"),
+                project_id=item.get("project_id"),
+                title=item.get("title"),
             )
         except ClientError:
             logger.exception("Failed to get job %s", job_id)
@@ -202,7 +207,7 @@ class StorageService:
             resp = await self._run(
                 self._table("jobs").scan,
                 Limit=min(limit, 100),
-                ProjectionExpression="job_id, #st, created_at, segment_count, result_count",
+                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title",
                 ExpressionAttributeNames={"#st": "status"},
             )
             items = resp.get("Items", [])
@@ -214,6 +219,8 @@ class StorageService:
                     created_at=i.get("created_at", ""),
                     segment_count=int(i.get("segment_count", 0)),
                     result_count=int(i.get("result_count", 0)),
+                    project_id=i.get("project_id"),
+                    title=i.get("title"),
                 )
                 for i in items[:limit]
             ]
@@ -399,6 +406,112 @@ class StorageService:
         except ClientError:
             logger.exception("Failed to search library")
             return []
+
+
+    # ─── Project CRUD ───
+
+    async def create_project(self, project_id: str, title: str) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        item = {
+            "project_id": project_id,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "job_count": 0,
+            "total_clips": 0,
+        }
+        try:
+            await self._run(self._table("projects").put_item, Item=item)
+        except ClientError:
+            logger.exception("Failed to create project %s", project_id)
+        return item
+
+    async def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            resp = await self._run(
+                self._table("projects").get_item,
+                Key={"project_id": project_id},
+            )
+            return resp.get("Item")
+        except ClientError:
+            logger.exception("Failed to get project %s", project_id)
+            return None
+
+    async def list_projects(self, limit: int = 50) -> List[ProjectSummary]:
+        try:
+            resp = await self._run(
+                self._table("projects").scan,
+                Limit=min(limit, 200),
+            )
+            items = resp.get("Items", [])
+            items.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+            return [
+                ProjectSummary(
+                    project_id=i.get("project_id", ""),
+                    title=i.get("title", ""),
+                    created_at=i.get("created_at", ""),
+                    updated_at=i.get("updated_at", ""),
+                    job_count=int(i.get("job_count", 0)),
+                    total_clips=int(i.get("total_clips", 0)),
+                )
+                for i in items[:limit]
+            ]
+        except ClientError:
+            logger.exception("Failed to list projects")
+            return []
+
+    async def update_project_stats(self, project_id: str) -> None:
+        """Recalculate job_count and total_clips for a project by scanning jobs."""
+        try:
+            resp = await self._run(
+                self._table("jobs").scan,
+                FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
+                ProjectionExpression="job_id, result_count, #st",
+                ExpressionAttributeNames={"#st": "status"},
+            )
+            items = resp.get("Items", [])
+            job_count = len(items)
+            total_clips = sum(int(i.get("result_count", 0)) for i in items)
+
+            await self._run(
+                self._table("projects").update_item,
+                Key={"project_id": project_id},
+                UpdateExpression="SET job_count = :jc, total_clips = :tc, updated_at = :ua",
+                ExpressionAttributeValues={
+                    ":jc": job_count,
+                    ":tc": total_clips,
+                    ":ua": datetime.utcnow().isoformat(),
+                },
+            )
+        except ClientError:
+            logger.exception("Failed to update project stats for %s", project_id)
+
+    async def delete_project(self, project_id: str) -> bool:
+        try:
+            await self._run(
+                self._table("projects").delete_item,
+                Key={"project_id": project_id},
+            )
+            return True
+        except ClientError:
+            logger.exception("Failed to delete project %s", project_id)
+            return False
+
+    async def rename_project(self, project_id: str, new_title: str) -> bool:
+        try:
+            await self._run(
+                self._table("projects").update_item,
+                Key={"project_id": project_id},
+                UpdateExpression="SET title = :t, updated_at = :ua",
+                ExpressionAttributeValues={
+                    ":t": new_title,
+                    ":ua": datetime.utcnow().isoformat(),
+                },
+            )
+            return True
+        except ClientError:
+            logger.exception("Failed to rename project %s", project_id)
+            return False
 
 
 _storage: Optional[StorageService] = None

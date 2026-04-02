@@ -328,6 +328,12 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
     """Download a clipped section of a YouTube video using yt-dlp --download-sections."""
     import os
 
+    if start_seconds >= end_seconds:
+        return {
+            "status": "error",
+            "message": f"Invalid range: start ({start_seconds}s) must be before end ({end_seconds}s)",
+        }
+
     if output_dir is None:
         output_dir = os.path.join(os.path.expanduser("~"), "Downloads", "BRoll Clips")
     os.makedirs(output_dir, exist_ok=True)

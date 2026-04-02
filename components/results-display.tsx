@@ -182,8 +182,10 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
   const [showPreview, setShowPreview] = useState(false)
   const [markedUsed, setMarkedUsed] = useState(result.clip_used)
   const [feedbackSent, setFeedbackSent] = useState(false)
-  const [clipStart, setClipStart] = useState(result.start_time_seconds ?? 0)
-  const [clipEnd, setClipEnd] = useState(result.end_time_seconds ?? (result.start_time_seconds ?? 0) + 45)
+  const initStart = result.start_time_seconds ?? 0
+  const initEnd = result.end_time_seconds ?? initStart + 45
+  const [clipStart, setClipStart] = useState(Math.min(initStart, initEnd))
+  const [clipEnd, setClipEnd] = useState(Math.max(initStart, initEnd) || initStart + 45)
   const [dlState, setDlState] = useState<DownloadState>("idle")
   const [dlInfo, setDlInfo] = useState<string>("")
   const playerRef = useRef<HTMLIFrameElement>(null)
@@ -204,6 +206,11 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
   const embedUrl = `https://www.youtube.com/embed/${result.video_id}?start=${clipStart}&end=${clipEnd}&autoplay=1&rel=0&modestbranding=1`
 
   const handleClipDownload = useCallback(async () => {
+    if (clipStart >= clipEnd) {
+      setDlState("error")
+      setDlInfo(`Invalid clip range: start (${formatTime(clipStart)}) must be before end (${formatTime(clipEnd)}). Adjust the timestamps above.`)
+      return
+    }
     setDlState("downloading")
     setDlInfo("Sending clip request to companion app...")
 
@@ -408,7 +415,7 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
                     min={0}
                     max={result.video_duration_seconds}
                     value={clipStart}
-                    onChange={(e) => setClipStart(Math.max(0, parseInt(e.target.value) || 0))}
+                    onChange={(e) => setClipStart(Math.min(clipEnd - 1, Math.max(0, parseInt(e.target.value) || 0)))}
                     className="w-20 h-7 text-xs font-mono"
                   />
                   <span className="text-[10px] text-muted-foreground">{formatTime(clipStart)}</span>
@@ -448,7 +455,7 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
                   variant="ghost"
                   size="sm"
                   className="h-6 text-[10px] px-2"
-                  onClick={() => { setClipStart(clipStart + 10) }}
+                  onClick={() => { setClipStart(Math.min(clipEnd - 1, clipStart + 10)) }}
                 >
                   +10s <SkipForward className="w-3 h-3 ml-0.5" />
                 </Button>

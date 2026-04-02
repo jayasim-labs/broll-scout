@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
+import { useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import { Navbar } from "@/components/navbar"
 import { ScriptInput } from "@/components/script-input"
@@ -8,16 +9,18 @@ import { ProgressTracker } from "@/components/progress-tracker"
 import { ResultsDisplay } from "@/components/results-display"
 import { JobHistory } from "@/components/job-history"
 import { AgentOnboardingBanner, useAgentLoop } from "@/components/agent-status"
-import type { JobResponse, JobProgress, JobSummary } from "@/lib/types"
+import type { JobResponse, JobProgress, JobSummary, ProjectSummary } from "@/lib/types"
 
 const API_BASE = '/api/v1'
 
 type ViewState = 'input' | 'processing' | 'results'
 
 export default function HomePage() {
+  const searchParams = useSearchParams()
   const [viewState, setViewState] = useState<ViewState>('input')
   const [isLoading, setIsLoading] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [progress, setProgress] = useState<JobProgress>({
     stage: 'queued',
     percent_complete: 0,
@@ -26,11 +29,20 @@ export default function HomePage() {
   })
   const [job, setJob] = useState<JobResponse | null>(null)
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
   useAgentLoop(viewState === 'processing')
 
   useEffect(() => {
     loadJobHistory()
+    loadProjects()
   }, [])
+
+  useEffect(() => {
+    const jobParam = searchParams.get("job")
+    if (jobParam && viewState === "input") {
+      handleLoadJob(jobParam)
+    }
+  }, [searchParams])
 
   const loadJobHistory = async () => {
     try {
@@ -38,6 +50,18 @@ export default function HomePage() {
       if (resp.ok) {
         const data = await resp.json()
         setJobHistory(data.jobs || [])
+      }
+    } catch {
+      // Backend may not be running
+    }
+  }
+
+  const loadProjects = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/projects`)
+      if (resp.ok) {
+        const data = await resp.json()
+        setProjects(data.projects || [])
       }
     } catch {
       // Backend may not be running
@@ -67,16 +91,19 @@ export default function HomePage() {
           setViewState('results')
           toast.success('Scouting complete!')
           loadJobHistory()
+          loadProjects()
         }
         return true
       } else if (status.status === 'failed') {
         toast.error('Job failed')
         loadJobHistory()
+        loadProjects()
         resetToInput()
         return true
       } else if (status.status === 'cancelled') {
         toast.info('Job was cancelled')
         loadJobHistory()
+        loadProjects()
         resetToInput()
         return true
       }
@@ -96,7 +123,11 @@ export default function HomePage() {
     return () => clearInterval(interval)
   }, [viewState, currentJobId, pollJobStatus])
 
-  const handleSubmit = async (script: string, options?: { enableGeminiExpansion: boolean }) => {
+  const handleSubmit = async (script: string, options: {
+    enableGeminiExpansion: boolean
+    title: string
+    projectId?: string
+  }) => {
     setIsLoading(true)
     try {
       const response = await fetch(`${API_BASE}/jobs`, {
@@ -104,8 +135,10 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           script,
+          title: options.title,
+          project_id: options.projectId || null,
           editor_id: 'default_editor',
-          enable_gemini_expansion: options?.enableGeminiExpansion ?? false,
+          enable_gemini_expansion: options.enableGeminiExpansion,
         })
       })
 
@@ -116,6 +149,7 @@ export default function HomePage() {
 
       const data = await response.json()
       setCurrentJobId(data.job_id)
+      if (data.project_id) setActiveProjectId(data.project_id)
       setViewState('processing')
       setProgress({
         stage: 'queued',
@@ -127,12 +161,15 @@ export default function HomePage() {
         if (prev.some(j => j.job_id === data.job_id)) return prev
         return [{
           job_id: data.job_id,
-          status: 'processing',
+          status: 'processing' as const,
           created_at: new Date().toISOString(),
           segment_count: 0,
           result_count: 0,
+          project_id: data.project_id || null,
+          title: data.title || null,
         }, ...prev]
       })
+      loadProjects()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to start scouting')
     } finally {
@@ -158,10 +195,46 @@ export default function HomePage() {
         const data = await resp.json()
         setJob(data)
         setCurrentJobId(jobId)
+        if (data.project_id) setActiveProjectId(data.project_id)
         setViewState('results')
       }
     } catch {
       toast.error('Failed to load job')
+    }
+  }
+
+  const handleSelectProject = (projectId: string) => {
+    setActiveProjectId(projectId)
+  }
+
+  const handleRenameProject = async (projectId: string, newTitle: string) => {
+    try {
+      const resp = await fetch(`${API_BASE}/projects/${projectId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle }),
+      })
+      if (resp.ok) {
+        setProjects(prev =>
+          prev.map(p => p.project_id === projectId ? { ...p, title: newTitle } : p)
+        )
+        toast.success('Project renamed')
+      }
+    } catch {
+      toast.error('Failed to rename project')
+    }
+  }
+
+  const handleDeleteProject = async (projectId: string) => {
+    try {
+      const resp = await fetch(`${API_BASE}/projects/${projectId}`, { method: 'DELETE' })
+      if (resp.ok) {
+        setProjects(prev => prev.filter(p => p.project_id !== projectId))
+        if (activeProjectId === projectId) setActiveProjectId(null)
+        toast.success('Project deleted')
+      }
+    } catch {
+      toast.error('Failed to delete project')
     }
   }
 
@@ -211,15 +284,26 @@ export default function HomePage() {
         <aside className="hidden lg:block w-72 border-r border-border p-4 min-h-[calc(100vh-64px)] sticky top-16">
           <JobHistory
             jobs={jobHistory}
+            projects={projects}
             activeJobId={currentJobId}
-            onSelect={handleLoadJob}
+            activeProjectId={activeProjectId}
+            onSelectJob={handleLoadJob}
+            onSelectProject={handleSelectProject}
+            onRenameProject={handleRenameProject}
+            onDeleteProject={handleDeleteProject}
+            onNewProject={resetToInput}
           />
         </aside>
 
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-8 max-w-5xl">
           <AgentOnboardingBanner />
           {viewState === 'input' && (
-            <ScriptInput onSubmit={handleSubmit} isLoading={isLoading} />
+            <ScriptInput
+              onSubmit={handleSubmit}
+              isLoading={isLoading}
+              projects={projects}
+              preselectedProjectId={activeProjectId}
+            />
           )}
           {viewState === 'processing' && (
             <ProgressTracker progress={progress} onCancel={handleCancel} />

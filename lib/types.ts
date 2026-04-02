@@ -11,6 +11,8 @@ export interface ActivityEntry {
   time: string
   icon: "brain" | "search" | "globe" | "sparkles" | "filter" | "check" | "alert" | "zap" | "eye" | "mic" | "clock" | "shield"
   text: string
+  depth?: number
+  group?: string
 }
 
 export interface JobProgress {
@@ -87,6 +89,8 @@ export interface JobResponse {
   api_costs: APICosts
   segments: Segment[]
   english_translation: string | null
+  project_id?: string | null
+  title?: string | null
 }
 
 export interface JobSummary {
@@ -95,6 +99,21 @@ export interface JobSummary {
   created_at: string
   segment_count: number
   result_count: number
+  project_id?: string | null
+  title?: string | null
+}
+
+export interface ProjectSummary {
+  project_id: string
+  title: string
+  created_at: string
+  updated_at: string
+  job_count: number
+  total_clips: number
+}
+
+export interface ProjectWithJobs extends ProjectSummary {
+  jobs: JobSummary[]
 }
 
 export interface ChannelResolution {

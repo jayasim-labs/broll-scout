@@ -95,6 +95,11 @@ def main():
         attr_defs=[{"AttributeName": "channel_id", "AttributeType": "S"}],
     )
 
+    create_table(client, "projects",
+        key_schema=[{"AttributeName": "project_id", "KeyType": "HASH"}],
+        attr_defs=[{"AttributeName": "project_id", "AttributeType": "S"}],
+    )
+
     print("\nAll tables created successfully!")
 
 

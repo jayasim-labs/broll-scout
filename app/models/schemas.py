@@ -24,6 +24,8 @@ class TranscriptSource(str, Enum):
 
 class JobCreateRequest(BaseModel):
     script: str = Field(..., min_length=100)
+    title: str = Field(default="")
+    project_id: Optional[str] = Field(default=None)
     editor_id: str = Field(default="default_editor")
     enable_gemini_expansion: bool = Field(default=False)
 
@@ -33,6 +35,25 @@ class JobCreateRequest(BaseModel):
         if len(v.strip()) < 100:
             raise ValueError("Script must be at least 100 characters")
         return v.strip()
+
+
+class ProjectSummary(BaseModel):
+    project_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    job_count: int = 0
+    total_clips: int = 0
+
+
+class ProjectResponse(BaseModel):
+    project_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    job_count: int = 0
+    total_clips: int = 0
+    jobs: List["JobSummary"] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -178,6 +199,8 @@ class JobResponse(BaseModel):
     api_costs: APICosts = Field(default_factory=APICosts)
     segments: List[SegmentWithResults] = Field(default_factory=list)
     english_translation: Optional[str] = None
+    project_id: Optional[str] = None
+    title: Optional[str] = None
 
 
 class JobSummary(BaseModel):
@@ -186,10 +209,20 @@ class JobSummary(BaseModel):
     created_at: str
     segment_count: int = 0
     result_count: int = 0
+    project_id: Optional[str] = None
+    title: Optional[str] = None
 
 
 class JobListResponse(BaseModel):
     jobs: List[JobSummary] = Field(default_factory=list)
+
+
+class ProjectCreateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+
+
+class ProjectListResponse(BaseModel):
+    projects: List[ProjectSummary] = Field(default_factory=list)
 
 
 class ChannelResolution(BaseModel):
@@ -228,3 +261,6 @@ class AgentResultRequest(BaseModel):
     task_id: str
     status: str = Field(default="completed")
     result: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+ProjectResponse.model_rebuild()

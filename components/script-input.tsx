@@ -4,17 +4,29 @@ import { useState, useMemo } from "react"
 import { Search, Loader2, Upload, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
+import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
+import type { ProjectSummary } from "@/lib/types"
 
 interface ScriptInputProps {
-  onSubmit: (script: string, options?: { enableGeminiExpansion: boolean }) => void
+  onSubmit: (script: string, options: {
+    enableGeminiExpansion: boolean
+    title: string
+    projectId?: string
+  }) => void
   isLoading: boolean
+  projects?: ProjectSummary[]
+  preselectedProjectId?: string | null
 }
 
-export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
+export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedProjectId }: ScriptInputProps) {
   const [script, setScript] = useState("")
+  const [title, setTitle] = useState("")
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(
+    preselectedProjectId ?? undefined
+  )
   const [enableGeminiExpansion, setEnableGeminiExpansion] = useState(false)
 
   const charCount = script.length
@@ -27,7 +39,12 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
 
   const handleSubmit = () => {
     if (charCount < 100) return
-    onSubmit(script, { enableGeminiExpansion })
+    if (!title.trim() && !selectedProjectId) return
+    onSubmit(script, {
+      enableGeminiExpansion,
+      title: title.trim(),
+      projectId: selectedProjectId,
+    })
   }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -42,6 +59,8 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
     reader.readAsText(file)
   }
 
+  const isValid = charCount >= 100 && (title.trim() || selectedProjectId)
+
   return (
     <div className="space-y-6">
       <div className="text-center space-y-2">
@@ -55,7 +74,7 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>Tamil Script</CardTitle>
+            <CardTitle>New Script</CardTitle>
             <label className="cursor-pointer">
               <input
                 type="file"
@@ -71,13 +90,68 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <Textarea
-            rows={12}
-            value={script}
-            onChange={(e) => setScript(e.target.value)}
-            placeholder="உங்கள் தமிழ் ஸ்கிரிப்டை இங்கே பேஸ்ட் செய்யுங்கள்... (Paste your Tamil script here...)"
-            className="resize-y bg-secondary font-mono text-sm"
-          />
+          <div className="space-y-2">
+            <Label htmlFor="script-title" className="text-sm font-medium">
+              Project Title <span className="text-destructive">*</span>
+            </Label>
+            {projects.length > 0 ? (
+              <div className="space-y-2">
+                <select
+                  value={selectedProjectId || "__new__"}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (v === "__new__") {
+                      setSelectedProjectId(undefined)
+                    } else {
+                      setSelectedProjectId(v)
+                      const proj = projects.find(p => p.project_id === v)
+                      if (proj) setTitle(proj.title)
+                    }
+                  }}
+                  className="w-full h-9 rounded-md border border-input bg-secondary px-3 text-sm"
+                >
+                  <option value="__new__">+ Create New Project</option>
+                  {projects.map(p => (
+                    <option key={p.project_id} value={p.project_id}>
+                      {p.title} ({p.job_count} jobs)
+                    </option>
+                  ))}
+                </select>
+                {!selectedProjectId && (
+                  <Input
+                    id="script-title"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder='e.g., "India Space Program" or "Tamil Cinema History"'
+                    className="bg-secondary"
+                  />
+                )}
+              </div>
+            ) : (
+              <Input
+                id="script-title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder='e.g., "India Space Program" or "Tamil Cinema History"'
+                className="bg-secondary"
+              />
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              Each script becomes a job inside a project folder. You can add multiple scripts to the same project.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="script-textarea" className="text-sm font-medium">Tamil Script</Label>
+            <Textarea
+              id="script-textarea"
+              rows={12}
+              value={script}
+              onChange={(e) => setScript(e.target.value)}
+              placeholder="உங்கள் தமிழ் ஸ்கிரிப்டை இங்கே பேஸ்ட் செய்யுங்கள்... (Paste your Tamil script here...)"
+              className="resize-y bg-secondary font-mono text-sm"
+            />
+          </div>
 
           <div className="flex items-center justify-between text-sm text-muted-foreground">
             <div className="flex gap-4">
@@ -111,7 +185,7 @@ export function ScriptInput({ onSubmit, isLoading }: ScriptInputProps) {
             </div>
             <Button
               onClick={handleSubmit}
-              disabled={isLoading || charCount < 100}
+              disabled={isLoading || !isValid}
               size="lg"
               className="gap-2"
             >

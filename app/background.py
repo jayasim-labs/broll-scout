@@ -37,16 +37,24 @@ def _set_progress(job_id: str, stage: str, percent: int, message: str) -> None:
     }
 
 
-def _log_activity(job_id: str, icon: str, text: str) -> None:
+def _log_activity(
+    job_id: str, icon: str, text: str,
+    depth: int = 0, group: str = "",
+) -> None:
     existing = _progress.get(job_id, {})
     log = existing.get("activity_log", [])
-    log.append({
+    entry: dict = {
         "time": datetime.utcnow().isoformat() + "Z",
         "icon": icon,
         "text": text,
-    })
-    if len(log) > 100:
-        log = log[-100:]
+    }
+    if depth:
+        entry["depth"] = depth
+    if group:
+        entry["group"] = group
+    log.append(entry)
+    if len(log) > 150:
+        log = log[-150:]
     existing["activity_log"] = log
     _progress[job_id] = existing
 
@@ -56,6 +64,8 @@ async def run_pipeline(
     script: str,
     editor_id: str = "default_editor",
     enable_gemini_expansion: bool = False,
+    project_id: str | None = None,
+    title: str | None = None,
 ) -> None:
     """Full pipeline: translate -> search -> match -> rank -> store."""
     storage = get_storage()
@@ -70,7 +80,7 @@ async def run_pipeline(
 
     get_quota_tracker().reset_for_job()
     cost_tracker.start_job(job_id)
-    await storage.create_job(job_id, script_hash, editor_id)
+    await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title)
 
     try:
         # --- Stage 1: Translation ---
@@ -81,7 +91,7 @@ async def run_pipeline(
         script_duration = max(1, round(word_count / 150))
 
         async def _translator_progress(icon: str, text: str):
-            _log_activity(job_id, icon, text)
+            _log_activity(job_id, icon, text, depth=1, group="translate")
     
 
         translator = TranslatorService()
@@ -90,9 +100,9 @@ async def run_pipeline(
         )
 
         translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
-        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} scenes, each needing different B-roll footage")
+        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} scenes, each needing different B-roll footage", group="translate")
         for i, seg in enumerate(segments, 1):
-            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}")
+            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}", depth=1, group="translate")
 
 
         await storage.store_segments(job_id, segments)
@@ -109,11 +119,11 @@ async def run_pipeline(
         est_sec = est_search_sec % 60
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
         _set_progress(job_id, "searching", 20, f"Searching YouTube & yt-dlp for B-roll clips...")
-        _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})")
+        _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})", group="search")
         sources = "preferred channels → YouTube/yt-dlp"
         if enable_gemini_expansion:
             sources += " → Gemini AI creative expansion"
-        _log_activity(job_id, "clock", f"For each scene, I search: {sources}")
+        _log_activity(job_id, "clock", f"For each scene, I search: {sources}", depth=1, group="search")
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
 
@@ -131,7 +141,7 @@ async def run_pipeline(
             _set_progress(job_id, "searching", pct, f"{msg}{time_note}")
 
         async def search_activity(icon: str, text: str):
-            _log_activity(job_id, icon, text)
+            _log_activity(job_id, icon, text, depth=1, group="search")
 
         candidates_by_segment = await searcher.search_batch(
             segments, job_id=job_id, progress_callback=search_progress,
@@ -141,9 +151,9 @@ async def run_pipeline(
         search_elapsed = round(time.time() - search_start, 1)
         total_candidates = sum(len(v) for v in candidates_by_segment.values())
         empty_segments = sum(1 for v in candidates_by_segment.values() if not v)
-        _log_activity(job_id, "check", f"Search done in {search_elapsed}s! Found {total_candidates} potential B-roll videos across all {len(segments)} scenes")
+        _log_activity(job_id, "check", f"Search done in {search_elapsed}s! Found {total_candidates} potential B-roll videos across all {len(segments)} scenes", group="search")
         if empty_segments:
-            _log_activity(job_id, "alert", f"{empty_segments} of {len(segments)} scenes had no candidate videos from search")
+            _log_activity(job_id, "alert", f"{empty_segments} of {len(segments)} scenes had no candidate videos from search", depth=1, group="search")
         logger.info("Job %s search: %d candidates, %d empty segments", job_id, total_candidates, empty_segments)
 
         # --- Retry search for long scripts until we have enough candidates ---
@@ -151,7 +161,7 @@ async def run_pipeline(
         max_retries = 3
         retry_round = 0
         if script_duration >= 25 and total_candidates < min_target:
-            _log_activity(job_id, "alert", f"Long script (~{script_duration} min) needs at least {min_target} candidate videos, but only {total_candidates} found so far — retrying sparse scenes")
+            _log_activity(job_id, "alert", f"Long script (~{script_duration} min) needs at least {min_target} candidate videos, but only {total_candidates} found so far — retrying sparse scenes", group="search")
 
         while script_duration >= 25 and total_candidates < min_target and retry_round < max_retries:
             retry_round += 1
@@ -162,7 +172,7 @@ async def run_pipeline(
             if not sparse_segments:
                 break
 
-            _log_activity(job_id, "search", f"Retry round {retry_round}: re-searching {len(sparse_segments)} scenes that have <3 candidates")
+            _log_activity(job_id, "search", f"Retry round {retry_round}: re-searching {len(sparse_segments)} scenes that have <3 candidates", depth=1, group="search")
             _set_progress(job_id, "searching", 20 + retry_round * 5, f"Retry search round {retry_round} for sparse scenes...")
 
             retry_results = await searcher.search_batch(
@@ -179,7 +189,7 @@ async def run_pipeline(
                 candidates_by_segment[seg_id] = existing
 
             total_candidates = sum(len(v) for v in candidates_by_segment.values())
-            _log_activity(job_id, "check", f"After retry {retry_round}: {total_candidates} total candidates across {len(segments)} scenes")
+            _log_activity(job_id, "check", f"After retry {retry_round}: {total_candidates} total candidates across {len(segments)} scenes", depth=1, group="search")
             logger.info("Job %s retry %d: %d total candidates", job_id, retry_round, total_candidates)
 
 
@@ -190,8 +200,8 @@ async def run_pipeline(
         est_m_sec = est_match_sec % 60
         est_m_str = f"{est_m_min}m {est_m_sec}s" if est_m_min else f"{est_m_sec}s"
         timestamp_model = pipeline_cfg.get("timestamp_model", "gpt-4o-mini")
-        _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})")
-        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {timestamp_model} finds peak visual moment → validate timestamp")
+        _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})", group="match")
+        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {timestamp_model} finds peak visual moment → validate timestamp", depth=1, group="match")
 
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService()
@@ -216,18 +226,19 @@ async def run_pipeline(
                 job_id, "matching", pct,
                 f"Analyzing scene {seg_idx + 1} of {total_segments}: \"{segment.title}\"{time_note}",
             )
-            _log_activity(job_id, "zap", f"Scene {seg_idx + 1}/{total_segments}: \"{segment.title}\" — scanning videos for the perfect clip")
+            seg_group = f"match-{segment.segment_id}"
+            _log_activity(job_id, "zap", f"Scene {seg_idx + 1}/{total_segments}: \"{segment.title}\" — scanning videos for the perfect clip", depth=1, group="match")
 
             cands = candidates_by_segment.get(segment.segment_id, [])
             if not cands:
-                _log_activity(job_id, "alert", f"No matching videos were found for \"{segment.title}\" — skipping this scene")
+                _log_activity(job_id, "alert", f"No matching videos were found for \"{segment.title}\" — skipping this scene", depth=2, group=seg_group)
                 all_segment_results[segment.segment_id] = []
                 continue
 
-            _log_activity(job_id, "mic", f"Fetching transcripts for {len(cands)} videos (cache → YouTube captions → companion → Whisper base)")
+            _log_activity(job_id, "mic", f"Fetching transcripts for {len(cands)} videos (cache → YouTube captions → companion → Whisper base)", depth=2, group=seg_group)
 
             async def _match_activity(icon: str, text: str):
-                _log_activity(job_id, icon, text)
+                _log_activity(job_id, icon, text, depth=2, group=seg_group)
 
             try:
                 matched = await asyncio.wait_for(
@@ -241,29 +252,29 @@ async def run_pipeline(
                 )
             except asyncio.TimeoutError:
                 logger.warning("Segment %s timed out", segment.segment_id)
-                _log_activity(job_id, "alert", f"\"{segment.title}\" took too long ({segment_timeout}s) — moving to next scene")
+                _log_activity(job_id, "alert", f"\"{segment.title}\" took too long ({segment_timeout}s) — moving to next scene", depth=2, group=seg_group)
                 matched = []
 
             if matched:
-                _log_activity(job_id, "eye", f"Found relevant moments in {len(matched)} out of {len(cands)} videos for \"{segment.title}\"")
+                _log_activity(job_id, "eye", f"Found relevant moments in {len(matched)} out of {len(cands)} videos for \"{segment.title}\"", depth=2, group=seg_group)
                 for cand, match in matched[:3]:
                     ts_min = (match.start_time_seconds or 0) // 60
                     ts_sec = (match.start_time_seconds or 0) % 60
                     hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""
-                    _log_activity(job_id, "sparkles", f"  ▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}")
+                    _log_activity(job_id, "sparkles", f"▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}", depth=3, group=seg_group)
 
             ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg)
             if ranked:
                 top = ranked[0]
                 source_label = _TRANSCRIPT_SOURCE_LABELS.get(top.source_flag.value, top.source_flag.value) if hasattr(top, 'source_flag') else ""
-                _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\" (ranked by keyword density, views, channel, caption quality, recency)")
+                _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\" (ranked by keyword density, views, channel, caption quality, recency)", depth=2, group=seg_group)
             else:
-                _log_activity(job_id, "filter", f"No clips passed quality filters for \"{segment.title}\"")
+                _log_activity(job_id, "filter", f"No clips passed quality filters for \"{segment.title}\"", depth=2, group=seg_group)
             all_segment_results[segment.segment_id] = ranked
     
 
         # --- Cross-segment dedup ---
-        _log_activity(job_id, "shield", "Removing duplicate clips — making sure the same video isn't suggested for multiple scenes")
+        _log_activity(job_id, "shield", "Removing duplicate clips — making sure the same video isn't suggested for multiple scenes", group="rank")
         all_segment_results = ranker.deduplicate_across_segments(all_segment_results)
 
         all_results: List[RankedResult] = []
@@ -285,14 +296,14 @@ async def run_pipeline(
             ]
             if empty_segments:
                 _set_progress(job_id, "matching", 92, "Not enough clips found — running a broader search...")
-                _log_activity(job_id, "alert", f"Only {len(all_results)} clips found so far — I need more. Re-searching {len(empty_segments)} scenes with broader, more creative queries")
+                _log_activity(job_id, "alert", f"Only {len(all_results)} clips found so far — I need more. Re-searching {len(empty_segments)} scenes with broader, more creative queries", depth=1, group="rank")
                 recovery = await searcher.search_batch(
                     empty_segments, job_id=job_id,
                 )
                 for seg in empty_segments:
                     new_cands = recovery.get(seg.segment_id, [])
                     if new_cands:
-                        _log_activity(job_id, "search", f"Broader search found {len(new_cands)} new videos for \"{seg.title}\"")
+                        _log_activity(job_id, "search", f"Broader search found {len(new_cands)} new videos for \"{seg.title}\"", depth=2, group="rank")
                         try:
                             matched = await asyncio.wait_for(
                                 _match_candidates(
@@ -312,13 +323,13 @@ async def run_pipeline(
         # --- Stage 4: Storing ---
         _set_progress(job_id, "ranking", 95, "Saving your results...")
         if all_results:
-            _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes")
+            _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes", group="rank")
         else:
             qt = get_quota_tracker()
             if qt.is_quota_exhausted:
-                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted and no local agent connected — no clips could be found. Install the B-Roll Scout companion app or try again tomorrow.")
+                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted and no local agent connected — no clips could be found. Install the B-Roll Scout companion app or try again tomorrow.", group="rank")
             else:
-                _log_activity(job_id, "alert", "No clips found. The search queries may be too specific, or the APIs returned no matching videos. Try adjusting key terms or broadening your script.")
+                _log_activity(job_id, "alert", "No clips found. The search queries may be too specific, or the APIs returned no matching videos. Try adjusting key terms or broadening your script.", group="rank")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)
@@ -330,7 +341,7 @@ async def run_pipeline(
         api_costs["search_mode"] = qt_stats.get("search_mode", "unknown")
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
-        _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}")
+        _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}", group="done")
 
         await storage.update_job_status(
             job_id, JobStatus.COMPLETE,
@@ -341,7 +352,13 @@ async def run_pipeline(
             minimum_results_met=minimum_results_met,
         )
         _set_progress(job_id, "completed", 100, "Scouting complete!")
-        _log_activity(job_id, "check", "Done! Your B-roll results are ready.")
+        _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
+
+        if project_id:
+            try:
+                await storage.update_project_stats(project_id)
+            except Exception:
+                logger.warning("Failed to update project stats for %s", project_id)
 
         logger.info("Job %s complete: %d results in %.1fs", job_id, len(all_results), elapsed)
 
