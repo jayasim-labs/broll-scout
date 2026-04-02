@@ -37,6 +37,9 @@ class RankerService:
         threshold = float(cfg.get("confidence_threshold", 0.4))
         top_n = int(cfg.get("top_results_per_segment", 1))
 
+        discard_short = bool(cfg.get("discard_clips_shorter_than_10s", True))
+        min_subs = int(cfg.get("prefer_min_subscribers", 0))
+
         scored: list[tuple[CandidateVideo, MatchResult, float]] = []
         for cand, match in candidates:
             if cand.is_blocked:
@@ -47,6 +50,9 @@ class RankerService:
                     continue
             if not match.context_match_valid:
                 continue
+            if discard_short and match.start_time_seconds is not None and match.end_time_seconds is not None:
+                if (match.end_time_seconds - match.start_time_seconds) < 10:
+                    continue
             if match.confidence_score < threshold:
                 has_others = any(
                     m.confidence_score >= threshold and m.start_time_seconds is not None
@@ -60,7 +66,7 @@ class RankerService:
             else:
                 kw_score = self._keyword_density(segment.key_terms, match.transcript_excerpt)
                 vs_score = self._viral_score(cand.view_count)
-                ca_score = self._channel_authority(cand)
+                ca_score = self._channel_authority(cand, min_subs)
                 cq_score = self._caption_quality(match.source_flag)
                 re_score = self._recency_score(cand.published_at, cfg)
                 relevance = (
@@ -150,7 +156,7 @@ class RankerService:
         return 0.2
 
     @staticmethod
-    def _channel_authority(cand: CandidateVideo) -> float:
+    def _channel_authority(cand: CandidateVideo, min_subs: int = 10000) -> float:
         if cand.is_preferred_tier1:
             return 1.0
         if cand.is_preferred_tier2:
@@ -158,7 +164,9 @@ class RankerService:
         subs = cand.channel_subscribers or 0
         if subs > 100_000:
             return 0.7
-        return 0.4
+        if subs >= min_subs:
+            return 0.5
+        return 0.3
 
     @staticmethod
     def _caption_quality(source: TranscriptSource) -> float:

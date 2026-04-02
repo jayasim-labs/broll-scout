@@ -265,6 +265,52 @@ async def resolve_channel(
     return result
 
 
+@app.post("/api/v1/settings/channels/resolve-bulk")
+async def resolve_channels_bulk(
+    body: dict,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    channel_ids = body.get("channel_ids", [])
+    service = get_settings_service()
+    results = {}
+    for cid in channel_ids:
+        try:
+            resolved = await service.resolve_channel(cid)
+            if resolved:
+                results[cid] = resolved.model_dump() if hasattr(resolved, 'model_dump') else {
+                    "channel_id": resolved.channel_id,
+                    "channel_name": resolved.channel_name,
+                    "subscribers": resolved.subscribers,
+                    "thumbnail_url": resolved.thumbnail_url,
+                }
+        except Exception:
+            pass
+    return {"channels": results}
+
+
+@app.post("/api/v1/settings/channels/resolve-names")
+async def resolve_channels_by_name(
+    body: dict,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    names = body.get("names", [])
+    service = get_settings_service()
+    results = await service.resolve_channels_by_name(names)
+    return {
+        "channels": {
+            name: r.model_dump() if hasattr(r, 'model_dump') else {
+                "channel_id": r.channel_id,
+                "channel_name": r.channel_name,
+                "subscribers": r.subscribers,
+                "thumbnail_url": r.thumbnail_url,
+            }
+            for name, r in results.items()
+        }
+    }
+
+
 # --- Local yt-dlp Agent Endpoints ---
 
 from app.utils import agent_queue

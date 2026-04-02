@@ -135,43 +135,43 @@ class SettingsService:
             self._channel_cache[channel_id] = cached
             return cached
 
-        if not self.youtube_api_key:
-            return None
+        resolution = None
 
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    "https://www.googleapis.com/youtube/v3/channels",
-                    params={
-                        "part": "snippet,statistics",
-                        "id": channel_id,
-                        "key": self.youtube_api_key,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
+        if self.youtube_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/channels",
+                        params={
+                            "part": "snippet,statistics",
+                            "id": channel_id,
+                            "key": self.youtube_api_key,
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
 
-            items = data.get("items", [])
-            if not items:
-                return None
+                items = data.get("items", [])
+                if items:
+                    item = items[0]
+                    snippet = item.get("snippet", {})
+                    stats = item.get("statistics", {})
+                    resolution = ChannelResolution(
+                        channel_id=channel_id,
+                        channel_name=snippet.get("title", ""),
+                        subscribers=int(stats.get("subscriberCount", 0)),
+                        thumbnail_url=snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
+                    )
+            except Exception:
+                logger.warning("YouTube API failed for %s, trying HTML fallback", channel_id)
 
-            item = items[0]
-            snippet = item.get("snippet", {})
-            stats = item.get("statistics", {})
+        if not resolution:
+            resolution = await self._resolve_channel_from_html(channel_id)
 
-            resolution = ChannelResolution(
-                channel_id=channel_id,
-                channel_name=snippet.get("title", ""),
-                subscribers=int(stats.get("subscriberCount", 0)),
-                thumbnail_url=snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
-            )
-
+        if resolution:
             self._channel_cache[channel_id] = resolution
             await self._cache_channel(resolution)
-            return resolution
-        except Exception:
-            logger.exception("Failed to resolve channel %s", channel_id)
-            return None
+        return resolution
 
     async def get_preferred_channels(self) -> Tuple[List[ChannelResolution], List[ChannelResolution]]:
         tier1_ids = await self.get_setting("preferred_channels_tier1") or []
@@ -230,6 +230,73 @@ class SettingsService:
         if match:
             return match.group(1)
         return None
+
+    async def resolve_channels_by_name(self, names: list[str]) -> dict[str, ChannelResolution]:
+        """Look up cached channels by name (for Tier 2 display)."""
+        results: dict[str, ChannelResolution] = {}
+        try:
+            resp = await self._run(self._table("channel_cache").scan)
+            items = resp.get("Items", [])
+            name_map: list[tuple[str, dict]] = []
+            for item in items:
+                raw = item.get("channel_name", "").lower()
+                name_map.append((raw, item))
+            for name in names:
+                key = name.lower()
+                key_compact = key.replace(" ", "")
+                for cached_name, item in name_map:
+                    cached_compact = cached_name.replace(" ", "")
+                    if (key in cached_name or cached_name in key
+                            or key_compact in cached_compact
+                            or cached_compact in key_compact):
+                        results[name] = ChannelResolution(
+                            channel_id=item.get("channel_id", ""),
+                            channel_name=item.get("channel_name", ""),
+                            subscribers=int(item.get("subscribers", 0)),
+                            thumbnail_url=item.get("thumbnail_url", ""),
+                        )
+                        break
+        except ClientError:
+            logger.warning("Failed to scan channel cache for name lookup")
+        return results
+
+    async def _resolve_channel_from_html(self, channel_id: str) -> Optional[ChannelResolution]:
+        """Fallback: scrape channel name and avatar from the YouTube channel page."""
+        url = f"https://www.youtube.com/channel/{channel_id}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                    "Accept-Language": "en-US,en;q=0.9",
+                })
+                html = resp.text
+
+            avatar_url = ""
+            m = re.search(r'<link rel="image_src" href="([^"]+)"', html)
+            if m:
+                avatar_url = m.group(1).split("=")[0] + "=s176-c-k-c0x00ffffff-no-rj"
+
+            channel_name = ""
+            m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+            if m:
+                channel_name = m.group(1)
+            if not channel_name:
+                m = re.search(r'"name"\s*:\s*"([^"]+)"', html)
+                if m:
+                    channel_name = m.group(1)
+
+            if not channel_name:
+                return None
+
+            return ChannelResolution(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                subscribers=0,
+                thumbnail_url=avatar_url,
+            )
+        except Exception:
+            logger.warning("HTML fallback failed for channel %s", channel_id)
+            return None
 
     async def _get_cached_channel(self, channel_id: str) -> Optional[ChannelResolution]:
         try:

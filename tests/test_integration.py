@@ -354,7 +354,7 @@ class TestRanker:
             published_at="2025-01-01T00:00:00Z", view_count=100,
         )
         score = ranker._channel_authority(cand)
-        assert score == 0.4
+        assert score == 0.3
 
     def test_dedup_keeps_best_segment(self):
         from app.services.ranker import RankerService

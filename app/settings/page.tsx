@@ -1,9 +1,12 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { Navbar } from "@/components/navbar"
-import { Save, RotateCcw, Plus, X, Loader2 } from "lucide-react"
+import {
+  Save, RotateCcw, Plus, X, Loader2, Users, Eye, Shield, Tv,
+  Film, Zap, Globe, Ban, BookOpen, Settings2, MessageSquare,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -15,15 +18,23 @@ import { Slider } from "@/components/ui/slider"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
-import type { PipelineSettings } from "@/lib/types"
+import { cn } from "@/lib/utils"
+import type { PipelineSettings, ChannelResolution } from "@/lib/types"
 
 const API = "/api/v1"
 
+interface ChannelInfo {
+  channel_id: string
+  channel_name: string
+  subscribers: number
+  thumbnail_url: string
+}
+
 const TABS = [
-  { id: "sources", label: "Source Management" },
-  { id: "blocked", label: "Blocked Sources" },
-  { id: "pipeline", label: "Pipeline Parameters" },
-  { id: "instructions", label: "Special Instructions" },
+  { id: "sources", label: "Source Management", icon: Tv },
+  { id: "blocked", label: "Blocked Sources", icon: Shield },
+  { id: "pipeline", label: "Pipeline Parameters", icon: Settings2 },
+  { id: "instructions", label: "Special Instructions", icon: MessageSquare },
 ] as const
 
 type TabId = (typeof TABS)[number]["id"]
@@ -123,19 +134,24 @@ export default function SettingsPage() {
         </div>
 
         <div className="flex border-b border-border mb-6 overflow-x-auto">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                activeTab === tab.id
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+          {TABS.map((tab) => {
+            const Icon = tab.icon
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors",
+                  activeTab === tab.id
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            )
+          })}
         </div>
 
         {activeTab === "sources" && <SourcesTab settings={settings} onChange={updateLocal} />}
@@ -148,22 +164,28 @@ export default function SettingsPage() {
 }
 
 function TagList({
-  items, onAdd, onRemove, placeholder = "Add item...",
+  items, onAdd, onRemove, placeholder = "Add item...", variant = "default",
 }: {
   items: string[]
   onAdd: (item: string) => void
   onRemove: (index: number) => void
   placeholder?: string
+  variant?: "default" | "destructive"
 }) {
   const [input, setInput] = useState("")
+
+  const badgeClass = variant === "destructive"
+    ? "gap-1.5 text-xs py-1.5 px-3 bg-red-500/5 border-red-500/20 text-red-300"
+    : "gap-1.5 text-xs py-1.5 px-3"
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
         {items.map((item, i) => (
-          <Badge key={i} variant="secondary" className="gap-1 text-xs">
+          <Badge key={i} variant="secondary" className={badgeClass}>
+            {variant === "destructive" && <Ban className="w-3 h-3" />}
             {item}
-            <button onClick={() => onRemove(i)} className="hover:text-destructive">
+            <button onClick={() => onRemove(i)} className="hover:text-destructive ml-0.5">
               <X className="w-3 h-3" />
             </button>
           </Badge>
@@ -185,68 +207,299 @@ function TagList({
         <Button
           variant="outline" size="sm"
           onClick={() => { if (input.trim()) { onAdd(input.trim()); setInput("") } }}
+          className="gap-1"
         >
-          <Plus className="w-4 h-4" />
+          <Plus className="w-4 h-4" /> Add
         </Button>
       </div>
     </div>
   )
 }
 
+function formatSubs(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
+  return n.toString()
+}
+
+function ChannelCard({ info, onRemove }: { info: ChannelInfo; onRemove: () => void }) {
+  const channelUrl = `https://www.youtube.com/channel/${info.channel_id}`
+  return (
+    <div className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border group hover:border-primary/30 transition-colors">
+      <a href={channelUrl} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open channel on YouTube">
+        {info.thumbnail_url ? (
+          <img
+            src={info.thumbnail_url}
+            alt={info.channel_name}
+            className="w-10 h-10 rounded-full object-cover ring-2 ring-border hover:ring-primary/50 transition-all"
+          />
+        ) : (
+          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center ring-2 ring-border hover:ring-primary/50 transition-all">
+            <Tv className="w-4 h-4 text-muted-foreground" />
+          </div>
+        )}
+      </a>
+      <a href={channelUrl} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-0 hover:opacity-80 transition-opacity">
+        <p className="text-sm font-medium truncate">
+          {info.channel_name || info.channel_id}
+        </p>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {info.subscribers > 0 && (
+            <span className="flex items-center gap-0.5">
+              <Users className="w-3 h-3" />
+              {formatSubs(info.subscribers)} subscribers
+            </span>
+          )}
+          {info.channel_id && (
+            <span className="font-mono text-[10px] opacity-60">{info.channel_id.slice(0, 12)}...</span>
+          )}
+        </div>
+      </a>
+      <button
+        onClick={(e) => { e.stopPropagation(); onRemove() }}
+        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-destructive/10 rounded transition-opacity"
+        title="Remove channel"
+      >
+        <X className="w-3.5 h-3.5 text-destructive" />
+      </button>
+    </div>
+  )
+}
+
 function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+  const [channelInfoMap, setChannelInfoMap] = useState<Record<string, ChannelInfo>>({})
+  const [tier2InfoMap, setTier2InfoMap] = useState<Record<string, ChannelInfo>>({})
+  const [resolving, setResolving] = useState(false)
+  const resolvedRef = useRef(false)
+  const tier2ResolvedRef = useRef(false)
+
+  const tier1Ids = settings.preferred_channels_tier1 || []
+  const tier2Names = settings.preferred_channels_tier2 || []
+
+  useEffect(() => {
+    if (resolvedRef.current || tier1Ids.length === 0) return
+    resolvedRef.current = true
+    resolveChannels(tier1Ids)
+  }, [tier1Ids.length])
+
+  useEffect(() => {
+    if (tier2ResolvedRef.current || tier2Names.length === 0) return
+    tier2ResolvedRef.current = true
+    resolveTier2Names(tier2Names)
+  }, [tier2Names.length])
+
+  async function resolveChannels(ids: string[]) {
+    const unresolvedIds = ids.filter(id => !channelInfoMap[id])
+    if (unresolvedIds.length === 0) return
+    setResolving(true)
+    try {
+      const resp = await fetch(`${API}/settings/channels/resolve-bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_ids: unresolvedIds }),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        setChannelInfoMap(prev => ({ ...prev, ...data.channels }))
+      }
+    } catch {
+      // Fallback: show raw IDs
+    } finally {
+      setResolving(false)
+    }
+  }
+
+  async function resolveTier2Names(names: string[]) {
+    try {
+      const resp = await fetch(`${API}/settings/channels/resolve-names`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names }),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        setTier2InfoMap(prev => ({ ...prev, ...data.channels }))
+      }
+    } catch {}
+  }
+
+  async function addTier1Channel(input: string) {
+    const id = input.trim()
+    if (!id) return
+    if (tier1Ids.includes(id)) {
+      toast.error("Channel already added")
+      return
+    }
+    onChange("preferred_channels_tier1", [...tier1Ids, id])
+
+    try {
+      const resp = await fetch(`${API}/settings/channels/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_url: id }),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        setChannelInfoMap(prev => ({ ...prev, [id]: data }))
+      }
+    } catch {}
+  }
+
   return (
     <div className="space-y-6">
+      {/* Tier 1 Channels */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Preferred Channels (Tier 1 — Archives & History)</CardTitle></CardHeader>
-        <CardContent>
-          <p className="text-xs text-muted-foreground mb-3">
-            Tier 1 channels are searched first and receive the highest ranking boost. Enter YouTube channel IDs (UC...).
-          </p>
-          <TagList
-            items={settings.preferred_channels_tier1 || []}
-            onAdd={(id) => onChange("preferred_channels_tier1", [...(settings.preferred_channels_tier1 || []), id])}
-            onRemove={(i) => onChange("preferred_channels_tier1", (settings.preferred_channels_tier1 || []).filter((_, j) => j !== i))}
-            placeholder="UC... channel ID"
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-amber-500/10">
+              <Zap className="w-4 h-4 text-amber-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Priority Channels (Tier 1)</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Searched first, highest ranking boost. Archive & history channels.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {resolving && tier1Ids.length > 0 && Object.keys(channelInfoMap).length === 0 && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Loading channel info...
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {tier1Ids.map((id, i) => {
+              const info = channelInfoMap[id] || { channel_id: id, channel_name: "", subscribers: 0, thumbnail_url: "" }
+              return (
+                <ChannelCard
+                  key={id}
+                  info={info}
+                  onRemove={() => {
+                    onChange("preferred_channels_tier1", tier1Ids.filter((_, j) => j !== i))
+                    setChannelInfoMap(prev => { const next = { ...prev }; delete next[id]; return next })
+                  }}
+                />
+              )
+            })}
+          </div>
+          <AddChannelInput onAdd={addTier1Channel} placeholder="Paste YouTube channel ID (UC...)" />
+        </CardContent>
+      </Card>
+
+      {/* Tier 2 Channels */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-blue-500/10">
+              <Film className="w-4 h-4 text-blue-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Documentary & Explainer (Tier 2)</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Ranking boost applied when these channels appear in results.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {tier2Names.map((name, i) => {
+              const info = tier2InfoMap[name]
+              if (info) {
+                return (
+                  <ChannelCard
+                    key={name}
+                    info={info}
+                    onRemove={() => onChange("preferred_channels_tier2", tier2Names.filter((_, j) => j !== i))}
+                  />
+                )
+              }
+              return (
+                <div key={name} className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border group hover:border-blue-500/30 transition-colors">
+                  <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center shrink-0 ring-2 ring-border">
+                    <Film className="w-4 h-4 text-blue-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{name}</p>
+                  </div>
+                  <button
+                    onClick={() => onChange("preferred_channels_tier2", tier2Names.filter((_, j) => j !== i))}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-destructive/10 rounded transition-opacity"
+                    title="Remove channel"
+                  >
+                    <X className="w-3.5 h-3.5 text-destructive" />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          <AddChannelInput
+            onAdd={(name) => onChange("preferred_channels_tier2", [...tier2Names, name])}
+            placeholder="Channel name (e.g., Kurzgesagt)"
           />
         </CardContent>
       </Card>
 
+      {/* Public Domain Archives */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Preferred Channels (Tier 2 — Documentary & Explainer)</CardTitle></CardHeader>
-        <CardContent>
-          <p className="text-xs text-muted-foreground mb-3">
-            Tier 2 channels get a ranking boost but are not searched exclusively. Enter channel names.
-          </p>
-          <TagList
-            items={settings.preferred_channels_tier2 || []}
-            onAdd={(name) => onChange("preferred_channels_tier2", [...(settings.preferred_channels_tier2 || []), name])}
-            onRemove={(i) => onChange("preferred_channels_tier2", (settings.preferred_channels_tier2 || []).filter((_, j) => j !== i))}
-            placeholder="Channel name"
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle className="text-base">Public Domain Archives</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-emerald-500/10">
+              <BookOpen className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Public Domain Archives</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Free-to-use archival footage sources.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <div className="space-y-2">
             {(settings.public_domain_archives || []).map((a, i) => (
-              <div key={i} className="flex items-center gap-2 text-sm">
-                <span className="font-medium">{a.name}</span>
-                <span className="text-muted-foreground text-xs">{a.url}</span>
-              </div>
+              <a
+                key={i}
+                href={a.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border hover:border-emerald-500/30 transition-colors group"
+              >
+                <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center shrink-0">
+                  <Globe className="w-5 h-5 text-emerald-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium">{a.name}</p>
+                  <p className="text-xs text-muted-foreground truncate group-hover:text-emerald-400 transition-colors">{a.url}</p>
+                </div>
+              </a>
             ))}
           </div>
         </CardContent>
       </Card>
 
+      {/* Stock Footage Platforms */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Stock Footage Platforms</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-purple-500/10">
+              <Eye className="w-4 h-4 text-purple-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Stock Footage Platforms</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Enable or disable stock footage platforms for search.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 gap-3">
             {Object.entries(settings.stock_platforms || {}).map(([key, enabled]) => (
-              <div key={key} className="flex items-center justify-between">
-                <Label className="text-sm capitalize">{key.replace(/_/g, " ")}</Label>
+              <div key={key} className="flex items-center justify-between p-2.5 bg-secondary/30 rounded-lg border border-border">
+                <Label className="text-sm capitalize font-medium">{key.replace(/_/g, " ")}</Label>
                 <Switch
                   checked={enabled as boolean}
                   onCheckedChange={(v) => onChange("stock_platforms", { ...settings.stock_platforms, [key]: v })}
@@ -260,58 +513,134 @@ function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChan
   )
 }
 
+function AddChannelInput({ onAdd, placeholder }: { onAdd: (val: string) => void; placeholder: string }) {
+  const [input, setInput] = useState("")
+  return (
+    <div className="flex gap-2">
+      <Input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder={placeholder}
+        className="flex-1"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && input.trim()) {
+            onAdd(input.trim())
+            setInput("")
+          }
+        }}
+      />
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => { if (input.trim()) { onAdd(input.trim()); setInput("") } }}
+        className="gap-1"
+      >
+        <Plus className="w-4 h-4" /> Add
+      </Button>
+    </div>
+  )
+}
+
 function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader><CardTitle className="text-base">Blocked News Networks</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-red-500/10">
+              <Ban className="w-4 h-4 text-red-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Blocked News Networks</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Videos from these networks will be excluded from results.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <TagList
             items={settings.blocked_networks || []}
             onAdd={(n) => onChange("blocked_networks", [...(settings.blocked_networks || []), n])}
             onRemove={(i) => onChange("blocked_networks", (settings.blocked_networks || []).filter((_, j) => j !== i))}
-            placeholder="Network name"
+            placeholder="Network name (e.g., CNN, BBC)"
+            variant="destructive"
           />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Blocked Studios & Entertainment</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-red-500/10">
+              <Film className="w-4 h-4 text-red-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Blocked Studios & Entertainment</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Copyright-protected content from these studios is excluded.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <TagList
             items={settings.blocked_studios || []}
             onAdd={(s) => onChange("blocked_studios", [...(settings.blocked_studios || []), s])}
             onRemove={(i) => onChange("blocked_studios", (settings.blocked_studios || []).filter((_, j) => j !== i))}
-            placeholder="Studio name"
+            placeholder="Studio name (e.g., Disney, Netflix)"
+            variant="destructive"
           />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Blocked Sports Leagues</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-red-500/10">
+              <Shield className="w-4 h-4 text-red-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Blocked Sports Leagues</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Sports league content is excluded to avoid copyright issues.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <TagList
             items={settings.blocked_sports || []}
             onAdd={(s) => onChange("blocked_sports", [...(settings.blocked_sports || []), s])}
             onRemove={(i) => onChange("blocked_sports", (settings.blocked_sports || []).filter((_, j) => j !== i))}
-            placeholder="League name"
+            placeholder="League name (e.g., FIFA, NFL)"
+            variant="destructive"
           />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Custom Block Rules</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-orange-500/10">
+              <MessageSquare className="w-4 h-4 text-orange-400" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Custom Block Rules</CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Natural language rules processed by GPT-4o-mini during ranking.
+              </p>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           <Textarea
             rows={4}
             value={settings.custom_block_rules || ""}
             onChange={(e) => onChange("custom_block_rules", e.target.value)}
-            placeholder='Block any channel with "reaction" or "compilation" in the title'
+            placeholder='e.g., Block any channel with "reaction" or "compilation" in the title'
             className="text-sm"
           />
-          <p className="text-xs text-muted-foreground mt-1">
-            These rules are passed to GPT-4o-mini during the ranking step as additional filtering instructions.
-          </p>
         </CardContent>
       </Card>
     </div>
