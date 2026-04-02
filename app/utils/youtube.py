@@ -15,6 +15,17 @@ TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRYABLE_STATUS_CODES = {500, 503}
 
+_quota_exhausted = False
+
+
+def is_quota_exhausted() -> bool:
+    return _quota_exhausted
+
+
+def reset_quota_flag() -> None:
+    global _quota_exhausted
+    _quota_exhausted = False
+
 
 def _get_batch_size() -> int:
     return DEFAULTS.get("youtube_api_batch_size", 50)
@@ -38,6 +49,10 @@ async def _request_with_retry(
     url: str,
     params: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
+    global _quota_exhausted
+    if _quota_exhausted:
+        return None
+
     for attempt in range(MAX_RETRIES):
         try:
             resp = await client.get(url, params=params)
@@ -47,7 +62,8 @@ async def _request_with_retry(
                 errors = body.get("error", {}).get("errors", [])
                 reasons = [e.get("reason", "") for e in errors]
                 if any(r in ("quotaExceeded", "dailyLimitExceeded") for r in reasons):
-                    logger.warning("YouTube API quota exceeded")
+                    _quota_exhausted = True
+                    logger.warning("YouTube API quota exceeded — all further calls will be skipped until quota resets")
                     return None
                 logger.warning("YouTube API 403: %s", reasons)
                 return None

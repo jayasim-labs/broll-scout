@@ -5,13 +5,14 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from app.config import DEFAULTS
 from app.models.schemas import (
     CandidateVideo, JobStatus, MatchResult, RankedResult, Segment,
 )
 from app.services.matcher import MatcherService
 from app.services.ranker import RankerService
 from app.services.searcher import SearcherService
+from app.services.settings_service import get_settings_service
+from app.utils.youtube import reset_quota_flag
 from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
@@ -55,9 +56,13 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
     storage = get_storage()
     cost_tracker = get_cost_tracker()
 
+    settings_svc = get_settings_service()
+    pipeline_cfg = await settings_svc.get_all_settings()
+
     start_time = time.time()
     script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
 
+    reset_quota_flag()
     cost_tracker.start_job(job_id)
     await storage.create_job(job_id, script_hash, editor_id)
 
@@ -100,7 +105,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         _log_activity(job_id, "search", f"Now hunting for B-roll videos for all {len(segments)} scenes (estimated ~{est_str})")
         _log_activity(job_id, "clock", f"For each scene, I search 4 sources: your preferred channels → YouTube → Google → then ask Gemini AI to suggest creative angles I might have missed")
 
-        searcher = SearcherService()
+        searcher = SearcherService(pipeline_settings=pipeline_cfg)
 
         search_start = time.time()
 
@@ -137,12 +142,12 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})")
         _log_activity(job_id, "clock", "For each video: reading the transcript → asking AI to find the peak visual moment → checking the timestamp makes sense")
 
-        matcher = MatcherService()
+        matcher = MatcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService()
         ranker = RankerService()
 
-        max_concurrent_candidates = DEFAULTS.get("max_concurrent_candidates", 3)
-        segment_timeout = DEFAULTS.get("segment_timeout_sec", 60)
+        max_concurrent_candidates = pipeline_cfg.get("max_concurrent_candidates", 3)
+        segment_timeout = pipeline_cfg.get("segment_timeout_sec", 60)
 
         all_segment_results: Dict[str, List[RankedResult]] = {}
         total_segments = len(segments)
@@ -191,7 +196,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
                     hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""
                     _log_activity(job_id, "sparkles", f"  ▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}")
 
-            ranked = ranker.rank_and_filter(matched, segment)
+            ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg)
             _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\"")
             all_segment_results[segment.segment_id] = ranked
     
@@ -204,7 +209,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
         for results in all_segment_results.values():
             all_results.extend(results)
 
-        low_threshold = DEFAULTS.get("low_result_threshold", 20)
+        low_threshold = pipeline_cfg.get("low_result_threshold", 20)
         minimum_results_met = len(all_results) >= script_duration
 
         # --- Recovery search ---
@@ -235,7 +240,7 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
                                 ),
                                 timeout=segment_timeout,
                             )
-                            ranked = ranker.rank_and_filter(matched, seg)
+                            ranked = ranker.rank_and_filter(matched, seg, settings=pipeline_cfg)
                             all_segment_results[seg.segment_id] = ranked
                             all_results.extend(ranked)
                         except asyncio.TimeoutError:
@@ -245,7 +250,14 @@ async def run_pipeline(job_id: str, script: str, editor_id: str = "default_edito
 
         # --- Stage 4: Storing ---
         _set_progress(job_id, "ranking", 95, "Saving your results...")
-        _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes")
+        if all_results:
+            _log_activity(job_id, "check", f"All done searching! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes")
+        else:
+            from app.utils.youtube import is_quota_exhausted
+            if is_quota_exhausted():
+                _log_activity(job_id, "alert", "⚠ YouTube API daily quota exhausted — no clips could be found. Quota resets at midnight Pacific Time. Try again tomorrow or add a new YouTube API key in Settings.")
+            else:
+                _log_activity(job_id, "alert", "No clips found. The search queries may be too specific, or the APIs returned no matching videos. Try adjusting key terms or broadening your script.")
         await storage.store_results(job_id, all_results)
 
         elapsed = round(time.time() - start_time, 2)

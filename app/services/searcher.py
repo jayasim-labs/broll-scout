@@ -13,6 +13,7 @@ from app.utils.youtube import (
     search_channel_videos,
     get_video_details,
     get_channel_stats,
+    is_quota_exhausted,
 )
 from app.utils.cost_tracker import get_cost_tracker
 
@@ -25,19 +26,23 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5
 class SearcherService:
     """Searches YouTube, Google CSE, and Gemini for candidate B-roll videos."""
 
-    def __init__(self):
+    def __init__(self, pipeline_settings: dict | None = None):
         self._settings = get_settings()
         self._cost_tracker = get_cost_tracker()
+        self._pipeline = pipeline_settings or {}
 
-    def _get_default(self, key: str):
+    def _get(self, key: str):
+        """Read from DynamoDB-backed pipeline settings first, fall back to DEFAULTS."""
+        if key in self._pipeline:
+            return self._pipeline[key]
         return DEFAULTS.get(key)
 
     def _build_blocked_set(self) -> set[str]:
         blocked: list[str] = []
-        blocked.extend(self._get_default("blocked_networks") or [])
-        blocked.extend(self._get_default("blocked_studios") or [])
-        blocked.extend(self._get_default("blocked_sports") or [])
-        custom = self._get_default("custom_block_rules") or ""
+        blocked.extend(self._get("blocked_networks") or [])
+        blocked.extend(self._get("blocked_studios") or [])
+        blocked.extend(self._get("blocked_sports") or [])
+        custom = self._get("custom_block_rules") or ""
         if custom:
             blocked.extend(line.strip() for line in custom.split("\n") if line.strip())
         return {name.lower() for name in blocked}
@@ -52,18 +57,22 @@ class SearcherService:
                 except Exception:
                     pass
 
-        tier1_ids: list[str] = self._get_default("preferred_channels_tier1") or []
-        tier2_names: list[str] = self._get_default("preferred_channels_tier2") or []
-        results_per_query: int = self._get_default("youtube_results_per_query") or 5
-        max_candidates: int = self._get_default("max_candidates_per_segment") or 12
-        min_duration: int = self._get_default("min_video_duration_sec") or 120
-        max_duration: int = self._get_default("max_video_duration_sec") or 5400
+        tier1_ids: list[str] = self._get("preferred_channels_tier1") or []
+        tier2_names: list[str] = self._get("preferred_channels_tier2") or []
+        results_per_query: int = self._get("youtube_results_per_query") or 5
+        max_candidates: int = self._get("max_candidates_per_segment") or 12
+        min_duration: int = self._get("min_video_duration_sec") or 120
+        max_duration: int = self._get("max_video_duration_sec") or 5400
 
         all_video_ids: list[str] = []
         search_metadata: dict[str, dict] = {}
 
         query_text = " ".join(segment.key_terms)
         seg_label = segment.title[:50]
+
+        if is_quota_exhausted():
+            await _emit("alert", f"⚠ YouTube API quota exhausted — skipping \"{seg_label}\". Quota resets at midnight Pacific Time.")
+            return []
 
         # (a) Preferred Channel Search (Tier 1)
         if tier1_ids:
@@ -95,19 +104,20 @@ class SearcherService:
         if new_from_cse:
             await _emit("check", f"  ✓ Google found {new_from_cse} additional videos not in YouTube results")
 
-        # (d) Gemini Query Expansion
-        await _emit("sparkles", f"  Asking Gemini AI to suggest creative search angles I might have missed...")
-        initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
-        expanded_ids = await self._gemini_expand_and_search(
-            segment.summary, initial_titles, results_per_query, job_id
-        )
-        new_from_gemini = 0
-        for vid in expanded_ids:
-            if vid not in all_video_ids:
-                all_video_ids.append(vid)
-                new_from_gemini += 1
-        if new_from_gemini:
-            await _emit("sparkles", f"  ✓ Gemini's creative queries found {new_from_gemini} more videos")
+        # (d) Gemini Query Expansion (skipped when YouTube quota is exhausted)
+        if not is_quota_exhausted():
+            await _emit("sparkles", f"  Asking Gemini AI to suggest creative search angles I might have missed...")
+            initial_titles = list({m.get("title", "") for m in search_metadata.values() if m.get("title")})
+            expanded_ids = await self._gemini_expand_and_search(
+                segment.summary, initial_titles, results_per_query, job_id
+            )
+            new_from_gemini = 0
+            for vid in expanded_ids:
+                if vid not in all_video_ids:
+                    all_video_ids.append(vid)
+                    new_from_gemini += 1
+            if new_from_gemini:
+                await _emit("sparkles", f"  ✓ Gemini's creative queries found {new_from_gemini} more videos")
 
         # (e) Batch Video Details
         unique_ids = list(dict.fromkeys(all_video_ids))
@@ -185,7 +195,7 @@ class SearcherService:
         progress_callback=None,
         on_activity=None,
     ) -> dict[str, list[CandidateVideo]]:
-        max_concurrent: int = self._get_default("max_concurrent_segments") or 5
+        max_concurrent: int = self._get("max_concurrent_segments") or 5
         semaphore = asyncio.Semaphore(max_concurrent)
         results: dict[str, list[CandidateVideo]] = {}
         total = len(segments)
@@ -268,6 +278,7 @@ class SearcherService:
         api_key = self._settings.google_search_api_key
         cx = self._settings.google_search_cx
         if not api_key or not cx:
+            logger.info("Google CSE skipped — API key or CX not configured")
             return []
 
         queries = []
@@ -276,13 +287,29 @@ class SearcherService:
             queries.append(f"{term} explainer video")
 
         video_ids: list[str] = []
+        cse_failed = False
         async with httpx.AsyncClient(timeout=30.0) as client:
             for q in queries:
+                if cse_failed:
+                    break
                 try:
                     resp = await client.get(
                         GOOGLE_CSE_URL,
                         params={"key": api_key, "cx": cx, "q": q},
                     )
+                    if resp.status_code == 403:
+                        body = resp.json() if resp.content else {}
+                        errors = body.get("error", {}).get("errors", [])
+                        reasons = [e.get("reason", "") for e in errors]
+                        if any(r in ("quotaExceeded", "dailyLimitExceeded") for r in reasons):
+                            logger.warning("Google CSE API quota exceeded — skipping remaining CSE queries")
+                            cse_failed = True
+                            break
+                    if resp.status_code == 400:
+                        logger.error("Google CSE returned 400 — CX ID '%s' may be invalid. "
+                                     "Create one at https://programmablesearchengine.google.com/", cx)
+                        cse_failed = True
+                        break
                     resp.raise_for_status()
                     data = resp.json()
                     if job_id:
@@ -291,6 +318,11 @@ class SearcherService:
                         vid = self._extract_youtube_id(item.get("link", ""))
                         if vid and vid not in video_ids:
                             video_ids.append(vid)
+                except httpx.HTTPStatusError as exc:
+                    logger.warning("Google CSE HTTP %d for query: %s", exc.response.status_code, q)
+                    if exc.response.status_code in (401, 403):
+                        cse_failed = True
+                        break
                 except Exception:
                     logger.warning("Google CSE search failed for query: %s", q)
         return video_ids

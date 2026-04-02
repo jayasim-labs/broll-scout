@@ -72,6 +72,8 @@ DEFAULTS = {
         "UCWxqSvqiH8PGpSNPSVtFwGw",
         "UCzmI2CEnbKq0yswTpqdQfyg",
         "UCzUBKNqxSedgYiTOMCP4eQA",
+        "UC7o-UFkoAPCoKxpKOfrs4zQ",
+        "UCUYK0BJZF3yNb2fw1EdAXUQ",
     ],
 
     "preferred_channels_tier2": [

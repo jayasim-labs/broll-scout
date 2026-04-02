@@ -41,10 +41,16 @@ If no relevant section exists, return confidence_score: 0.0."""
 class MatcherService:
     """Finds peak visual moments in transcripts using GPT-4o-mini."""
 
-    def __init__(self):
+    def __init__(self, pipeline_settings: dict | None = None):
         settings = get_settings()
         self.api_key = settings.openai_api_key
         self.api_url = "https://api.openai.com/v1/chat/completions"
+        self._pipeline = pipeline_settings or {}
+
+    def _get(self, key: str, fallback=None):
+        if key in self._pipeline:
+            return self._pipeline[key]
+        return DEFAULTS.get(key, fallback)
 
     async def find_timestamp(
         self,
@@ -59,8 +65,8 @@ class MatcherService:
                 source_flag=TranscriptSource.NONE,
             )
 
-        model = DEFAULTS.get("timestamp_model", "gpt-4o-mini")
-        special_instructions = DEFAULTS.get("special_instructions", "")
+        model = self._get("timestamp_model", "gpt-4o-mini")
+        special_instructions = self._get("special_instructions", "")
         max_words = 12000
         words = transcript_text.split()
         if len(words) > max_words:
@@ -87,7 +93,7 @@ class MatcherService:
             return MatchResult(confidence_score=0.0, source_flag=source_flag)
 
         excerpt = parsed.get("excerpt", "")
-        max_excerpt = DEFAULTS.get("transcript_excerpt_max_words", 200)
+        max_excerpt = self._get("transcript_excerpt_max_words", 200)
         excerpt_words = excerpt.split()
         if len(excerpt_words) > max_excerpt:
             excerpt = " ".join(excerpt_words[:max_excerpt])
