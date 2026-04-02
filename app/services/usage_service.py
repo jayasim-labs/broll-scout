@@ -112,7 +112,7 @@ class UsageService:
             return None
 
     async def get_all_usage(self) -> Dict[str, Any]:
-        """Return all_time + current month + today."""
+        """Return all_time + current month + today, plus AWS infra costs."""
         now = datetime.now(timezone.utc)
         month_key = now.strftime("%Y-%m")
         day_key = now.strftime("%Y-%m-%d")
@@ -121,11 +121,26 @@ class UsageService:
         current_month = await self.get_usage(month_key) or _empty_totals()
         today = await self.get_usage(day_key) or _empty_totals()
 
+        aws_monthly = float(PRICING.get("aws_monthly_total", 18.06))
+        days_this_month = now.day
+        aws_cost_mtd = round(aws_monthly * days_this_month / 30, 2)
+        aws_cost_today = round(aws_monthly / 30, 2)
+
         return {
             "all_time": all_time,
             "current_month": current_month,
             "today": today,
             "pricing": PRICING,
+            "aws_cost": {
+                "monthly_estimate": aws_monthly,
+                "mtd": aws_cost_mtd,
+                "today": aws_cost_today,
+                "breakdown": {
+                    "ec2_t3_small": float(PRICING.get("ec2_t3_small_monthly", 16.56)),
+                    "dynamodb": float(PRICING.get("dynamodb_monthly_estimate", 1.00)),
+                    "route53": float(PRICING.get("route53_monthly", 0.50)),
+                },
+            },
         }
 
     async def _store_period(self, period: str, data: Dict) -> None:

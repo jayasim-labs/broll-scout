@@ -4,14 +4,15 @@ set -euo pipefail
 # Cleanup script for B-Roll Scout DynamoDB tables.
 #
 # Usage:
-#   ./scripts/cleanup_dynamo.sh              # Wipe ALL job data (jobs, segments, results)
-#   ./scripts/cleanup_dynamo.sh --all        # Wipe everything including transcripts cache
+#   ./scripts/cleanup_dynamo.sh              # Wipe jobs, segments, results, projects, usage (keep caches)
+#   ./scripts/cleanup_dynamo.sh --all        # Wipe everything including transcript & channel caches
 #   ./scripts/cleanup_dynamo.sh --job <id>   # Delete a single job and its segments/results
 
 REGION="us-east-1"
 PREFIX="broll_"
-TABLES_JOB=("jobs" "segments" "results")
-TABLES_CACHE=("transcripts" "feedback")
+TABLES_JOB=("jobs" "segments" "results" "projects" "usage")
+TABLES_CACHE=("transcripts" "feedback" "channel_cache")
+TABLES_SETTINGS=("settings")
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -103,8 +104,8 @@ print(f'  Deleted {len(data.get(\"Items\", []))} results')
 
 show_status() {
   echo "Current DynamoDB item counts:"
-  for table in "${TABLES_JOB[@]}" "${TABLES_CACHE[@]}"; do
-    count=$(aws dynamodb scan --table-name "${PREFIX}${table}" --region "$REGION" --select COUNT --output json | python3 -c "import json,sys; print(json.load(sys.stdin)['Count'])")
+  for table in "${TABLES_JOB[@]}" "${TABLES_CACHE[@]}" "${TABLES_SETTINGS[@]}"; do
+    count=$(aws dynamodb scan --table-name "${PREFIX}${table}" --region "$REGION" --select COUNT --output json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Count'])" 2>/dev/null || echo "?")
     echo "  ${PREFIX}${table}: $count items"
   done
 }
@@ -121,17 +122,22 @@ show_status
 echo ""
 
 if [ "${1:-}" = "--all" ]; then
-  echo -e "${RED}Wiping ALL tables (including transcript cache)...${NC}"
+  echo -e "${RED}Wiping ALL tables (including transcript & channel caches)...${NC}"
   delete_all_items "jobs" "job_id"
   delete_all_items "segments" "job_id,segment_id"
   delete_all_items "results" "job_id,result_id"
+  delete_all_items "projects" "project_id"
+  delete_all_items "usage" "period"
   delete_all_items "transcripts" "video_id"
   delete_all_items "feedback" "result_id"
+  delete_all_items "channel_cache" "channel_id"
 else
-  echo "Wiping job data (keeping transcript cache)..."
+  echo "Wiping jobs, projects & usage (keeping transcripts, channels, settings)..."
   delete_all_items "jobs" "job_id"
   delete_all_items "segments" "job_id,segment_id"
   delete_all_items "results" "job_id,result_id"
+  delete_all_items "projects" "project_id"
+  delete_all_items "usage" "period"
 fi
 
 echo ""

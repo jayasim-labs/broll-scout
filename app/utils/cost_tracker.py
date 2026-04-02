@@ -15,6 +15,11 @@ PRICING = {
     "youtube_details_per_id": 1,
     "google_cse_per_call": 0.005,
     "gemini_flash_per_call": 0.0001,
+    # AWS infrastructure (monthly)
+    "ec2_t3_small_monthly": 16.56,     # t3.small on-demand us-east-1
+    "dynamodb_monthly_estimate": 1.00,  # ~1GB storage, minimal read/write
+    "route53_monthly": 0.50,            # hosted zone
+    "aws_monthly_total": 18.06,         # sum of above
 }
 
 

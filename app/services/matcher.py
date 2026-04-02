@@ -9,29 +9,32 @@ from app.utils.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
 
-TIMESTAMP_PROMPT_TEMPLATE = """You are the Viral B-Roll Extractor. Given a video's captions with timestamps and a script segment description, your job is to find the PEAK VISUAL MOMENT — not just where the topic is discussed, but where the most visually compelling, high-retention footage exists.
+TIMESTAMP_PROMPT_TEMPLATE = """You are the Viral B-Roll Extractor. Given a video's captions/transcript with timestamps and a script segment description, your job is to find the PEAK VISUAL MOMENT — not just where the topic is first mentioned, but where the most visually compelling, high-retention footage exists.
 
 Segment summary: {summary}
 Visual need: {visual_need}
 Emotional tone: {emotional_tone}
 Key terms: {key_terms}
 
-Captions:
+Video duration: {video_duration} seconds (~{video_duration_min} minutes)
+
+Captions (format is either "M:SS text" or "[M:SS → M:SS] text" where M is minutes, SS is seconds):
 {transcript}
 
-Instructions:
-1. Find the section of the video that best matches the visual need described above.
-2. Within that section, pinpoint the "peak" — the moment with the highest visual impact. Prefer: cinematic footage, archival material, data visualizations, dramatic reveals, expert demonstrations, aerial/drone shots, scientific animations. Avoid: talking heads, static interview frames, title cards, end screens.
-3. The clip should be 15–90 seconds long. If the best moment is shorter, expand slightly. If longer, narrow to the most impactful portion.
-4. Do NOT return timestamp 0:00 unless the video genuinely opens with the relevant visual content.
+CRITICAL INSTRUCTIONS:
+1. Read the ENTIRE transcript carefully, not just the beginning. The best B-roll moment is almost never in the first 30 seconds — that's usually just a talking-head intro or hook.
+2. Look for the section where the topic is SHOWN or DEMONSTRATED, not just first mentioned. Prefer scenes with: cinematic footage, archival material, data visualizations, dramatic reveals, expert demonstrations, aerial/drone shots, on-location footage, reenactments.
+3. AVOID the intro (first 30s) and outro (last 30s) — these are almost always talking heads, title cards, or subscribe prompts.
+4. The clip should be 15–90 seconds of continuous relevant content.
+5. TIMESTAMP CONVERSION: Timestamps in the transcript are in M:SS format. Convert to total seconds: 0:45 = 45s, 1:30 = 90s, 3:15 = 195s, 8:22 = 502s. Your start_time_seconds and end_time_seconds MUST be in total seconds.
 
 Return JSON only:
 {{
-  "start_time_seconds": int,
-  "end_time_seconds": int,
-  "excerpt": "relevant transcript text from this window (max 200 words)",
+  "start_time_seconds": int (total seconds from start, e.g. 3:15 in transcript = 195),
+  "end_time_seconds": int (total seconds, must be > start_time_seconds),
+  "excerpt": "relevant transcript text from this timestamp window (max 200 words)",
   "confidence_score": float (0.0 to 1.0),
-  "relevance_note": "one sentence on why this section matches the topic",
+  "relevance_note": "one sentence on why this section matches the visual need",
   "the_hook": "one sentence on why this specific timestamp is VISUALLY compelling — what makes it a 'peak' moment an editor would want"
 }}
 
@@ -76,12 +79,15 @@ class MatcherService:
         if len(words) > max_words:
             transcript_text = " ".join(words[:max_words])
 
+        video_duration = video_metadata.get("video_duration_seconds", 0) or 0
         prompt = TIMESTAMP_PROMPT_TEMPLATE.format(
             summary=segment.summary,
             visual_need=segment.visual_need,
             emotional_tone=segment.emotional_tone,
             key_terms=", ".join(segment.key_terms),
             transcript=transcript_text,
+            video_duration=video_duration,
+            video_duration_min=round(video_duration / 60, 1),
         )
         if special_instructions:
             prompt += f"\n\nAdditional instructions:\n{special_instructions}"
@@ -138,6 +144,13 @@ class MatcherService:
         if verify_end_screen and start is not None and video_duration_seconds > 0:
             if start > video_duration_seconds - 30:
                 match.confidence_score = max(0.0, match.confidence_score - 0.3)
+
+        if start is not None and start < 15 and video_duration_seconds > 120:
+            logger.warning(
+                "Suspiciously early timestamp %ds for %d-second video — likely intro, penalizing",
+                start, video_duration_seconds,
+            )
+            match.confidence_score = max(0.0, match.confidence_score - 0.15)
 
         return match
 

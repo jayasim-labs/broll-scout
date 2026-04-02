@@ -2,21 +2,23 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Video, Settings, Home, FolderOpen, DollarSign } from "lucide-react"
+import { Video, Settings, Home, FolderOpen, DollarSign, Cloud, Cpu } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { AgentStatusBadge } from "@/components/agent-status"
 import { useEffect, useState, useCallback } from "react"
 
 export function Navbar() {
   const pathname = usePathname()
-  const [totalCost, setTotalCost] = useState<number | null>(null)
+  const [apiCost, setApiCost] = useState<number | null>(null)
+  const [awsCost, setAwsCost] = useState<number | null>(null)
 
   const fetchCost = useCallback(async () => {
     try {
       const resp = await fetch("/api/v1/usage", { cache: "no-store" })
       if (resp.ok) {
         const data = await resp.json()
-        setTotalCost(data.all_time?.estimated_cost_usd ?? null)
+        setApiCost(data.current_month?.estimated_cost_usd ?? null)
+        setAwsCost(data.aws_cost?.mtd ?? null)
       }
     } catch {
       /* silent */
@@ -68,13 +70,23 @@ export function Navbar() {
             <Link
               href="/usage"
               className={cn(
-                "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",
+                "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5",
                 pathname === "/usage" && "text-foreground"
               )}
             >
               <DollarSign className="w-5 h-5" />
-              <span className="hidden sm:inline">
-                {totalCost !== null ? `$${totalCost.toFixed(2)}` : "Usage"}
+              <span className="hidden sm:flex items-center gap-2 text-xs">
+                {awsCost !== null && (
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-500/10 text-orange-400 font-medium" title="AWS infra (EC2 + DynamoDB) — this month">
+                    <Cloud className="w-3 h-3" />${awsCost.toFixed(2)}
+                  </span>
+                )}
+                {apiCost !== null && (
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-medium" title="AI API (OpenAI GPT-4o, GPT-4o-mini, Whisper) — this month">
+                    <Cpu className="w-3 h-3" />${apiCost.toFixed(2)}
+                  </span>
+                )}
+                {awsCost === null && apiCost === null && "Usage"}
               </span>
             </Link>
             <Link

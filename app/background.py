@@ -476,9 +476,10 @@ async def _match_candidates(
                 )
 
                 if transcript.transcript_text and match.confidence_score > 0:
-                    ts_min = (match.start_time_seconds or 0) // 60
-                    ts_sec = (match.start_time_seconds or 0) % 60
-                    await _emit("brain", f"  🤖 {timestamp_model_name} → \"{short_title}\" → {match.confidence_score:.0%} confidence at {ts_min}:{ts_sec:02d}")
+                    s_start = match.start_time_seconds or 0
+                    s_end = match.end_time_seconds or 0
+                    ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
+                    await _emit("brain", f"  🤖 {timestamp_model_name} → \"{short_title}\" → {match.confidence_score:.0%} confidence at {ts_label}")
 
                 async with lock:
                     results.append((cand, match))
