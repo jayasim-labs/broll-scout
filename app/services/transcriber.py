@@ -93,10 +93,11 @@ class TranscriberService:
 
         # Last resort: Whisper transcription via local companion
         max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
-        if video_duration_seconds and video_duration_seconds <= max_whisper_duration:
+        effective_duration = video_duration_seconds or 300  # assume 5 min if unknown
+        if effective_duration <= max_whisper_duration:
             try:
-                logger.info("Trying Whisper for %s (%ds video)", video_id, video_duration_seconds)
-                whisper_result = await self._whisper_via_agent(video_id, video_duration_seconds)
+                logger.info("Trying Whisper for %s (%ds video)", video_id, effective_duration)
+                whisper_result = await self._whisper_via_agent(video_id, effective_duration)
                 if whisper_result:
                     await storage.store_transcript(
                         video_id=video_id,
@@ -106,7 +107,7 @@ class TranscriberService:
                         duration=video_duration_seconds,
                     )
                     if job_id:
-                        whisper_min = round(video_duration_seconds / 60, 1)
+                        whisper_min = round(effective_duration / 60, 1)
                         costs = get_cost_tracker().get_job_costs(job_id)
                         if costs:
                             costs.add_whisper(whisper_min)
@@ -122,8 +123,8 @@ class TranscriberService:
                     logger.info("Whisper returned no transcript for %s", video_id)
             except Exception:
                 logger.exception("Whisper transcription failed for %s", video_id)
-        elif video_duration_seconds > max_whisper_duration:
-            logger.info("Skipping Whisper for %s — duration %ds exceeds max %ds", video_id, video_duration_seconds, max_whisper_duration)
+        else:
+            logger.info("Skipping Whisper for %s — duration %ds exceeds max %ds", video_id, effective_duration, max_whisper_duration)
 
         logger.warning("All transcript sources exhausted for %s", video_id)
         return no_transcript

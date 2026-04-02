@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { JobResponse, Segment, RankedResult } from "@/lib/types"
 
@@ -287,9 +288,21 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
               </a>
               <p className="text-xs text-muted-foreground">{result.channel_name}</p>
             </div>
-            <Badge className={cn("text-xs border shrink-0", scoreColor(result.relevance_score))}>
-              {(result.relevance_score * 100).toFixed(0)}%
-            </Badge>
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge className={cn("text-xs border shrink-0 cursor-help", scoreColor(result.relevance_score))}>
+                    {(result.relevance_score * 100).toFixed(0)}% match
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="max-w-52 text-xs">
+                  <p className="font-medium">Relevance Score</p>
+                  <p className="text-muted-foreground mt-0.5">
+                    How closely this clip matches your script segment, scored by AI analysis of the transcript.
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </div>
 
           <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">

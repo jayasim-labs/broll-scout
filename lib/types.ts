@@ -167,6 +167,7 @@ export interface PipelineSettings {
   max_video_duration_sec: number
   prefer_min_subscribers: number
   recency_full_score_years: number
+  weight_ai_confidence: number
   weight_keyword_density: number
   weight_viral_score: number
   weight_channel_authority: number

@@ -277,22 +277,27 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
     """Download audio via yt-dlp, transcribe with OpenAI Whisper locally."""
     import tempfile
     import os
+    import glob as globmod
 
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.mp3")
+        output_template = os.path.join(tmpdir, "audio.%(ext)s")
         cmd = [
             "yt-dlp", *_cookie_args, url,
             "-x", "--audio-format", "mp3",
             "--no-playlist", "--no-warnings",
-            "-o", audio_path,
+            "-o", output_template,
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if proc.returncode != 0 or not os.path.exists(audio_path):
-                log.warning("yt-dlp audio download failed for %s: %s", video_id, proc.stderr[:300])
+            log.info("Whisper: downloading audio for %s", video_id)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
+            if proc.returncode != 0 or not audio_files:
+                log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, proc.stderr[:300])
                 return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+            audio_path = audio_files[0]
+            log.info("Whisper: audio downloaded → %s", os.path.basename(audio_path))
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp audio download timed out for %s", video_id)
             return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
@@ -304,8 +309,10 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
             return [{"video_id": video_id, "transcript": None, "source": "whisper_not_installed"}]
 
         try:
+            log.info("Whisper: transcribing %s with base model...", video_id)
             model = whisper.load_model("base")
             result = model.transcribe(audio_path, language="en")
+            log.info("Whisper: transcription complete for %s (%d segments)", video_id, len(result.get("segments", [])))
         except Exception as e:
             log.error("Whisper transcription failed for %s: %s", video_id, e)
             return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]

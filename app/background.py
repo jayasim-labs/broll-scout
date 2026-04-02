@@ -269,7 +269,7 @@ async def run_pipeline(
             if ranked:
                 top = ranked[0]
                 source_label = _TRANSCRIPT_SOURCE_LABELS.get(top.source_flag.value, top.source_flag.value) if hasattr(top, 'source_flag') else ""
-                _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\" (ranked by keyword density, views, channel, caption quality, recency)", depth=2, group=seg_group)
+                _log_activity(job_id, "filter", f"Best {len(ranked)} clips selected for \"{segment.title}\" (ranked by AI confidence, keyword density, views, channel, recency)", depth=2, group=seg_group)
             else:
                 _log_activity(job_id, "filter", f"No clips passed quality filters for \"{segment.title}\"", depth=2, group=seg_group)
             all_segment_results[segment.segment_id] = ranked

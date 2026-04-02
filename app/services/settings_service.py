@@ -199,7 +199,7 @@ class SettingsService:
 
     def _validate_setting(self, key: str, value: Any) -> bool:
         weight_keys = {
-            "weight_keyword_density", "weight_viral_score",
+            "weight_ai_confidence", "weight_keyword_density", "weight_viral_score",
             "weight_channel_authority", "weight_caption_quality", "weight_recency",
         }
         if key in weight_keys:

@@ -674,7 +674,7 @@ function SliderSetting({
 function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
   const normalizeWeights = (key: string, newVal: number) => {
     const keys = [
-      "weight_keyword_density", "weight_viral_score",
+      "weight_ai_confidence", "weight_keyword_density", "weight_viral_score",
       "weight_channel_authority", "weight_caption_quality", "weight_recency",
     ]
     const current: Record<string, number> = {}
@@ -829,6 +829,11 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
         </CardHeader>
         <CardContent className="space-y-4">
           <SliderSetting
+            label="AI confidence (GPT-4o-mini)" value={settings.weight_ai_confidence} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_ai_confidence", v)}
+            help="The confidence score from GPT-4o-mini's transcript analysis — how well the clip matches the scene's visual need. This is the most important signal; keep it highest."
+          />
+          <SliderSetting
             label="Keyword density" value={settings.weight_keyword_density} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_keyword_density", v)}
             help="How many of the scene's key terms appear in the clip's transcript. High weight = prefer clips that are topically on-point."
@@ -855,13 +860,15 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
           />
 
           <div className="flex gap-1 h-6 mt-2">
-            <div className="bg-blue-500 rounded-l" style={{ width: `${settings.weight_keyword_density * 100}%` }} title="Keyword" />
+            <div className="bg-cyan-500 rounded-l" style={{ width: `${settings.weight_ai_confidence * 100}%` }} title="AI Confidence" />
+            <div className="bg-blue-500" style={{ width: `${settings.weight_keyword_density * 100}%` }} title="Keyword" />
             <div className="bg-green-500" style={{ width: `${settings.weight_viral_score * 100}%` }} title="Viral" />
             <div className="bg-yellow-500" style={{ width: `${settings.weight_channel_authority * 100}%` }} title="Authority" />
             <div className="bg-purple-500" style={{ width: `${settings.weight_caption_quality * 100}%` }} title="Caption" />
             <div className="bg-red-500 rounded-r" style={{ width: `${settings.weight_recency * 100}%` }} title="Recency" />
           </div>
-          <div className="flex text-xs text-muted-foreground gap-3">
+          <div className="flex flex-wrap text-xs text-muted-foreground gap-3">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-cyan-500 rounded-full" />AI Confidence</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full" />Keyword</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500 rounded-full" />Viral</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-yellow-500 rounded-full" />Authority</span>

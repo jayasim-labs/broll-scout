@@ -21,13 +21,15 @@ class RankerService:
     ) -> list[RankedResult]:
         cfg = settings or DEFAULTS
 
-        w_kw = float(cfg.get("weight_keyword_density", 0.30))
-        w_vs = float(cfg.get("weight_viral_score", 0.20))
-        w_ca = float(cfg.get("weight_channel_authority", 0.20))
-        w_cq = float(cfg.get("weight_caption_quality", 0.10))
-        w_re = float(cfg.get("weight_recency", 0.20))
-        total_w = w_kw + w_vs + w_ca + w_cq + w_re
+        w_ai = float(cfg.get("weight_ai_confidence", 0.40))
+        w_kw = float(cfg.get("weight_keyword_density", 0.15))
+        w_vs = float(cfg.get("weight_viral_score", 0.15))
+        w_ca = float(cfg.get("weight_channel_authority", 0.10))
+        w_cq = float(cfg.get("weight_caption_quality", 0.05))
+        w_re = float(cfg.get("weight_recency", 0.15))
+        total_w = w_ai + w_kw + w_vs + w_ca + w_cq + w_re
         if total_w > 0 and abs(total_w - 1.0) > 0.01:
+            w_ai /= total_w
             w_kw /= total_w
             w_vs /= total_w
             w_ca /= total_w
@@ -64,13 +66,15 @@ class RankerService:
             if match.source_flag == TranscriptSource.NONE:
                 relevance = 0.3
             else:
+                ai_score = match.confidence_score
                 kw_score = self._keyword_density(segment.key_terms, match.transcript_excerpt)
                 vs_score = self._viral_score(cand.view_count)
                 ca_score = self._channel_authority(cand, min_subs)
                 cq_score = self._caption_quality(match.source_flag)
                 re_score = self._recency_score(cand.published_at, cfg)
                 relevance = (
-                    w_kw * kw_score
+                    w_ai * ai_score
+                    + w_kw * kw_score
                     + w_vs * vs_score
                     + w_ca * ca_score
                     + w_cq * cq_score
@@ -82,8 +86,10 @@ class RankerService:
         scored.sort(key=lambda x: x[2], reverse=True)
 
         if not scored and candidates:
-            best_cand, best_match = candidates[0]
-            scored = [(best_cand, best_match, 0.1)]
+            for cand, match in candidates:
+                if match.start_time_seconds is not None and match.confidence_score > 0:
+                    scored = [(cand, match, 0.1)]
+                    break
 
         results: list[RankedResult] = []
         for idx, (cand, match, rel_score) in enumerate(scored[:top_n]):
