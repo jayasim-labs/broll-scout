@@ -111,22 +111,18 @@ cd "$PROJECT_DIR"
 cat > "$PKG_DIR/setup.bat" <<'BATEOF'
 @echo off
 setlocal enabledelayedexpansion
-title B-Roll Scout — Editor Setup
+title B-Roll Scout - Setup
 color 0A
 
 echo.
 echo  ============================================================
-echo   B-Roll Scout — Editor Setup (One-Click)
+echo   B-Roll Scout - Editor Setup
 echo  ============================================================
 echo.
-echo  This will set up everything you need:
-echo    1. Python (auto-install if missing)
-echo    2. ffmpeg (for audio processing)
-echo    3. yt-dlp, Whisper AI, Flask
-echo    4. Desktop shortcut
-echo.
-echo  The web app and Node.js are already bundled — no extra install.
+echo  This will install the companion (Python packages).
+echo  The web app and Node.js are already bundled.
 echo  Estimated time: 3-5 minutes on first run.
+echo.
 echo  Press Ctrl+C to cancel, or
 pause
 
@@ -135,7 +131,6 @@ set "COMPANION=%ROOT%companion"
 set "VENV=%COMPANION%\.venv"
 set PYTHON=
 
-:: --- Find or install Python ---
 echo.
 echo  [1/4] Checking for Python...
 
@@ -166,7 +161,6 @@ if %ERRORLEVEL% equ 0 (
 :py_ok
 for /f "tokens=*" %%i in ('%PYTHON% --version 2^>^&1') do echo  OK: %%i
 
-:: --- ffmpeg ---
 echo.
 echo  [2/4] Checking ffmpeg...
 ffmpeg -version >nul 2>&1
@@ -178,11 +172,10 @@ if %ERRORLEVEL% equ 0 (
         winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent 2>nul
         echo  OK: ffmpeg installed
     ) else (
-        echo  WARNING: ffmpeg not found. Whisper will not work until you install it.
+        echo  WARNING: ffmpeg not found. Whisper will not work until installed.
     )
 )
 
-:: --- Python venv + deps ---
 echo.
 echo  [3/4] Installing companion packages...
 if not exist "%VENV%\Scripts\activate.bat" (
@@ -200,7 +193,6 @@ if %ERRORLEVEL% equ 0 (
     echo  NOTE: Whisper install failed (optional).
 )
 
-:: --- Desktop shortcut ---
 echo.
 echo  [4/4] Creating desktop shortcut...
 set "SHORTCUT_VBS=%TEMP%\broll_sc.vbs"
@@ -217,22 +209,14 @@ echo  OK: "B-Roll Scout" shortcut on Desktop
 
 echo.
 echo  ============================================================
-echo   Setup complete!
+echo   Setup complete! Starting B-Roll Scout...
 echo  ============================================================
 echo.
-
-if /i "%~1"=="/nolaunch" (
-    pause
-    exit /b 0
-)
-
-echo  Starting B-Roll Scout now...
+echo  Next time, just double-click "B-Roll Scout" on your Desktop.
 echo.
-start "" "%ROOT%start.bat"
 
-echo  This setup window can be closed.
-echo.
-pause
+:: Hand off to start.bat in THIS window (not a new one)
+call "%ROOT%start.bat"
 BATEOF
 
 # ---------- start.bat ----------
@@ -251,79 +235,57 @@ set "COMPANION=%ROOT%companion"
 set "VENV=%COMPANION%\.venv"
 set "NODE=%ROOT%node\node.exe"
 set "SERVER=%ROOT%webapp\server.js"
-set "PIDFILE=%ROOT%.broll-pids"
 
-:: -----------------------------------------------------------
-:: Kill any previous instances first (prevents duplicates)
-:: -----------------------------------------------------------
+:: Kill any previous instances (prevents duplicates)
 call "%ROOT%stop.bat" /quiet 2>nul
 
-:: Check first-time setup
+:: First-time: run setup
 if not exist "%VENV%\Scripts\activate.bat" (
     echo  First launch detected. Running setup...
-    call "%ROOT%setup.bat" /nolaunch
+    call "%ROOT%setup.bat"
+    exit /b 0
 )
 
 call "%VENV%\Scripts\activate.bat"
 
-:: Auto-update yt-dlp
 echo  Updating yt-dlp...
 pip install --upgrade yt-dlp --quiet 2>nul
 echo  OK
 echo.
 
-:: -----------------------------------------------------------
-:: Start the Next.js web app in background (port 3000)
-:: -----------------------------------------------------------
+:: Start Next.js web app in background (port 3000)
 echo  Starting web app on http://localhost:3000 ...
 set PORT=3000
 set HOSTNAME=127.0.0.1
 start /min "BRoll-WebApp" "%NODE%" "%SERVER%"
 
-:: Give it a moment to bind, then grab its PID
-timeout /t 2 /nobreak >nul
-for /f "tokens=2" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":3000 " 2^>nul') do (
-    for /f "tokens=5" %%q in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":3000 " 2^>nul') do (
-        echo %%q> "%PIDFILE%"
-    )
-)
+:: Open browser after web app is ready
+start /min "" cmd /c "timeout /t 5 /nobreak >nul && start "" http://localhost:3000"
 
-:: Open browser after the server is ready
-start /min "" cmd /c "timeout /t 4 /nobreak >nul && start "" http://localhost:3000"
-
-:: -----------------------------------------------------------
 :: Start companion in foreground (port 9876)
-:: -----------------------------------------------------------
 echo  Starting companion on http://127.0.0.1:9876 ...
 echo.
-echo  Your browser will open to http://localhost:3000 in a few seconds.
-echo.
-echo  ============================================================
-echo   To STOP: close this window, or press Ctrl+C
-echo  ============================================================
+echo  Browser will open to http://localhost:3000 in a few seconds.
+echo  Keep this window open while you work.
+echo  To stop: close this window or press Ctrl+C.
 echo.
 
 python "%COMPANION%\companion.py"
 
-:: -----------------------------------------------------------
-:: Companion exited (Ctrl+C or window closed) -- clean up
-:: -----------------------------------------------------------
+:: Companion exited -- clean up background Node.js
 call "%ROOT%stop.bat" /quiet 2>nul
 echo.
 echo  B-Roll Scout stopped.
-pause
+echo  Press any key to close...
+pause >nul
 BATEOF
 
 # ---------- stop.bat ----------
 cat > "$PKG_DIR/stop.bat" <<'BATEOF'
 @echo off
-:: Kills all B-Roll Scout background processes.
-:: Called automatically by start.bat on launch and exit.
-:: Editors can also double-click this to force-stop everything.
+:: Stops all B-Roll Scout processes.
+:: Double-click to force-stop, or called automatically by start.bat.
 
-set "ROOT=%~dp0"
-set "NODE=%ROOT%node\node.exe"
-set "PIDFILE=%ROOT%.broll-pids"
 set QUIET=0
 if /i "%~1"=="/quiet" set QUIET=1
 
@@ -333,13 +295,13 @@ if %QUIET%==0 (
     echo.
 )
 
-:: Kill Node.js web app (port 3000)
+:: Kill web app on port 3000
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":3000 " 2^>nul') do (
     taskkill /f /pid %%p >nul 2>&1
     if %QUIET%==0 echo  Stopped web app (PID %%p)
 )
 
-:: Kill companion Flask (port 9876)
+:: Kill companion on port 9876
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":9876 " 2^>nul') do (
     taskkill /f /pid %%p >nul 2>&1
     if %QUIET%==0 echo  Stopped companion (PID %%p)
@@ -347,13 +309,12 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":9876
 
 :: Fallback: kill by window title
 taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
-
-:: Clean up PID file
-del "%PIDFILE%" >nul 2>&1
+taskkill /f /fi "WINDOWTITLE eq B-Roll Scout" >nul 2>&1
 
 if %QUIET%==0 (
     echo.
     echo  All B-Roll Scout processes stopped.
+    echo.
     pause
 )
 BATEOF

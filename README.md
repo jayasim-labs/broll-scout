@@ -275,14 +275,10 @@ BRoll Scout/
 ├── broll-companion/
 │   ├── companion.py             # Flask app: yt-dlp search, transcript fetch, Whisper, clip download, Chrome cookies
 │   ├── requirements.txt         # flask, flask-cors, yt-dlp, youtube-transcript-api, openai-whisper
-│   ├── setup.bat                # Windows one-click setup (deps + companion + optional browser via app.url)
-│   ├── load-app-url.bat         # Reads web UI URL from app.url (used by setup / start-companion)
-│   ├── app.url.example          # Template: copy to app.url with your Next.js / Vercel URL
-│   ├── launch-companion-server.bat  # Starts Flask only (used by setup.bat in a new window)
-│   ├── install.bat              # Windows installer (advanced — assumes Python exists)
-│   ├── start-companion.bat      # Daily launcher (kills previous, auto-setup, opens browser)
-│   ├── stop.bat                 # Force-kills all B-Roll Scout processes (companion + web app)
-│   └── update.bat               # Windows updater (keeps yt-dlp and packages current)
+│   ├── setup.bat                # One-click setup (deps + runs start-companion.bat after)
+│   ├── start-companion.bat      # Daily launcher (kills previous, starts companion, opens browser)
+│   ├── stop.bat                 # Force-kills all B-Roll Scout processes
+│   └── update.bat               # Updates yt-dlp and packages
 ├── tests/
 │   └── test_integration.py      # 70 integration tests
 ├── scripts/

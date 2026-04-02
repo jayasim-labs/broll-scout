@@ -44,6 +44,3 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
-
-# Editor companion: production UI URL (copy from app.url.example)
-broll-companion/app.url
