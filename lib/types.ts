@@ -91,6 +91,7 @@ export interface JobResponse {
   english_translation: string | null
   project_id?: string | null
   title?: string | null
+  activity_log?: ActivityEntry[]
 }
 
 export interface JobSummary {

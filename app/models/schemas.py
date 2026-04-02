@@ -201,6 +201,7 @@ class JobResponse(BaseModel):
     english_translation: Optional[str] = None
     project_id: Optional[str] = None
     title: Optional[str] = None
+    activity_log: List[dict] = Field(default_factory=list)
 
 
 class JobSummary(BaseModel):

@@ -202,6 +202,7 @@ class SearcherService:
         seen_ids: set[str] = set()
         blocked_count = 0
         duration_filtered = 0
+        vertical_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -212,6 +213,12 @@ class SearcherService:
             duration = v.get("duration_seconds") or v.get("video_duration_seconds") or 0
             if duration < min_duration or duration > max_duration:
                 duration_filtered += 1
+                continue
+
+            w = v.get("width") or 0
+            h = v.get("height") or 0
+            if w > 0 and h > 0 and h > w:
+                vertical_filtered += 1
                 continue
 
             ch_id = v.get("channel_id", "")
@@ -244,6 +251,8 @@ class SearcherService:
         filter_notes = []
         if duration_filtered:
             filter_notes.append(f"{duration_filtered} too short/long")
+        if vertical_filtered:
+            filter_notes.append(f"{vertical_filtered} vertical/shorts")
         if blocked_count:
             filter_notes.append(f"{blocked_count} from blocked channels")
         filter_text = f" (removed {', '.join(filter_notes)})" if filter_notes else ""

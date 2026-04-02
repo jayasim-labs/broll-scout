@@ -191,6 +191,7 @@ async def get_job_status(job_id: str):
     job = await storage.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    stored_log = await storage.get_activity_log(job_id)
     return {
         "job_id": job_id,
         "status": job.status.value,
@@ -198,7 +199,7 @@ async def get_job_status(job_id: str):
             "stage": "completed" if job.status == JobStatus.COMPLETE else job.status.value,
             "percent_complete": 100 if job.status == JobStatus.COMPLETE else 0,
             "message": "Complete" if job.status == JobStatus.COMPLETE else job.status.value,
-            "activity_log": [],
+            "activity_log": stored_log,
         },
     }
 

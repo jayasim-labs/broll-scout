@@ -88,6 +88,7 @@ class StorageService:
             "completed_at", "processing_time_seconds", "api_costs",
             "segment_count", "result_count", "english_translation",
             "script_duration_minutes", "minimum_results_met",
+            "activity_log",
         ):
             if param in kwargs:
                 safe = param.replace("_", "")
@@ -108,6 +109,18 @@ class StorageService:
             )
         except ClientError:
             logger.exception("Failed to update job %s", job_id)
+
+    async def get_activity_log(self, job_id: str) -> list:
+        try:
+            resp = await self._run(
+                self._table("jobs").get_item,
+                Key={"job_id": job_id},
+                ProjectionExpression="activity_log",
+            )
+            return resp.get("Item", {}).get("activity_log", [])
+        except ClientError:
+            logger.exception("Failed to get activity log for %s", job_id)
+            return []
 
     async def get_job(self, job_id: str) -> Optional[JobResponse]:
         try:
@@ -197,6 +210,7 @@ class StorageService:
                 english_translation=item.get("english_translation"),
                 project_id=item.get("project_id"),
                 title=item.get("title"),
+                activity_log=item.get("activity_log", []),
             )
         except ClientError:
             logger.exception("Failed to get job %s", job_id)

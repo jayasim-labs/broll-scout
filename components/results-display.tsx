@@ -1,19 +1,23 @@
 "use client"
 
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useMemo } from "react"
 import {
   Download, ChevronDown, ChevronUp, ExternalLink, RefreshCw,
   ThumbsUp, ThumbsDown, Clock, Eye, Play, Scissors,
   Check, Pause, SkipBack, SkipForward, X,
+  Brain, Search, Globe, Sparkles, Filter, AlertTriangle, Zap,
+  Mic, Shield, Terminal, ChevronRight, Languages,
+  type LucideIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { JobResponse, Segment, RankedResult } from "@/lib/types"
+import type { JobResponse, Segment, RankedResult, ActivityEntry } from "@/lib/types"
 
 interface ResultsDisplayProps {
   job: JobResponse
@@ -41,7 +45,22 @@ function scoreColor(score: number): string {
   return "bg-red-500/20 text-red-400 border-red-500/30"
 }
 
+const SEGMENTS_PER_PAGE = 15
+
 export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayProps) {
+  const activityLog = job.activity_log || []
+  const segmentsWithClips = useMemo(
+    () => job.segments.filter(s => s.results.length > 0),
+    [job.segments],
+  )
+  const totalPages = Math.max(1, Math.ceil(segmentsWithClips.length / SEGMENTS_PER_PAGE))
+  const [currentPage, setCurrentPage] = useState(1)
+  const pageSegments = useMemo(
+    () => segmentsWithClips.slice((currentPage - 1) * SEGMENTS_PER_PAGE, currentPage * SEGMENTS_PER_PAGE),
+    [segmentsWithClips, currentPage],
+  )
+  const emptySegmentCount = job.segments.length - segmentsWithClips.length
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -56,27 +75,66 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
         <StatCard label="API Cost" value={`$${job.api_costs.estimated_cost_usd.toFixed(2)}`} />
       </div>
 
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">
-          Segments & B-Roll Clips
-        </h2>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onExport} className="gap-2">
-            <Download className="w-4 h-4" />
-            Export JSON
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onNewSearch} className="gap-2">
-            <RefreshCw className="w-4 h-4" />
-            New Search
-          </Button>
+      <Tabs defaultValue="clips" className="w-full">
+        <div className="flex items-center justify-between">
+          <TabsList>
+            <TabsTrigger value="clips" className="gap-1.5">
+              <Scissors className="w-3.5 h-3.5" />
+              Segments & Clips
+            </TabsTrigger>
+            <TabsTrigger value="activity" className="gap-1.5">
+              <Zap className="w-3.5 h-3.5" />
+              Activity Log
+              {activityLog.length > 0 && (
+                <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0">
+                  {activityLog.length}
+                </Badge>
+              )}
+            </TabsTrigger>
+          </TabsList>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={onExport} className="gap-2">
+              <Download className="w-4 h-4" />
+              Export JSON
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onNewSearch} className="gap-2">
+              <RefreshCw className="w-4 h-4" />
+              New Search
+            </Button>
+          </div>
         </div>
-      </div>
 
-      <div className="space-y-3">
-        {job.segments.map((segment, idx) => (
-          <SegmentCard key={segment.segment_id} segment={segment} index={idx} jobId={job.job_id} />
-        ))}
-      </div>
+        <TabsContent value="clips">
+          <div className="space-y-3">
+            {pageSegments.map((segment, idx) => (
+              <SegmentCard
+                key={segment.segment_id}
+                segment={segment}
+                index={(currentPage - 1) * SEGMENTS_PER_PAGE + idx}
+                jobId={job.job_id}
+              />
+            ))}
+          </div>
+
+          {emptySegmentCount > 0 && (
+            <p className="text-xs text-muted-foreground mt-3">
+              {emptySegmentCount} segment{emptySegmentCount !== 1 ? "s" : ""} with no clips hidden
+            </p>
+          )}
+
+          {totalPages > 1 && (
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="activity">
+          <ActivityLogPanel entries={activityLog} />
+        </TabsContent>
+      </Tabs>
 
       <Card>
         <CardContent className="pt-4">
@@ -118,6 +176,69 @@ function StatCard({ label, value, accent }: { label: string; value: string | num
         </p>
       </CardContent>
     </Card>
+  )
+}
+
+function Pagination({ currentPage, totalPages, onPageChange }: {
+  currentPage: number
+  totalPages: number
+  onPageChange: (page: number) => void
+}) {
+  const pages = useMemo(() => {
+    const items: (number | "...")[] = []
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) items.push(i)
+    } else {
+      items.push(1)
+      if (currentPage > 3) items.push("...")
+      for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) {
+        items.push(i)
+      }
+      if (currentPage < totalPages - 2) items.push("...")
+      items.push(totalPages)
+    }
+    return items
+  }, [currentPage, totalPages])
+
+  return (
+    <div className="flex items-center justify-center gap-1.5 pt-4">
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 w-8 p-0"
+        disabled={currentPage === 1}
+        onClick={() => onPageChange(currentPage - 1)}
+      >
+        <ChevronUp className="w-4 h-4 -rotate-90" />
+      </Button>
+      {pages.map((p, i) =>
+        p === "..." ? (
+          <span key={`ellipsis-${i}`} className="px-1 text-xs text-muted-foreground">...</span>
+        ) : (
+          <Button
+            key={p}
+            variant={p === currentPage ? "default" : "outline"}
+            size="sm"
+            className="h-8 w-8 p-0 text-xs"
+            onClick={() => { onPageChange(p); window.scrollTo({ top: 0, behavior: "smooth" }) }}
+          >
+            {p}
+          </Button>
+        )
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 w-8 p-0"
+        disabled={currentPage === totalPages}
+        onClick={() => onPageChange(currentPage + 1)}
+      >
+        <ChevronDown className="w-4 h-4 -rotate-90" />
+      </Button>
+      <span className="text-xs text-muted-foreground ml-2">
+        Page {currentPage} of {totalPages}
+      </span>
+    </div>
   )
 }
 
@@ -566,5 +687,223 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
         </div>
       )}
     </div>
+  )
+}
+
+/* ── Activity Log Panel (for completed jobs) ── */
+
+const logIconMap: Record<string, LucideIcon> = {
+  brain: Brain, search: Search, globe: Globe, sparkles: Sparkles,
+  filter: Filter, check: Check, alert: AlertTriangle, zap: Zap,
+  eye: Eye, mic: Mic, clock: Clock, shield: Shield, terminal: Terminal,
+}
+
+const logIconColor: Record<string, string> = {
+  brain: "text-violet-400", search: "text-blue-400", globe: "text-cyan-400",
+  sparkles: "text-amber-400", filter: "text-orange-400", check: "text-emerald-400",
+  alert: "text-red-400", zap: "text-yellow-400", eye: "text-pink-400",
+  mic: "text-teal-400", clock: "text-slate-400", shield: "text-indigo-400",
+  terminal: "text-lime-400",
+}
+
+const LOG_GROUP_LABELS: Record<string, { label: string; icon: LucideIcon; color: string }> = {
+  translate: { label: "Translation & Segmentation", icon: Languages, color: "text-violet-400" },
+  search: { label: "Video Discovery", icon: Search, color: "text-blue-400" },
+  match: { label: "Timestamp Analysis", icon: Eye, color: "text-pink-400" },
+  rank: { label: "Ranking & Deduplication", icon: Filter, color: "text-orange-400" },
+  done: { label: "Complete", icon: Check, color: "text-emerald-400" },
+}
+
+interface LogGroup {
+  key: string
+  label: string
+  icon: LucideIcon
+  color: string
+  entries: ActivityEntry[]
+}
+
+function groupLogEntries(log: ActivityEntry[]): LogGroup[] {
+  const groups: LogGroup[] = []
+  let currentKey = ""
+  for (const entry of log) {
+    const gk = entry.group || "general"
+    const base = gk.startsWith("match-") ? "match" : gk
+    if (base !== currentKey) {
+      currentKey = base
+      const meta = LOG_GROUP_LABELS[base] || { label: base, icon: Zap, color: "text-muted-foreground" }
+      groups.push({ key: `${base}-${groups.length}`, label: meta.label, icon: meta.icon, color: meta.color, entries: [] })
+    }
+    groups[groups.length - 1].entries.push(entry)
+  }
+  return groups
+}
+
+function formatLogTime(raw: string): string {
+  try {
+    const d = new Date(raw)
+    if (isNaN(d.getTime())) return raw
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
+  } catch {
+    return raw
+  }
+}
+
+function ActivityLogPanel({ entries }: { entries: ActivityEntry[] }) {
+  const groups = useMemo(() => groupLogEntries(entries), [entries])
+
+  if (entries.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center">
+          <Zap className="w-8 h-8 text-muted-foreground/30 mx-auto mb-3" />
+          <p className="text-sm text-muted-foreground">
+            No activity log available for this job.
+          </p>
+          <p className="text-xs text-muted-foreground/60 mt-1">
+            Activity logs are stored for new jobs going forward.
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="max-h-[600px] overflow-y-auto px-4 py-3">
+          <div className="space-y-1">
+            {groups.map((group) => (
+              <LogGroupSection key={group.key} group={group} />
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function LogGroupSection({ group }: { group: LogGroup }) {
+  const [expanded, setExpanded] = useState(true)
+  const Icon = group.icon
+  const depth0 = group.entries.filter(e => !e.depth || e.depth === 0)
+  const childEntries = group.entries.filter(e => (e.depth || 0) >= 1)
+
+  return (
+    <div className="relative">
+      <button
+        className="flex items-center gap-2 w-full text-left py-1.5 px-1 rounded hover:bg-secondary/50 transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded
+          ? <ChevronDown className="w-3 h-3 text-muted-foreground flex-shrink-0" />
+          : <ChevronRight className="w-3 h-3 text-muted-foreground flex-shrink-0" />}
+        <Icon className={cn("w-3.5 h-3.5 flex-shrink-0", group.color)} />
+        <span className={cn("text-xs font-semibold", group.color)}>{group.label}</span>
+        <span className="text-[10px] text-muted-foreground/50 ml-auto">
+          {group.entries.length} event{group.entries.length !== 1 ? "s" : ""}
+        </span>
+      </button>
+      {expanded && (
+        <div className="ml-3 pl-3 border-l border-border/40 space-y-0">
+          {depth0.map((entry, i) => (
+            <LogEntryLine key={`d0-${i}`} entry={entry} />
+          ))}
+          {childEntries.length > 0 && (
+            <LogChildEntries entries={childEntries} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LogChildEntries({ entries }: { entries: ActivityEntry[] }) {
+  const segmentGroups = useMemo(() => {
+    const groups: { label: string; items: ActivityEntry[] }[] = []
+    for (const e of entries) {
+      const d = e.depth || 1
+      if (d === 1) {
+        groups.push({ label: e.text, items: [e] })
+      } else {
+        if (groups.length === 0) groups.push({ label: "", items: [] })
+        groups[groups.length - 1].items.push(e)
+      }
+    }
+    return groups
+  }, [entries])
+
+  return (
+    <div className="space-y-0">
+      {segmentGroups.map((sg, gi) => (
+        <LogSegmentGroup key={gi} group={sg} />
+      ))}
+    </div>
+  )
+}
+
+function LogSegmentGroup({ group }: { group: { label: string; items: ActivityEntry[] } }) {
+  const [expanded, setExpanded] = useState(false)
+  const header = group.items[0]
+  const children = group.items.slice(1)
+
+  if (group.items.length === 1) {
+    return <LogEntryLine entry={header} />
+  }
+
+  return (
+    <div>
+      <button
+        className="flex items-center gap-1.5 w-full text-left py-0.5 pl-1 rounded hover:bg-secondary/30 transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded
+          ? <ChevronDown className="w-2.5 h-2.5 text-muted-foreground/50 flex-shrink-0" />
+          : <ChevronRight className="w-2.5 h-2.5 text-muted-foreground/50 flex-shrink-0" />}
+        <LogEntryInner entry={header} />
+        {!expanded && children.length > 0 && (
+          <span className="text-[9px] text-muted-foreground/40 ml-auto flex-shrink-0">
+            +{children.length}
+          </span>
+        )}
+      </button>
+      {expanded && children.length > 0 && (
+        <div className="ml-4 pl-2.5 border-l border-border/30 space-y-0">
+          {children.map((e, i) => (
+            <LogEntryLine key={i} entry={e} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LogEntryLine({ entry }: { entry: ActivityEntry }) {
+  return (
+    <div className={cn(
+      "flex items-start gap-2 py-1 opacity-80",
+      (entry.depth || 0) >= 2 && "ml-1",
+      (entry.depth || 0) >= 3 && "ml-2",
+    )}>
+      <LogEntryInner entry={entry} />
+    </div>
+  )
+}
+
+function LogEntryInner({ entry }: { entry: ActivityEntry }) {
+  const IconComp = logIconMap[entry.icon] || Zap
+  const color = logIconColor[entry.icon] || "text-muted-foreground"
+  return (
+    <>
+      <span className="text-[10px] text-muted-foreground/50 tabular-nums pt-0.5 w-[70px] shrink-0" title={entry.time}>
+        {formatLogTime(entry.time)}
+      </span>
+      <IconComp className={cn("w-3 h-3 shrink-0 mt-0.5", color)} />
+      <span className={cn(
+        "text-[11px] leading-relaxed text-muted-foreground",
+        entry.icon === "terminal" && "font-mono text-[10px] text-lime-400/80",
+      )}>
+        {entry.text}
+      </span>
+    </>
   )
 }

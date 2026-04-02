@@ -339,6 +339,10 @@ async def run_pipeline(
         est_cost = api_costs.get("estimated_cost_usd", 0)
         _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}", group="done")
 
+        _set_progress(job_id, "completed", 100, "Scouting complete!")
+        _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
+
+        final_log = _progress.get(job_id, {}).get("activity_log", [])
         await storage.update_job_status(
             job_id, JobStatus.COMPLETE,
             completed_at=datetime.utcnow().isoformat(),
@@ -346,9 +350,8 @@ async def run_pipeline(
             result_count=len(all_results),
             api_costs=api_costs,
             minimum_results_met=minimum_results_met,
+            activity_log=final_log,
         )
-        _set_progress(job_id, "completed", 100, "Scouting complete!")
-        _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
 
         if project_id:
             try:
@@ -366,11 +369,13 @@ async def run_pipeline(
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Cancelled after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
+        cancel_log = _progress.get(job_id, {}).get("activity_log", [])
         await storage.update_job_status(
             job_id, JobStatus.CANCELLED,
             completed_at=datetime.utcnow().isoformat(),
             processing_time_seconds=elapsed,
             api_costs=api_costs,
+            activity_log=cancel_log,
         )
         _set_progress(job_id, "cancelled", 0, "Cancelled by user")
 
@@ -382,11 +387,13 @@ async def run_pipeline(
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Failed after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
+        fail_log = _progress.get(job_id, {}).get("activity_log", [])
         await storage.update_job_status(
             job_id, JobStatus.FAILED,
             completed_at=datetime.utcnow().isoformat(),
             processing_time_seconds=elapsed,
             api_costs=api_costs,
+            activity_log=fail_log,
         )
         _set_progress(job_id, "failed", 0, "Pipeline failed")
 

@@ -430,6 +430,8 @@ def _normalize(data: dict) -> dict:
         "published_at": iso_date,
         "view_count": data.get("view_count") or 0,
         "description": data.get("description", "")[:500],
+        "width": data.get("width") or 0,
+        "height": data.get("height") or 0,
     }
 
 

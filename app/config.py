@@ -42,7 +42,7 @@ DEFAULTS = {
     "whisper_audio_trim_min": 20,
     "transcript_excerpt_max_words": 200,
 
-    "min_video_duration_sec": 120,
+    "min_video_duration_sec": 180,
     "max_video_duration_sec": 5400,
     "prefer_min_subscribers": 10000,
     "recency_full_score_years": 2,
