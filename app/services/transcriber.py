@@ -69,7 +69,7 @@ class TranscriberService:
 
         # Fallback: fetch transcript via local companion agent
         try:
-            logger.info("Trying agent transcript for %s", video_id)
+            logger.warning("[transcript] Trying agent captions for %s", video_id)
             agent_result = await self._fetch_via_agent(video_id)
             if agent_result:
                 await storage.store_transcript(
@@ -87,16 +87,19 @@ class TranscriberService:
                     video_duration_seconds=video_duration_seconds,
                 )
             else:
-                logger.info("Agent transcript returned nothing for %s", video_id)
+                logger.warning("[transcript] Agent captions returned nothing for %s", video_id)
         except Exception:
-            logger.info("Agent transcript fetch failed for %s", video_id)
+            logger.warning("[transcript] Agent captions failed for %s", video_id)
 
         # Last resort: Whisper transcription via local companion
         max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
-        effective_duration = video_duration_seconds or 300  # assume 5 min if unknown
+        effective_duration = video_duration_seconds or 300
+        agent_up = agent_queue.is_agent_available()
+        logger.warning("[transcript] Whisper check for %s: duration=%ds, max=%ds, agent_available=%s",
+                       video_id, effective_duration, max_whisper_duration, agent_up)
         if effective_duration <= max_whisper_duration:
             try:
-                logger.info("Trying Whisper for %s (%ds video)", video_id, effective_duration)
+                logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
                 whisper_result = await self._whisper_via_agent(video_id, effective_duration)
                 if whisper_result:
                     await storage.store_transcript(
@@ -111,7 +114,7 @@ class TranscriberService:
                         costs = get_cost_tracker().get_job_costs(job_id)
                         if costs:
                             costs.add_whisper(whisper_min)
-                    logger.info("Whisper transcript stored for %s", video_id)
+                    logger.warning("[transcript] Whisper SUCCESS for %s", video_id)
                     return Transcript(
                         video_id=video_id,
                         transcript_text=whisper_result["text"],
@@ -120,13 +123,13 @@ class TranscriberService:
                         video_duration_seconds=video_duration_seconds,
                     )
                 else:
-                    logger.info("Whisper returned no transcript for %s", video_id)
+                    logger.warning("[transcript] Whisper returned no transcript for %s", video_id)
             except Exception:
-                logger.exception("Whisper transcription failed for %s", video_id)
+                logger.exception("[transcript] Whisper exception for %s", video_id)
         else:
-            logger.info("Skipping Whisper for %s — duration %ds exceeds max %ds", video_id, effective_duration, max_whisper_duration)
+            logger.warning("[transcript] Skipping Whisper for %s — duration %ds > max %ds", video_id, effective_duration, max_whisper_duration)
 
-        logger.warning("All transcript sources exhausted for %s", video_id)
+        logger.warning("[transcript] All sources exhausted for %s", video_id)
         return no_transcript
 
     async def _fetch_via_agent(self, video_id: str) -> dict | None:
@@ -158,7 +161,7 @@ class TranscriberService:
     async def _whisper_via_agent(self, video_id: str, duration_seconds: int) -> dict | None:
         """Ask the local companion to download audio and run Whisper transcription."""
         if not agent_queue.is_agent_available():
-            logger.info("No agent available for Whisper transcription of %s", video_id)
+            logger.warning("[whisper] No agent available for %s", video_id)
             return None
 
         max_dur_min = DEFAULTS.get("whisper_max_video_duration_min", 60)
@@ -167,11 +170,15 @@ class TranscriberService:
             "max_duration_min": max_dur_min,
         })
         timeout = min(600, max(180, duration_seconds + 120))
+        logger.warning("[whisper] Task %s created for %s, waiting %ds", task_id[:8], video_id, timeout)
         results = await agent_queue.wait_for_result(task_id, timeout=timeout)
         if not results:
+            logger.warning("[whisper] Task timed out or empty for %s", video_id)
             return None
         data = results[0]
+        source = data.get("source", "unknown")
         transcript_text = data.get("transcript")
+        logger.warning("[whisper] Result for %s: source=%s, has_text=%s", video_id, source, bool(transcript_text))
         if not transcript_text:
             return None
         return {"text": transcript_text}
@@ -243,10 +250,12 @@ class TranscriberService:
     def _format_entries(entries: list[dict]) -> str:
         lines = []
         for entry in entries:
-            total_seconds = int(entry.get("start", 0))
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
+            start = int(entry.get("start", 0))
+            duration = entry.get("duration", 0)
+            end = int(start + duration) if duration else start
+            s_min, s_sec = start // 60, start % 60
+            e_min, e_sec = end // 60, end % 60
             text = entry.get("text", "").strip()
             if text:
-                lines.append(f"{minutes}:{seconds:02d} {text}")
+                lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
         return "\n".join(lines)

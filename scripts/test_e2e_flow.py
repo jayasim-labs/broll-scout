@@ -82,12 +82,14 @@ def test_transcript(video_id: str):
             return None
         text_lines = []
         for entry in entries:
-            total_seconds = int(entry.get("start", 0))
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
+            start = int(entry.get("start", 0))
+            duration = entry.get("duration", 0)
+            end = int(start + duration) if duration else start
+            s_min, s_sec = start // 60, start % 60
+            e_min, e_sec = end // 60, end % 60
             text = entry.get("text", "").strip()
             if text:
-                text_lines.append(f"{minutes}:{seconds:02d} {text}")
+                text_lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
         transcript_text = "\n".join(text_lines)
         ok(f"Got {len(entries)} entries, {len(transcript_text)} chars")
         ok(f"First line: {text_lines[0][:80]}")

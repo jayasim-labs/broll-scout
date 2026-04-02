@@ -258,8 +258,11 @@ async def run_pipeline(
                 matched = []
 
             if matched:
-                _log_activity(job_id, "eye", f"Found relevant moments in {len(matched)} out of {len(cands)} videos for \"{segment.title}\"", depth=2, group=seg_group)
-                for cand, match in matched[:3]:
+                good_matches = [(c, m) for c, m in matched if m.confidence_score > 0 and m.start_time_seconds is not None]
+                no_transcript = len(matched) - len(good_matches)
+                note = f" ({no_transcript} had no usable transcript)" if no_transcript else ""
+                _log_activity(job_id, "eye", f"Found relevant moments in {len(good_matches)} out of {len(cands)} videos for \"{segment.title}\"{note}", depth=2, group=seg_group)
+                for cand, match in sorted(good_matches, key=lambda x: x[1].confidence_score, reverse=True)[:3]:
                     ts_min = (match.start_time_seconds or 0) // 60
                     ts_sec = (match.start_time_seconds or 0) % 60
                     hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""

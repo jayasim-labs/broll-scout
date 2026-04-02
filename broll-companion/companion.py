@@ -259,12 +259,14 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
 
         lines = []
         for entry in entries:
-            total_seconds = int(entry.get("start", 0))
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
+            start = int(entry.get("start", 0))
+            duration = entry.get("duration", 0)
+            end = int(start + duration) if duration else start
+            s_min, s_sec = start // 60, start % 60
+            e_min, e_sec = end // 60, end % 60
             text = entry.get("text", "").strip()
             if text:
-                lines.append(f"{minutes}:{seconds:02d} {text}")
+                lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
 
         return [{"video_id": video_id, "transcript": "\n".join(lines), "source": source}]
 
@@ -320,14 +322,19 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
         segments = result.get("segments", [])
         lines = []
         for seg in segments:
-            total_seconds = int(seg.get("start", 0))
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
+            start = seg.get("start", 0)
+            end = seg.get("end", start)
+            s_min, s_sec = int(start) // 60, int(start) % 60
+            e_min, e_sec = int(end) // 60, int(end) % 60
             text = seg.get("text", "").strip()
             if text:
-                lines.append(f"{minutes}:{seconds:02d} {text}")
+                lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
 
         transcript_text = "\n".join(lines)
+        if not transcript_text:
+            log.warning("Whisper found no speech in %s (0 segments with text)", video_id)
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_no_speech"}]
+        log.info("Whisper: %d segments, %d chars for %s", len(lines), len(transcript_text), video_id)
         return [{"video_id": video_id, "transcript": transcript_text, "source": "whisper_transcription"}]
 
 
