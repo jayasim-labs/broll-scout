@@ -107,304 +107,275 @@ echo ""
 echo "[4/5] Creating batch files..."
 cd "$PROJECT_DIR"
 
-# ---------- setup.bat ----------
+# ---------- setup.bat (thin wrapper) ----------
 cat > "$PKG_DIR/setup.bat" <<'BATEOF'
 @echo off
+REM B-Roll Scout - One-click setup for editors
+REM Double-click this file to install everything needed.
 title B-Roll Scout - Setup
-color 0A
+cd /d "%~dp0"
 
-echo.
-echo  ============================================================
-echo   B-Roll Scout - Editor Setup
-echo  ============================================================
-echo.
-echo  This will install the companion (Python packages).
-echo  The web app and Node.js are already bundled.
-echo  Estimated time: 3-5 minutes on first run.
-echo.
-echo  Press Ctrl+C to cancel, or
-pause
-
-set "ROOT=%~dp0"
-set "COMPANION=%ROOT%companion"
-set "VENV=%COMPANION%\.venv"
-set "PYTHON="
-
-echo.
-echo  [1/4] Checking for Python...
-
-python --version >nul 2>&1
-if not errorlevel 1 (
-    set "PYTHON=python"
-    goto py_ok
-)
-py --version >nul 2>&1
-if not errorlevel 1 (
-    set "PYTHON=py"
-    goto py_ok
-)
-
-echo  Python not found. Trying winget...
-winget --version >nul 2>&1
-if errorlevel 1 goto no_winget_pkg
-
-echo  Installing Python via winget (1-2 minutes)...
-winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
-if errorlevel 1 goto no_winget_pkg
-
-echo  Python installed. Close this window and re-run setup.bat so PATH takes effect.
-pause
-exit /b 0
-
-:no_winget_pkg
-echo  Cannot auto-install Python. Download from https://www.python.org/downloads/
-echo  IMPORTANT: Check "Add Python to PATH" during install, then re-run setup.bat.
-pause
-exit /b 1
-
-:py_ok
-echo  OK: Python found
-%PYTHON% --version
-
-echo.
-echo  [2/4] Checking ffmpeg...
-ffmpeg -version >nul 2>&1
-if not errorlevel 1 (
-    echo  OK: ffmpeg installed
-    goto ffmpeg_done
-)
-
-echo  ffmpeg not found. Trying winget...
-winget --version >nul 2>&1
-if errorlevel 1 goto ffmpeg_warn
-winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent >nul 2>&1
-if not errorlevel 1 (
-    echo  OK: ffmpeg installed
-    goto ffmpeg_done
-)
-:ffmpeg_warn
-echo  WARNING: ffmpeg not found. Whisper will not work until installed.
-:ffmpeg_done
-
-echo.
-echo  [3/4] Installing companion packages...
-
-if exist "%VENV%\Scripts\activate.bat" goto pkg_venv_exists
-%PYTHON% -m venv "%VENV%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
 if errorlevel 1 (
-    echo  ERROR: Failed to create Python environment.
-    pause
-    exit /b 1
+  echo.
+  echo Setup failed. See messages above.
 )
-:pkg_venv_exists
-call "%VENV%\Scripts\activate.bat"
-python -m pip install --upgrade pip --quiet 2>nul
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
-if errorlevel 1 (
-    echo  ERROR: Package install failed. Check your internet.
-    pause
-    exit /b 1
-)
-echo  OK: Core packages
-
-pip install openai-whisper --quiet 2>nul
-if errorlevel 1 (
-    echo  NOTE: Whisper install failed (optional).
-    goto whisper_done_pkg
-)
-echo  OK: Whisper installed
-python -c "import whisper; whisper.load_model('base')" 2>nul
-:whisper_done_pkg
-
 echo.
-echo  [4/4] Creating desktop shortcut...
-set "SHORTCUT_VBS=%TEMP%\broll_sc.vbs"
-echo Set oWS = WScript.CreateObject("WScript.Shell") > "%SHORTCUT_VBS%"
-echo sLinkFile = "%USERPROFILE%\Desktop\B-Roll Scout.lnk" >> "%SHORTCUT_VBS%"
-echo Set oLink = oWS.CreateShortcut(sLinkFile) >> "%SHORTCUT_VBS%"
-echo oLink.TargetPath = "%ROOT%start.bat" >> "%SHORTCUT_VBS%"
-echo oLink.WorkingDirectory = "%ROOT%" >> "%SHORTCUT_VBS%"
-echo oLink.Description = "Start B-Roll Scout" >> "%SHORTCUT_VBS%"
-echo oLink.Save >> "%SHORTCUT_VBS%"
-cscript //nologo "%SHORTCUT_VBS%" 2>nul
-del "%SHORTCUT_VBS%" 2>nul
-echo  OK: "B-Roll Scout" shortcut on Desktop
-
-echo.
-echo  ============================================================
-echo   Setup complete! Starting B-Roll Scout...
-echo  ============================================================
-echo.
-echo  Next time, just double-click "B-Roll Scout" on your Desktop.
-echo.
-
-:: Hand off to start.bat in THIS window
-call "%ROOT%start.bat"
-
-:: Safety net: if start.bat exited unexpectedly, keep window open
-echo.
-echo  Something went wrong. The window should not have reached this point.
-echo  Press any key to close...
+echo Press any key to close...
 pause >nul
 BATEOF
 
-# ---------- start.bat ----------
+# ---------- setup.ps1 ----------
+cat > "$PKG_DIR/setup.ps1" <<'PS1EOF'
+$ErrorActionPreference = "Stop"
+$Root = $PSScriptRoot
+$CompanionDir = Join-Path $Root "companion"
+$VenvDir = Join-Path $CompanionDir ".venv"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  B-Roll Scout - Editor Setup" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# --- 1. Check Python ---
+Write-Host "[1/4] Checking Python..." -ForegroundColor Yellow
+$pythonCmd = $null
+$pythonExe = Get-Command python -ErrorAction SilentlyContinue
+if ($pythonExe) {
+    $ver = & python --version 2>&1
+    if ($ver -match "Python \d") { $pythonCmd = "python"; Write-Host "  OK - $ver" -ForegroundColor Green }
+}
+if (-not $pythonCmd) {
+    $pyExe = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyExe) {
+        $ver = & py --version 2>&1
+        if ($ver -match "Python \d") { $pythonCmd = "py"; Write-Host "  OK - $ver" -ForegroundColor Green }
+    }
+}
+if (-not $pythonCmd) {
+    $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+    if ($wingetCmd) {
+        Write-Host "  Python not found. Installing via winget (1-2 min)..." -ForegroundColor Yellow
+        winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
+        Write-Host "  Python installed. CLOSE this window and re-run setup.bat." -ForegroundColor Cyan
+        exit 0
+    }
+    Write-Host "  Python not installed. Download from https://www.python.org/downloads/" -ForegroundColor Red
+    Write-Host "  Check 'Add Python to PATH' during install, then re-run setup.bat." -ForegroundColor White
+    exit 1
+}
+
+# --- 2. Check ffmpeg ---
+Write-Host ""
+Write-Host "[2/4] Checking ffmpeg..." -ForegroundColor Yellow
+if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Write-Host "  OK - ffmpeg is installed" -ForegroundColor Green
+} else {
+    $w = Get-Command winget -ErrorAction SilentlyContinue
+    if ($w) { winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements --silent 2>$null }
+    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+        Write-Host "  OK - ffmpeg installed" -ForegroundColor Green
+    } else {
+        Write-Host "  WARNING: ffmpeg not found. Whisper won't work until installed." -ForegroundColor Yellow
+    }
+}
+
+# --- 3. Create venv + install packages ---
+Write-Host ""
+Write-Host "[3/4] Installing companion packages (1-3 min)..." -ForegroundColor Yellow
+$activate = Join-Path $VenvDir "Scripts\Activate.ps1"
+if (-not (Test-Path $activate)) {
+    Write-Host "  Creating virtual environment..." -ForegroundColor White
+    & $pythonCmd -m venv $VenvDir
+    if (-not (Test-Path $activate)) { Write-Host "  ERROR: venv creation failed." -ForegroundColor Red; exit 1 }
+}
+& $activate
+python -m pip install --upgrade pip --quiet 2>$null
+pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
+if ($LASTEXITCODE -ne 0) { Write-Host "  ERROR: Package install failed." -ForegroundColor Red; exit 1 }
+Write-Host "  OK - Core packages" -ForegroundColor Green
+pip install openai-whisper --quiet 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  OK - Whisper installed" -ForegroundColor Green
+    python -c "import whisper; whisper.load_model('base')" 2>$null
+} else {
+    Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
+}
+
+# --- 4. Desktop shortcut ---
+Write-Host ""
+Write-Host "[4/4] Creating desktop shortcut..." -ForegroundColor Yellow
+try {
+    $WshShell = New-Object -ComObject WScript.Shell
+    $lnk = $WshShell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "B-Roll Scout.lnk"))
+    $lnk.TargetPath = Join-Path $Root "start.bat"
+    $lnk.WorkingDirectory = $Root
+    $lnk.Description = "Start B-Roll Scout"
+    $lnk.Save()
+    Write-Host "  OK - Shortcut on Desktop" -ForegroundColor Green
+} catch { Write-Host "  Could not create shortcut: $_" -ForegroundColor Yellow }
+
+# --- Done ---
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  Setup complete! Starting B-Roll Scout..." -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green
+Write-Host ""
+
+$startScript = Join-Path $Root "start.ps1"
+if (Test-Path $startScript) { & $startScript }
+else { Write-Host "  ERROR: start.ps1 not found." -ForegroundColor Red; exit 1 }
+PS1EOF
+
+# ---------- start.bat (thin wrapper) ----------
 cat > "$PKG_DIR/start.bat" <<'BATEOF'
 @echo off
+REM B-Roll Scout - Daily launcher for editors
+REM Double-click this file (or the Desktop shortcut) to start.
 title B-Roll Scout
-color 0A
+cd /d "%~dp0"
 
-echo.
-echo  B-Roll Scout
-echo  ============
-echo  Keep this window open while using B-Roll Scout.
-echo  To stop: close this window or press Ctrl+C.
-echo.
-
-set "ROOT=%~dp0"
-set "COMPANION=%ROOT%companion"
-set "VENV=%COMPANION%\.venv"
-set "NODE=%ROOT%node\node.exe"
-set "SERVER=%ROOT%webapp\server.js"
-
-:: Kill any previous background instances (prevents duplicates)
-call "%ROOT%stop.bat" /quiet 2>nul
-
-:: First-time: run setup if venv missing
-if exist "%VENV%\Scripts\activate.bat" goto pkg_venv_ready
-
-echo  First launch detected. Running setup...
-echo.
-call "%ROOT%setup.bat"
-goto end_pause
-
-:pkg_venv_ready
-call "%VENV%\Scripts\activate.bat"
-
-:: Quick health check
-python -c "import flask" 2>nul
-if not errorlevel 1 goto pkg_deps_ok
-
-echo  Dependencies missing. Running setup...
-call "%ROOT%setup.bat"
-goto end_pause
-
-:pkg_deps_ok
-echo  Updating yt-dlp...
-pip install --upgrade yt-dlp --quiet 2>nul
-echo  OK
-echo.
-
-:: Start Next.js web app in background (port 3000)
-echo  Starting web app on http://localhost:3000 ...
-set "PORT=3000"
-set "HOSTNAME=127.0.0.1"
-start /min "BRoll-WebApp" "%NODE%" "%SERVER%"
-
-:: Open browser after web app is ready
-set "OPEN_BROWSER=%TEMP%\broll_open.bat"
-echo @echo off > "%OPEN_BROWSER%"
-echo timeout /t 5 /nobreak ^>nul >> "%OPEN_BROWSER%"
-echo start http://localhost:3000 >> "%OPEN_BROWSER%"
-echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
-start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
-
-:: Verify companion.py exists
-if not exist "%COMPANION%\companion.py" (
-    echo  ERROR: companion.py not found in %COMPANION%
-    goto end_pause
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1"
+if errorlevel 1 (
+  echo.
+  echo B-Roll Scout exited with an error. See messages above.
 )
-
-:: Start companion in foreground (port 9876)
-echo  Starting companion on http://127.0.0.1:9876 ...
 echo.
-echo  Browser will open to http://localhost:3000 in a few seconds.
-echo.
-
-python "%COMPANION%\companion.py"
-
-:: Companion exited -- clean up background Node.js
-call "%ROOT%stop.bat" /quiet 2>nul
-
-:end_pause
-echo.
-echo  B-Roll Scout stopped.
-echo  Press any key to close...
+echo Press any key to close...
 pause >nul
 BATEOF
+
+# ---------- start.ps1 ----------
+cat > "$PKG_DIR/start.ps1" <<'PS1EOF'
+$Root = $PSScriptRoot
+$CompanionDir = Join-Path $Root "companion"
+$VenvDir = Join-Path $CompanionDir ".venv"
+$NodeExe = Join-Path $Root "node\node.exe"
+$ServerJs = Join-Path $Root "webapp\server.js"
+$CompanionPy = Join-Path $CompanionDir "companion.py"
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  B-Roll Scout" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Keep this window open while using B-Roll Scout." -ForegroundColor White
+Write-Host "  To stop: close this window or press Ctrl+C." -ForegroundColor White
+Write-Host ""
+
+# --- Cleanup old instances ---
+Write-Host "  Cleaning up old instances..." -ForegroundColor Gray
+taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" 2>$null | Out-Null
+taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" 2>$null | Out-Null
+$p3k = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+if ($p3k) { foreach ($l in $p3k) { $id=($l -split '\s+')[-1]; if ($id -match '^\d+$') { taskkill /f /pid $id 2>$null | Out-Null } } }
+
+# --- Check venv ---
+$activate = Join-Path $VenvDir "Scripts\Activate.ps1"
+if (-not (Test-Path $activate)) {
+    Write-Host "  First launch. Running setup..." -ForegroundColor Yellow
+    & (Join-Path $Root "setup.ps1")
+    return
+}
+
+& $activate
+$fc = python -c "import flask" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Dependencies missing. Running setup..." -ForegroundColor Yellow
+    & (Join-Path $Root "setup.ps1")
+    return
+}
+
+# --- Update yt-dlp ---
+Write-Host "  Updating yt-dlp..." -ForegroundColor Gray
+pip install --upgrade yt-dlp --quiet 2>$null
+
+# --- Start web app ---
+if (-not (Test-Path $NodeExe)) { Write-Host "  ERROR: node.exe not found at $NodeExe" -ForegroundColor Red; return }
+if (-not (Test-Path $ServerJs)) { Write-Host "  ERROR: server.js not found at $ServerJs" -ForegroundColor Red; return }
+
+Write-Host "  Starting web app on http://localhost:3000 ..." -ForegroundColor White
+$env:PORT = "3000"
+$env:HOSTNAME = "127.0.0.1"
+Start-Process -FilePath $NodeExe -ArgumentList $ServerJs -WindowStyle Minimized
+
+# --- Open browser ---
+Start-Job -ScriptBlock { Start-Sleep -Seconds 5; Start-Process "http://localhost:3000" } | Out-Null
+
+# --- Start companion ---
+if (-not (Test-Path $CompanionPy)) { Write-Host "  ERROR: companion.py not found at $CompanionPy" -ForegroundColor Red; return }
+
+Write-Host "  Starting companion on http://127.0.0.1:9876 ..." -ForegroundColor White
+Write-Host ""
+Write-Host "  Companion:  http://127.0.0.1:9876" -ForegroundColor White
+Write-Host "  Web app:    http://localhost:3000" -ForegroundColor White
+Write-Host ""
+Write-Host "  Browser will open in a few seconds." -ForegroundColor Gray
+Write-Host "  ----------------------------------------" -ForegroundColor Gray
+Write-Host ""
+
+try { python $CompanionPy }
+catch { Write-Host "  ERROR: companion.py crashed: $_" -ForegroundColor Red }
+
+Write-Host ""
+Write-Host "  ----------------------------------------" -ForegroundColor Gray
+Write-Host "  Companion stopped. Cleaning up..." -ForegroundColor Yellow
+
+# Cleanup
+taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" 2>$null | Out-Null
+$p3k = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+if ($p3k) { foreach ($l in $p3k) { $id=($l -split '\s+')[-1]; if ($id -match '^\d+$') { taskkill /f /pid $id 2>$null | Out-Null } } }
+Write-Host "  Done." -ForegroundColor Green
+PS1EOF
 
 # ---------- stop.bat ----------
 cat > "$PKG_DIR/stop.bat" <<'BATEOF'
 @echo off
-:: Stops B-Roll Scout BACKGROUND processes (web app, browser helper).
-:: Does NOT kill the companion (it runs in the foreground of the caller).
-:: Safe to call even when nothing is running.
+REM B-Roll Scout - Stop all processes
+title B-Roll Scout - Stop
+cd /d "%~dp0"
 
-set "QUIET=0"
-if /i "%~1"=="/quiet" set "QUIET=1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "taskkill /f /fi 'WINDOWTITLE eq BRoll-WebApp' 2>$null; " ^
+  "taskkill /f /fi 'WINDOWTITLE eq BRoll-OpenBrowser' 2>$null; " ^
+  "$p = netstat -ano 2>$null | Select-String 'LISTENING' | Select-String ':3000 '; " ^
+  "if ($p) { foreach ($l in $p) { $id = ($l -split '\s+')[-1]; if ($id -match '^\d+$') { taskkill /f /pid $id 2>$null } } }; " ^
+  "$p = netstat -ano 2>$null | Select-String 'LISTENING' | Select-String ':9876 '; " ^
+  "if ($p) { foreach ($l in $p) { $id = ($l -split '\s+')[-1]; if ($id -match '^\d+$') { taskkill /f /pid $id 2>$null } } }; " ^
+  "Write-Host '' ; Write-Host '  All B-Roll Scout processes stopped.' -ForegroundColor Green"
 
-if "%QUIET%"=="0" (
-    echo.
-    echo  Stopping B-Roll Scout background processes...
-    echo.
-)
-
-:: Kill background Node.js web app by window title
-taskkill /f /fi "WINDOWTITLE eq BRoll-WebApp" >nul 2>&1
-
-:: Kill browser-opener helper
-taskkill /f /fi "WINDOWTITLE eq BRoll-OpenBrowser" >nul 2>&1
-
-:: Also kill any orphaned Node on port 3000 (in case title-based kill missed it)
-set "TMP_PIDS=%TEMP%\~brpid.tmp"
-netstat -ano 2>nul | findstr "LISTENING" | findstr ":3000 " > "%TMP_PIDS%" 2>nul
-if exist "%TMP_PIDS%" (
-    for /f "usebackq tokens=5" %%P in ("%TMP_PIDS%") do (
-        taskkill /f /pid %%P >nul 2>&1
-        if "%QUIET%"=="0" echo  Stopped web app PID %%P
-    )
-    del "%TMP_PIDS%" >nul 2>&1
-)
-
-if "%QUIET%"=="0" (
-    echo.
-    echo  Done.
-    echo.
-    pause
-)
+echo.
+echo Press any key to close...
+pause >nul
 BATEOF
 
 # ---------- update.bat ----------
 cat > "$PKG_DIR/update.bat" <<'BATEOF'
 @echo off
+REM B-Roll Scout - Update packages
 title B-Roll Scout - Update
-color 0E
+cd /d "%~dp0"
 
-set "COMPANION=%~dp0companion"
-set "VENV=%COMPANION%\.venv"
-
-if not exist "%VENV%\Scripts\activate.bat" (
-    echo  Run setup.bat first.
-    pause
-    exit /b 1
-)
-
-call "%VENV%\Scripts\activate.bat"
-
-echo  Updating packages...
-python -m pip install --upgrade pip --quiet
-pip install --upgrade yt-dlp flask flask-cors youtube-transcript-api openai-whisper --quiet
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$v = Join-Path '%~dp0' 'companion\.venv\Scripts\Activate.ps1'; " ^
+  "if (-not (Test-Path $v)) { Write-Host 'Run setup.bat first.' -ForegroundColor Red; exit 1 }; " ^
+  "& $v; " ^
+  "Write-Host 'Updating packages...' -ForegroundColor Yellow; " ^
+  "python -m pip install --upgrade pip --quiet; " ^
+  "pip install --upgrade yt-dlp flask flask-cors youtube-transcript-api openai-whisper --quiet; " ^
+  "Write-Host 'Update complete!' -ForegroundColor Green"
 
 echo.
-echo  Update complete!
-pause
+echo Press any key to close...
+pause >nul
 BATEOF
 
-# Convert all .bat files to CRLF (cmd.exe silently crashes on LF-only)
-for bat in "$PKG_DIR"/*.bat; do
-    perl -pi -e 's/\r?\n/\r\n/' "$bat"
+# Convert all .bat and .ps1 files to CRLF (cmd.exe silently crashes on LF-only)
+for f in "$PKG_DIR"/*.bat "$PKG_DIR"/*.ps1; do
+    [ -f "$f" ] && perl -pi -e 's/\r?\n/\r\n/' "$f"
 done
-echo "  OK: Batch files created (CRLF)"
+echo "  OK: Batch + PowerShell files created (CRLF)"
 
 # ---------------------------------------------------------------
 # 5. Zip it up

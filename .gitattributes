@@ -1,3 +1,4 @@
-# Force CRLF line endings for Windows batch files.
-# cmd.exe silently crashes on LF-only files.
+# Force CRLF line endings for Windows scripts.
+# cmd.exe and PowerShell 5.1 can crash on LF-only files.
 *.bat text eol=crlf
+*.ps1 text eol=crlf

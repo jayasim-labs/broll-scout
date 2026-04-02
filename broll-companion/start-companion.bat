@@ -1,75 +1,14 @@
 @echo off
+REM B-Roll Scout - Daily launcher for editors
+REM Double-click this file (or the Desktop shortcut) to start B-Roll Scout.
 title B-Roll Scout
-color 0A
+cd /d "%~dp0"
 
-echo.
-echo  B-Roll Scout Companion
-echo  ======================
-echo  Keep this window open while using B-Roll Scout.
-echo  To stop: close this window or press Ctrl+C.
-echo.
-
-set "COMPANION_DIR=%~dp0"
-set "VENV_DIR=%COMPANION_DIR%.venv"
-
-:: Kill any previous background instances (prevents duplicates)
-call "%COMPANION_DIR%stop.bat" /quiet 2>nul
-
-:: First-time: run setup if venv missing
-if exist "%VENV_DIR%\Scripts\activate.bat" goto venv_ready
-
-echo  First launch detected. Running setup...
-echo.
-call "%COMPANION_DIR%setup.bat"
-goto end_pause
-
-:venv_ready
-:: Activate venv
-call "%VENV_DIR%\Scripts\activate.bat"
-
-:: Quick health check
-python -c "import flask" 2>nul
-if not errorlevel 1 goto deps_ok
-
-echo  Dependencies missing. Running setup...
-call "%COMPANION_DIR%setup.bat"
-goto end_pause
-
-:deps_ok
-:: Auto-update yt-dlp (YouTube changes frequently)
-echo  Checking for yt-dlp updates...
-pip install --upgrade yt-dlp --quiet 2>nul
-echo  OK
-echo.
-
-echo  Companion: http://127.0.0.1:9876
-echo  Web app:   http://localhost:3000
-echo.
-
-:: Open browser to localhost:3000 after companion starts
-set "OPEN_BROWSER=%TEMP%\broll_open.bat"
-echo @echo off > "%OPEN_BROWSER%"
-echo timeout /t 4 /nobreak ^>nul >> "%OPEN_BROWSER%"
-echo start http://localhost:3000 >> "%OPEN_BROWSER%"
-echo del "%%~f0" ^>nul 2^>^&1 >> "%OPEN_BROWSER%"
-start /min "BRoll-OpenBrowser" "%OPEN_BROWSER%"
-
-:: Verify companion.py exists before running
-if not exist "%COMPANION_DIR%companion.py" (
-    echo  ERROR: companion.py not found in %COMPANION_DIR%
-    goto end_pause
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-companion.ps1"
+if errorlevel 1 (
+  echo.
+  echo Companion exited with an error. See messages above.
 )
-
-:: Run companion in foreground (blocks until Ctrl+C or window close)
-echo  Starting companion server...
 echo.
-python "%COMPANION_DIR%companion.py"
-
-:: Companion exited - clean up background processes
-call "%COMPANION_DIR%stop.bat" /quiet 2>nul
-
-:end_pause
-echo.
-echo  B-Roll Scout stopped.
-echo  Press any key to close...
+echo Press any key to close...
 pause >nul
