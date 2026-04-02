@@ -73,7 +73,7 @@
 │                                                                                 │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐          │
 │  │ Agent Task Queue │    │ DynamoDB         │    │ OpenAI API       │          │
-│  │ (in-memory)      │    │ (5 tables)       │    │ GPT-4o / mini    │          │
+│  │ (in-memory)      │    │ (7 tables)       │    │ GPT-4o / mini    │          │
 │  │                  │    │ jobs, segments,  │    │                  │          │
 │  │ EC2 creates tasks│    │ results,         │    │ Gemini 1.5 Flash │          │
 │  │ Browser polls &  │    │ transcripts,     │    │ (optional)       │          │
@@ -125,6 +125,9 @@ returns data to pipeline
 | `video_details` | `yt-dlp https://youtube.com/watch?v={id} --dump-json` | Metadata fetch |
 | `transcript` | `youtube-transcript-api` fetch | YouTube blocks transcript API from AWS |
 | `whisper` | `yt-dlp -x --audio-format mp3` + Whisper `base` model | Audio download + local GPU/CPU transcription |
+| `clip` | `yt-dlp --download-sections` + ffmpeg | Downloads a specific time range as MP4 for editors |
+
+The companion app also supports **Chrome cookie extraction** (`--cookies-from-browser chrome`) for authenticated YouTube access, detected automatically at startup.
 
 ---
 
@@ -184,8 +187,10 @@ Each clip is scored on five weighted dimensions:
 | 20% | Recency | <2 years = 1.0, <4 years = 0.7, older = 0.4 |
 
 **Hard filters applied:**
-- Duration: videos must be 2–90 minutes
-- Blocked channels: news networks (CNN, BBC, Fox...), movie studios (Disney, Warner...), sports leagues (FIFA, NFL...)
+- Duration: videos must be 2–90 minutes (configurable)
+- Blocked channels: substring match on channel name against blocked networks (CNN, BBC...), studios (Disney, Warner...), and sports leagues (FIFA, NFL...) — NOT matched against video title
+- Clips shorter than 10 seconds are discarded (configurable)
+- Timestamps landing in the last 30s of a video (end-screen territory) are penalized
 - Cross-segment deduplication: same video kept only in the scene where it scored highest
 
 ### Stage 5: Store & Display
@@ -224,7 +229,7 @@ Results saved to DynamoDB and returned to the frontend. Each clip shows:
 | **AI Models** | OpenAI GPT-4o (translation), GPT-4o-mini (timestamps), Google Gemini 1.5 Flash (optional query expansion), OpenAI Whisper base (local transcription) |
 | **Search** | YouTube Data API v3, yt-dlp (local companion) |
 | **Transcripts** | `youtube-transcript-api`, OpenAI Whisper (local fallback) |
-| **Storage** | AWS DynamoDB (5 tables: jobs, segments, results, transcripts, feedback) |
+| **Storage** | AWS DynamoDB (7 tables: jobs, segments, results, transcripts, feedback, settings, channel_cache) |
 | **Hosting** | AWS EC2 (t3.small, Ubuntu), Nginx reverse proxy, Let's Encrypt SSL |
 | **Domain** | `broll.jayasim.com` |
 
@@ -266,7 +271,7 @@ BRoll Scout/
 │   ├── job-history.tsx          # Sidebar job list
 │   └── navbar.tsx               # Navigation bar
 ├── broll-companion/
-│   ├── companion.py             # Flask app: yt-dlp search, transcript fetch, Whisper transcription
+│   ├── companion.py             # Flask app: yt-dlp search, transcript fetch, Whisper, clip download, Chrome cookies
 │   ├── requirements.txt         # flask, flask-cors, yt-dlp, youtube-transcript-api, openai-whisper
 │   ├── install.bat              # Windows one-click installer (Python venv, ffmpeg, yt-dlp, Whisper)
 │   ├── start-companion.bat      # Windows launcher (double-click to start)
@@ -278,6 +283,7 @@ BRoll Scout/
 │   ├── deploy.sh                # Code deployment script (rsync + restart)
 │   ├── create_tables.py         # DynamoDB table creation
 │   ├── cleanup_dynamo.sh        # Clean up stale DynamoDB data
+│   ├── populate_channels_local.py  # One-time: populate channel_cache with avatars via yt-dlp
 │   └── test_e2e_flow.py         # Standalone E2E pipeline test
 ├── requirements.txt             # Python backend dependencies
 ├── package.json                 # Node.js frontend dependencies
@@ -394,7 +400,11 @@ Open [http://localhost:3000](http://localhost:3000).
    - Timestamp link to jump to the exact moment
    - Confidence and relevance scores
    - Transcript excerpt and "the hook"
-6. **Export JSON** — download for use in your editing workflow
+6. **Preview & Clip** — for each result:
+   - Click **Preview** to watch the clip inline with pre-filled start/end timestamps
+   - Adjust the clip range with +/-10s controls
+   - Click **Clip & Download** to download the exact segment as MP4 via the companion app
+   - Click **Mark as Used** to save the clip to DynamoDB as part of your project
 
 ### Settings
 
@@ -402,10 +412,10 @@ Navigate to `/settings` to configure:
 
 | Tab | What You Can Configure |
 |---|---|
-| **Source Management** | Preferred channels (Tier 1/Tier 2), public domain archives, stock platforms |
-| **Blocked Sources** | News networks, movie studios, sports leagues, custom block rules |
-| **Pipeline Parameters** | Search depth, result limits, video duration filters, ranking weights, AI models |
-| **Special Instructions** | Custom instructions for the AI (e.g., "prefer aerial footage") |
+| **Source Management** | Preferred channels with avatars & subscriber counts (Tier 1 by ID, Tier 2 by name), public domain archives, stock footage platforms |
+| **Blocked Sources** | News networks, movie studios, sports leagues (all use substring matching on channel name), custom keyword block rules |
+| **Pipeline Parameters** | Search backend & depth, result limits, AI model selection (timestamp/translation), confidence threshold, Whisper settings, video duration filters, 5-dimension ranking weights with visual bar, performance tuning (concurrency, timeouts, recovery) — all with inline help text |
+| **Special Instructions** | Custom instructions sent to the AI during translation/ranking, context-matching toggles (discard short clips, end-screen detection, timestamp capping) |
 
 ---
 
@@ -429,15 +439,23 @@ Navigate to `/settings` to configure:
 | `POST` | `/api/v1/agent/result` | Browser submits companion results |
 | `GET` | `/api/v1/agent/status` | Queue status (pending, claimed, agents) |
 
-### Settings & Library
+### Settings & Channels
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/v1/settings` | Get all settings |
+| `GET` | `/api/v1/settings` | Get all settings (defaults merged with overrides) |
 | `PUT` | `/api/v1/settings` | Update a single setting |
-| `PUT` | `/api/v1/settings/bulk` | Update multiple settings |
-| `POST` | `/api/v1/settings/reset` | Reset to defaults |
-| `POST` | `/api/v1/results/{id}/feedback` | Submit editor feedback |
+| `PUT` | `/api/v1/settings/bulk` | Update multiple settings at once |
+| `POST` | `/api/v1/settings/reset` | Reset all settings to defaults |
+| `POST` | `/api/v1/settings/channels/resolve` | Resolve a single channel ID to name/avatar/subs |
+| `POST` | `/api/v1/settings/channels/resolve-bulk` | Resolve multiple channel IDs (for Tier 1 display) |
+| `POST` | `/api/v1/settings/channels/resolve-names` | Resolve channel names to IDs/avatars (for Tier 2 display) |
+
+### Feedback & Library
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/results/{id}/feedback` | Submit editor feedback (rating, clip_used, notes) |
 | `GET` | `/api/v1/library/search` | Search past results |
 | `GET` | `/api/v1/health` | Health check |
 
@@ -449,9 +467,69 @@ Navigate to `/settings` to configure:
 |---|---|---|---|
 | `broll_jobs` | `job_id` | — | Job metadata, status, costs |
 | `broll_segments` | `job_id` | `segment_id` | Translated scene data |
-| `broll_results` | `job_id` | `result_id` | Ranked clip results with timestamps |
+| `broll_results` | `job_id` | `result_id` | Ranked clip results with timestamps, `clip_used` flag |
 | `broll_transcripts` | `video_id` | — | Cached transcripts (YouTube, Whisper) — avoids re-fetching |
-| `broll_feedback` | `result_id` | — | Editor ratings & notes |
+| `broll_feedback` | `result_id` | — | Editor ratings, clip-used tracking & notes |
+| `broll_settings` | `setting_key` | — | User-configured pipeline settings (overrides defaults) |
+| `broll_channel_cache` | `channel_id` | — | YouTube channel metadata cache (name, subscribers, avatar URL) |
+
+---
+
+## Pipeline Parameters Reference
+
+All parameters are configurable via the Settings page (`/settings` → Pipeline Parameters tab). Defaults are in `app/config.py`.
+
+### Search
+
+| Parameter | Default | Description |
+|---|---|---|
+| `search_backend` | `auto` | `auto` (API first, yt-dlp fallback), `ytdlp_only`, `api_only` |
+| `search_queries_per_segment` | 3 | YouTube search queries generated per scene |
+| `youtube_results_per_query` | 5 | Results fetched per search query |
+| `max_candidates_per_segment` | 12 | Max videos kept per scene for transcript analysis |
+| `top_results_per_segment` | 1 | Final clips kept per scene after ranking |
+| `total_results_target` | 30 | Target total clips — triggers recovery search if below |
+| `gemini_expanded_queries` | 5 | Creative lateral queries from Gemini (only when toggled on) |
+
+### Timestamp Detection
+
+| Parameter | Default | Description |
+|---|---|---|
+| `timestamp_model` | `gpt-4o-mini` | AI model for reading transcripts and finding timestamps |
+| `translation_model` | `gpt-4o` | AI model for script translation and scene segmentation |
+| `confidence_threshold` | 0.4 | Minimum AI confidence to include a clip (0.0–1.0) |
+| `whisper_max_video_duration_min` | 60 | Max video length for Whisper fallback transcription |
+| `whisper_audio_trim_min` | 20 | Only transcribe first N minutes of audio |
+
+### Video Filtering
+
+| Parameter | Default | Description |
+|---|---|---|
+| `min_video_duration_sec` | 120 | Exclude videos shorter than this |
+| `max_video_duration_sec` | 5400 | Exclude videos longer than this |
+| `prefer_min_subscribers` | 10000 | Channels below this get lower authority score (not excluded) |
+| `recency_full_score_years` | 2 | Videos within this age get full recency score |
+| `discard_clips_shorter_than_10s` | true | Filter out clips under 10 seconds |
+| `cap_end_timestamp` | true | Cap end timestamp at video duration - 5s |
+| `verify_timestamp_not_end_screen` | true | Penalize timestamps in last 30s of video |
+
+### Ranking Weights (auto-normalized to 1.0)
+
+| Weight | Default | What It Measures |
+|---|---|---|
+| `weight_keyword_density` | 0.30 | Scene key terms found in transcript excerpt |
+| `weight_viral_score` | 0.20 | View count tier (>1M=1.0, >100K=0.8, >10K=0.5, else 0.2) |
+| `weight_channel_authority` | 0.20 | Channel tier and subscriber count |
+| `weight_caption_quality` | 0.10 | Transcript source quality (manual > auto > Whisper > none) |
+| `weight_recency` | 0.20 | Publish date relative to recency settings |
+
+### Performance
+
+| Parameter | Default | Description |
+|---|---|---|
+| `max_concurrent_segments` | 5 | Scenes searched in parallel |
+| `segment_timeout_sec` | 60 | Max time per scene for transcript + matching |
+| `low_result_threshold` | 20 | Triggers recovery search if total results below this |
 
 ---
 

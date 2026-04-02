@@ -436,9 +436,10 @@ async def _match_candidates(
                 match = await matcher.find_timestamp(
                     transcript.transcript_text, segment, video_meta, job_id
                 )
-                match = matcher.validate_context_match(
-                    match, cand.video_duration_seconds
-                )
+                if matcher.context_matching_enabled:
+                    match = matcher.validate_context_match(
+                        match, cand.video_duration_seconds
+                    )
 
                 logger.info(
                     "Match for %s: confidence=%.2f valid=%s start=%s",

@@ -199,7 +199,15 @@ class SearcherService:
         custom = self._get("custom_block_rules") or ""
         if custom:
             blocked.extend(line.strip() for line in custom.split("\n") if line.strip())
-        return {name.lower() for name in blocked}
+        return {name.lower() for name in blocked if name}
+
+    @staticmethod
+    def _is_blocked(channel_name: str, video_title: str, blocked_set: set[str]) -> bool:
+        ch = channel_name.lower()
+        for term in blocked_set:
+            if term in ch:
+                return True
+        return False
 
     async def search_for_segment(
         self, segment: Segment, job_id: str | None = None, on_progress=None,
@@ -330,15 +338,15 @@ class SearcherService:
             ch_stats = channel_stats.get(ch_id, {})
             subscribers = ch_stats.get("subscriber_count") or v.get("channel_subscribers") or 0
 
-            is_blocked = ch_name.lower() in blocked_set
-            if is_blocked:
+            video_title = v.get("title") or v.get("video_title", "")
+            if self._is_blocked(ch_name, video_title, blocked_set):
                 blocked_count += 1
                 continue
 
             candidate = CandidateVideo(
                 video_id=vid,
                 video_url=f"https://www.youtube.com/watch?v={vid}",
-                video_title=v.get("title") or v.get("video_title", ""),
+                video_title=video_title,
                 channel_name=ch_name,
                 channel_id=ch_id,
                 channel_subscribers=subscribers or 0,

@@ -628,7 +628,7 @@ function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChan
             <div>
               <CardTitle className="text-base">Custom Block Rules</CardTitle>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Natural language rules processed by GPT-4o-mini during ranking.
+                One keyword per line. Channels whose name contains any keyword will be blocked.
               </p>
             </div>
           </div>
@@ -638,7 +638,7 @@ function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChan
             rows={4}
             value={settings.custom_block_rules || ""}
             onChange={(e) => onChange("custom_block_rules", e.target.value)}
-            placeholder='e.g., Block any channel with "reaction" or "compilation" in the title'
+            placeholder={'e.g., reaction\ncompilation\nfan edit'}
             className="text-sm"
           />
         </CardContent>
@@ -648,10 +648,10 @@ function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChan
 }
 
 function SliderSetting({
-  label, value, min, max, step = 1, onChange, unit = "",
+  label, value, min, max, step = 1, onChange, unit = "", help,
 }: {
   label: string; value: number; min: number; max: number; step?: number;
-  onChange: (v: number) => void; unit?: string
+  onChange: (v: number) => void; unit?: string; help?: string
 }) {
   return (
     <div className="space-y-1.5">
@@ -666,6 +666,7 @@ function SliderSetting({
         min={min} max={max} step={step}
         onValueChange={(v) => onChange(v[0])}
       />
+      {help && <p className="text-[11px] text-muted-foreground/70 leading-tight">{help}</p>}
     </div>
   )
 }
@@ -688,7 +689,10 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader><CardTitle className="text-base">Search Settings</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Search Settings</CardTitle>
+          <p className="text-xs text-muted-foreground">Controls how the pipeline searches YouTube for candidate videos. GPT-4o generates search queries from your script, then these settings determine how many queries to run and how many results to collect.</p>
+        </CardHeader>
         <CardContent className="space-y-4">
           <div>
             <Label className="text-sm">Search backend</Label>
@@ -700,21 +704,48 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
                 <SelectItem value="api_only">YouTube API only</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground mt-1">
-              Auto switches to yt-dlp when API quota runs out. Requires the companion app running locally.
+            <p className="text-[11px] text-muted-foreground/70 mt-1">
+              Auto uses YouTube Data API (10K units/day free) and falls back to yt-dlp via the companion app when quota runs out. &quot;yt-dlp only&quot; uses zero quota but requires the companion app running locally.
             </p>
           </div>
-          <SliderSetting label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5} onChange={(v) => onChange("search_queries_per_segment", v)} />
-          <SliderSetting label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10} onChange={(v) => onChange("youtube_results_per_query", v)} />
-          <SliderSetting label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20} onChange={(v) => onChange("max_candidates_per_segment", v)} />
-          <SliderSetting label="Final results per segment" value={settings.top_results_per_segment} min={1} max={5} onChange={(v) => onChange("top_results_per_segment", v)} />
-          <SliderSetting label="Target total results" value={settings.total_results_target} min={15} max={60} onChange={(v) => onChange("total_results_target", v)} />
-          <SliderSetting label="Gemini expanded queries" value={settings.gemini_expanded_queries} min={0} max={10} onChange={(v) => onChange("gemini_expanded_queries", v)} />
+          <SliderSetting
+            label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5}
+            onChange={(v) => onChange("search_queries_per_segment", v)}
+            help="Number of YouTube search queries generated per script scene. GPT-4o creates broad, specific, and creative queries. Higher = more variety, but slower and more API usage."
+          />
+          <SliderSetting
+            label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10}
+            onChange={(v) => onChange("youtube_results_per_query", v)}
+            help="How many YouTube results to fetch per search query. With 3 queries × 5 results = 15 raw candidates per scene before filtering."
+          />
+          <SliderSetting
+            label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20}
+            onChange={(v) => onChange("max_candidates_per_segment", v)}
+            help="After deduplication and duration filtering, keep at most this many videos per scene for transcript analysis. Higher = more thorough but slower (each candidate needs a transcript fetch + GPT-4o-mini call)."
+          />
+          <SliderSetting
+            label="Final results per segment" value={settings.top_results_per_segment} min={1} max={5}
+            onChange={(v) => onChange("top_results_per_segment", v)}
+            help="Number of top-ranked clips to keep per scene in the final output. Set to 1 for a single best clip per scene, or higher to give editors more choices."
+          />
+          <SliderSetting
+            label="Target total results" value={settings.total_results_target} min={15} max={60}
+            onChange={(v) => onChange("total_results_target", v)}
+            help="Desired total number of clips across all scenes. The pipeline stops early if this target is reached, or retries sparse scenes if below."
+          />
+          <SliderSetting
+            label="Gemini expanded queries" value={settings.gemini_expanded_queries} min={0} max={10}
+            onChange={(v) => onChange("gemini_expanded_queries", v)}
+            help="When Gemini AI Expansion is toggled on during job submission, this controls how many creative lateral search queries Gemini 1.5 Flash suggests per scene. Set to 0 to disable even when toggled on."
+          />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Timestamp Detection</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Timestamp Detection</CardTitle>
+          <p className="text-xs text-muted-foreground">Controls how the AI reads video transcripts and pinpoints the exact start/end seconds of the best visual moment. The timestamp model analyzes each transcript, and the translation model handles script segmentation.</p>
+        </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -722,47 +753,106 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
               <Select value={settings.timestamp_model} onValueChange={(v) => onChange("timestamp_model", v)}>
                 <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
-                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini (~$0.001/video)</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o (~$0.01/video, higher quality)</SelectItem>
                 </SelectContent>
               </Select>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Called once per candidate video (30–80 per job). GPT-4o-mini is 17× cheaper and handles structured JSON extraction well.
+              </p>
             </div>
             <div>
               <Label className="text-sm">Translation model</Label>
               <Select value={settings.translation_model} onValueChange={(v) => onChange("translation_model", v)}>
                 <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
-                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o (best multilingual quality)</SelectItem>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini (cheaper, slightly lower quality)</SelectItem>
                 </SelectContent>
               </Select>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Called once per job to translate your script and break it into visual scenes with search queries.
+              </p>
             </div>
           </div>
-          <SliderSetting label="Confidence threshold" value={settings.confidence_threshold} min={0.1} max={0.9} step={0.1} onChange={(v) => onChange("confidence_threshold", v)} />
-          <SliderSetting label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120} onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min" />
-          <SliderSetting label="Audio trim length for Whisper" value={settings.whisper_audio_trim_min} min={5} max={30} onChange={(v) => onChange("whisper_audio_trim_min", v)} unit=" min" />
+          <SliderSetting
+            label="Confidence threshold" value={settings.confidence_threshold} min={0.1} max={0.9} step={0.1}
+            onChange={(v) => onChange("confidence_threshold", v)}
+            help="Minimum confidence score (0.0–1.0) from the AI to include a clip. Lower = more results but some may be less relevant. Higher = stricter, fewer but more accurate clips. Clips below threshold are still kept if no better alternatives exist for a scene."
+          />
+          <SliderSetting
+            label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120}
+            onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min"
+            help="Videos longer than this are skipped for Whisper transcription (too slow/large to download audio locally). Only applies when no YouTube captions exist."
+          />
+          <SliderSetting
+            label="Audio trim length for Whisper" value={settings.whisper_audio_trim_min} min={5} max={30}
+            onChange={(v) => onChange("whisper_audio_trim_min", v)} unit=" min"
+            help="When Whisper transcribes a video, only the first N minutes of audio are downloaded and transcribed. Saves time on long videos while still finding relevant clips in the opening portion."
+          />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Video Filtering</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Video Filtering</CardTitle>
+          <p className="text-xs text-muted-foreground">Hard filters applied before ranking. Videos outside these ranges are excluded entirely — they never reach the transcript or timestamp stage.</p>
+        </CardHeader>
         <CardContent className="space-y-4">
-          <SliderSetting label="Min video duration" value={settings.min_video_duration_sec} min={30} max={600} onChange={(v) => onChange("min_video_duration_sec", v)} unit="s" />
-          <SliderSetting label="Max video duration" value={settings.max_video_duration_sec} min={600} max={10800} step={300} onChange={(v) => onChange("max_video_duration_sec", v)} unit="s" />
-          <SliderSetting label="Prefer channels with min subscribers" value={settings.prefer_min_subscribers} min={0} max={100000} step={1000} onChange={(v) => onChange("prefer_min_subscribers", v)} />
-          <SliderSetting label="Full recency score within years" value={settings.recency_full_score_years} min={1} max={10} onChange={(v) => onChange("recency_full_score_years", v)} unit=" yr" />
+          <SliderSetting
+            label="Min video duration" value={settings.min_video_duration_sec} min={30} max={600}
+            onChange={(v) => onChange("min_video_duration_sec", v)} unit="s"
+            help="Videos shorter than this are excluded. Filters out trailers, teasers, and short-form content that rarely have useful B-roll. Default 120s (2 min)."
+          />
+          <SliderSetting
+            label="Max video duration" value={settings.max_video_duration_sec} min={600} max={10800} step={300}
+            onChange={(v) => onChange("max_video_duration_sec", v)} unit="s"
+            help="Videos longer than this are excluded. Filters out extremely long livestreams and multi-hour content. Default 5400s (90 min)."
+          />
+          <SliderSetting
+            label="Prefer channels with min subscribers" value={settings.prefer_min_subscribers} min={0} max={100000} step={1000}
+            onChange={(v) => onChange("prefer_min_subscribers", v)}
+            help="Channels below this subscriber count receive a lower authority score (0.3 instead of 0.5) in ranking. They're not excluded — just ranked lower. Set to 0 to treat all channels equally."
+          />
+          <SliderSetting
+            label="Full recency score within years" value={settings.recency_full_score_years} min={1} max={10}
+            onChange={(v) => onChange("recency_full_score_years", v)} unit=" yr"
+            help="Videos published within this many years get full recency score (1.0). Videos 2–4 years old get 0.7, older get 0.4. Increase if you work with historical/archival content."
+          />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Ranking Weights</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Ranking Weights</CardTitle>
+          <p className="text-xs text-muted-foreground">Each clip is scored across 5 dimensions. Adjust weights to prioritize what matters most for your editing style. Weights auto-normalize to sum to 1.0.</p>
+        </CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-xs text-muted-foreground">Weights auto-normalize to sum to 1.0 when adjusted.</p>
-          <SliderSetting label="Keyword density" value={settings.weight_keyword_density} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_keyword_density", v)} />
-          <SliderSetting label="View count (viral)" value={settings.weight_viral_score} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_viral_score", v)} />
-          <SliderSetting label="Channel authority" value={settings.weight_channel_authority} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_channel_authority", v)} />
-          <SliderSetting label="Caption quality" value={settings.weight_caption_quality} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_caption_quality", v)} />
-          <SliderSetting label="Recency" value={settings.weight_recency} min={0} max={1} step={0.05} onChange={(v) => normalizeWeights("weight_recency", v)} />
+          <SliderSetting
+            label="Keyword density" value={settings.weight_keyword_density} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_keyword_density", v)}
+            help="How many of the scene's key terms appear in the clip's transcript. High weight = prefer clips that are topically on-point."
+          />
+          <SliderSetting
+            label="View count (viral)" value={settings.weight_viral_score} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_viral_score", v)}
+            help="Tiers: >1M views = 1.0, >100K = 0.8, >10K = 0.5, below = 0.2. High weight = prefer popular, well-produced videos."
+          />
+          <SliderSetting
+            label="Channel authority" value={settings.weight_channel_authority} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_channel_authority", v)}
+            help="Tier 1 preferred = 1.0, Tier 2 = 0.9, >100K subs = 0.7, above min threshold = 0.5, below = 0.3. High weight = prefer trusted channels."
+          />
+          <SliderSetting
+            label="Caption quality" value={settings.weight_caption_quality} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_caption_quality", v)}
+            help="Manual captions = 1.0, auto-captions = 0.8, Whisper = 0.6, none = 0.3. Higher quality captions mean more accurate timestamp detection."
+          />
+          <SliderSetting
+            label="Recency" value={settings.weight_recency} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_recency", v)}
+            help="Based on publish date vs 'Full recency score' setting above. High weight = prefer newer content. Set low for historical/archival projects."
+          />
 
           <div className="flex gap-1 h-6 mt-2">
             <div className="bg-blue-500 rounded-l" style={{ width: `${settings.weight_keyword_density * 100}%` }} title="Keyword" />
@@ -782,11 +872,26 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Performance</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Performance</CardTitle>
+          <p className="text-xs text-muted-foreground">Controls parallelism, timeouts, and recovery behavior. Tune these if jobs are too slow or timing out.</p>
+        </CardHeader>
         <CardContent className="space-y-4">
-          <SliderSetting label="Max concurrent segments" value={settings.max_concurrent_segments} min={1} max={10} onChange={(v) => onChange("max_concurrent_segments", v)} />
-          <SliderSetting label="Segment timeout" value={settings.segment_timeout_sec} min={30} max={180} onChange={(v) => onChange("segment_timeout_sec", v)} unit="s" />
-          <SliderSetting label="Low result threshold" value={settings.low_result_threshold} min={10} max={30} onChange={(v) => onChange("low_result_threshold", v)} />
+          <SliderSetting
+            label="Max concurrent segments" value={settings.max_concurrent_segments} min={1} max={10}
+            onChange={(v) => onChange("max_concurrent_segments", v)}
+            help="How many scenes to search in parallel. Higher = faster overall search, but more concurrent YouTube/yt-dlp requests. Limited to 2 when using yt-dlp companion (serial subprocess calls)."
+          />
+          <SliderSetting
+            label="Segment timeout" value={settings.segment_timeout_sec} min={30} max={180}
+            onChange={(v) => onChange("segment_timeout_sec", v)} unit="s"
+            help="Max time allowed for transcript fetching + timestamp matching per scene. If a scene takes longer (e.g., slow Whisper transcription), it's skipped and the pipeline moves on."
+          />
+          <SliderSetting
+            label="Low result threshold" value={settings.low_result_threshold} min={10} max={30}
+            onChange={(v) => onChange("low_result_threshold", v)}
+            help="If total results across all scenes fall below this number, the pipeline runs a broader recovery search on empty scenes. Prevents jobs from returning too few clips."
+          />
         </CardContent>
       </Card>
     </div>
@@ -797,7 +902,10 @@ function InstructionsTab({ settings, onChange }: { settings: PipelineSettings; o
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader><CardTitle className="text-base">Custom Instructions</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Custom Instructions</CardTitle>
+          <p className="text-xs text-muted-foreground">These instructions are appended to every GPT-4o-mini timestamp prompt. They guide the AI on what kind of footage to prioritize or avoid when choosing the peak visual moment from a video&apos;s transcript.</p>
+        </CardHeader>
         <CardContent className="space-y-3">
           <Textarea
             rows={10}
@@ -805,42 +913,57 @@ function InstructionsTab({ settings, onChange }: { settings: PipelineSettings; o
             onChange={(e) => onChange("special_instructions", e.target.value)}
             className="text-sm font-mono"
           />
-          <p className="text-xs text-muted-foreground">
-            These instructions are sent to the AI during translation and ranking. Be specific about what you want prioritized or avoided.
+          <p className="text-[11px] text-muted-foreground/70">
+            Write in plain English. Each line is a separate instruction. Be specific — e.g., &quot;Prefer aerial/drone shots over talking heads&quot; or &quot;Avoid footage with visible watermarks or logos&quot;.
           </p>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">Context-Matching Rules</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <Label className="text-sm">Enable context-matching synthesis</Label>
-            <Switch
-              checked={settings.enable_context_matching}
-              onCheckedChange={(v) => onChange("enable_context_matching", v)}
-            />
+        <CardHeader>
+          <CardTitle className="text-base">Context-Matching Rules</CardTitle>
+          <p className="text-xs text-muted-foreground">Quality checks applied after the AI finds a timestamp. These catch bad clips before they reach your results — invalid timestamps, end screens, and unusable short clips.</p>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Enable context-matching validation</Label>
+              <Switch
+                checked={settings.enable_context_matching}
+                onCheckedChange={(v) => onChange("enable_context_matching", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 leading-tight">Master switch for all validation rules below. When off, every AI-returned timestamp is accepted as-is without checking if it falls past the video end, lands on an end screen, or is too short. Keep this on unless you want raw unfiltered results.</p>
           </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-sm">Discard clips shorter than 10 seconds</Label>
-            <Switch
-              checked={settings.discard_clips_shorter_than_10s}
-              onCheckedChange={(v) => onChange("discard_clips_shorter_than_10s", v)}
-            />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Discard clips shorter than 10 seconds</Label>
+              <Switch
+                checked={settings.discard_clips_shorter_than_10s}
+                onCheckedChange={(v) => onChange("discard_clips_shorter_than_10s", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 leading-tight">Filters out clips where the AI-detected start and end timestamps are less than 10 seconds apart. These are usually too short for usable B-roll. Turn off if you need very short insert shots.</p>
           </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-sm">Verify timestamp doesn&apos;t land on end screen</Label>
-            <Switch
-              checked={settings.verify_timestamp_not_end_screen}
-              onCheckedChange={(v) => onChange("verify_timestamp_not_end_screen", v)}
-            />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Verify timestamp doesn&apos;t land on end screen</Label>
+              <Switch
+                checked={settings.verify_timestamp_not_end_screen}
+                onCheckedChange={(v) => onChange("verify_timestamp_not_end_screen", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 leading-tight">If the AI picks a start timestamp in the last 30 seconds of a video, it&apos;s likely an end screen (&quot;subscribe&quot; cards, credits, etc.). This applies a -0.3 confidence penalty, pushing those clips down in ranking.</p>
           </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-sm">Cap end timestamp at video duration - 5s</Label>
-            <Switch
-              checked={settings.cap_end_timestamp}
-              onCheckedChange={(v) => onChange("cap_end_timestamp", v)}
-            />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Cap end timestamp at video duration - 5s</Label>
+              <Switch
+                checked={settings.cap_end_timestamp}
+                onCheckedChange={(v) => onChange("cap_end_timestamp", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 leading-tight">If the AI returns an end timestamp past the actual video length (e.g., hallucinated timestamps), this clamps it to 5 seconds before the video ends. Prevents download errors and ensures the clip is within valid range.</p>
           </div>
         </CardContent>
       </Card>

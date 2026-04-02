@@ -52,6 +52,10 @@ class MatcherService:
             return self._pipeline[key]
         return DEFAULTS.get(key, fallback)
 
+    @property
+    def context_matching_enabled(self) -> bool:
+        return bool(self._get("enable_context_matching", True))
+
     async def find_timestamp(
         self,
         transcript_text: str | None,
