@@ -14,6 +14,7 @@ echo    2. ffmpeg (for audio processing)
 echo    3. yt-dlp (YouTube search + download)
 echo    4. Whisper AI (speech-to-text, 77 MB model)
 echo    5. Desktop shortcut to launch the companion
+echo    6. Start the companion; open your web app if app.url is configured
 echo.
 echo  Estimated time: 3-5 minutes on first run.
 echo  Press Ctrl+C to cancel, or
@@ -224,18 +225,44 @@ echo  ============================================================
 echo   Setup complete!
 echo  ============================================================
 echo.
-echo  HOW TO USE:
+
+if /i "%~1"=="/nolaunch" (
+    echo  Press any key to continue — the companion will start in this window...
+    echo.
+    pause
+    exit /b 0
+)
+
+:: Kill any previous instances before starting
+call "%COMPANION_DIR%stop.bat" /quiet 2>nul
+
+echo  Starting the Companion app in a new window...
+echo  (Keep that window open while you use B-Roll Scout.)
 echo.
-echo    1. Double-click "B-Roll Scout Companion" on your Desktop
-echo       (or run start-companion.bat from this folder)
+start "B-Roll Scout Companion" "%COMPANION_DIR%launch-companion-server.bat"
+
+echo  Waiting a few seconds for the companion to be ready...
+timeout /t 5 /nobreak >nul
+
+call "%COMPANION_DIR%load-app-url.bat"
+if not "%BROLL_WEB_URL%"=="" (
+    echo  Opening your B-Roll Scout web app in the default browser...
+    start "" "%BROLL_WEB_URL%"
+) else (
+    echo.
+    echo  No app.url file found — browser was not opened.
+    echo  Copy app.url.example to app.url and add your web app URL on one line.
+    echo  Note: broll.jayasim.com hosts the API only; the editor UI is separate ^(e.g. Vercel^).
+    echo.
+)
+
 echo.
-echo    2. Keep the black window open
+echo  HOW TO USE NEXT TIME:
 echo.
-echo    3. Go to https://broll.jayasim.com in your browser
+echo    - Double-click "B-Roll Scout Companion" on your Desktop ^(or start-companion.bat^).
+echo    - If app.url is set, your browser opens automatically to the editor.
+echo    - Keep the companion window open while scouting B-roll.
 echo.
-echo    4. Paste your script and click "Scout B-Roll"
-echo.
-echo  The companion window shows live progress.
-echo  Close it when you're done editing for the day.
+echo  This setup window can be closed when you are done reading.
 echo.
 pause

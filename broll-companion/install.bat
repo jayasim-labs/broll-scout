@@ -238,7 +238,7 @@ echo    Or in terminal: cd %~dp0
 echo                    .venv\Scripts\activate
 echo                    python companion.py
 echo.
-echo  Keep the companion running while using https://broll.jayasim.com
+echo  Keep the companion running while using the B-Roll Scout web app (see app.url / README)
 echo  The browser will automatically detect it.
 echo.
 pause

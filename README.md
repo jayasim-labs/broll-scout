@@ -11,7 +11,7 @@
 │                              EDITOR'S MACHINE                                   │
 │                                                                                 │
 │  ┌───────────────────────────────────────────────────────────────────────────┐  │
-│  │                     Browser (localhost:3000)                               │  │
+│  │              Browser — Next.js UI (Vercel / your host, or localhost:3000)     │  │
 │  │                                                                           │  │
 │  │  ┌──────────────┐  ┌────────────────┐  ┌──────────────┐  ┌──────────┐   │  │
 │  │  │ Script Input  │  │ Progress       │  │ Results      │  │ Settings │   │  │
@@ -44,11 +44,11 @@
 │                                                                                 │
 └───────────────────────────────────────┬─────────────────────────────────────────┘
                                         │
-                     HTTPS (broll.jayasim.com)
+              HTTPS — API only: broll.jayasim.com → FastAPI (/api/v1/...)
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    EC2 (t3.small, Ubuntu) — broll.jayasim.com                    │
+│                    EC2 (t3.small, Ubuntu) — broll.jayasim.com (API)              │
 │                    Nginx → Let's Encrypt SSL → FastAPI (port 8000)               │
 │                                                                                 │
 │  ┌───────────────────────────────────────────────────────────────────────────┐  │
@@ -82,6 +82,8 @@
 │  └──────────────────┘                                                          │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**What runs where:** `broll.jayasim.com` on EC2 hosts the **FastAPI backend only** (pipeline, DynamoDB, agent queue). The **Next.js editor UI** is deployed separately — for example on Vercel — and must be configured with `BACKEND_URL=https://broll.jayasim.com` so its `/api/v1/*` routes proxy to EC2. Editors use the **UI URL** in the browser; opening the API host directly shows JSON/OpenAPI, not the scouting app.
 
 ---
 
@@ -231,8 +233,8 @@ Results saved to DynamoDB and returned to the frontend. Each clip shows:
 | **Search** | yt-dlp (local companion) — no YouTube API quota needed |
 | **Transcripts** | `youtube-transcript-api`, OpenAI Whisper (local fallback) |
 | **Storage** | AWS DynamoDB (9 tables: jobs, segments, results, transcripts, feedback, settings, channel_cache, projects, usage) |
-| **Hosting** | AWS EC2 (t3.small, Ubuntu), Nginx reverse proxy, Let's Encrypt SSL |
-| **Domain** | `broll.jayasim.com` |
+| **Hosting (API)** | AWS EC2 (t3.small, Ubuntu), Nginx, SSL — `https://broll.jayasim.com` serves **FastAPI only** |
+| **Hosting (UI)** | Next.js on Vercel (or similar); set `BACKEND_URL=https://broll.jayasim.com` for API proxying |
 
 ---
 
@@ -273,9 +275,13 @@ BRoll Scout/
 ├── broll-companion/
 │   ├── companion.py             # Flask app: yt-dlp search, transcript fetch, Whisper, clip download, Chrome cookies
 │   ├── requirements.txt         # flask, flask-cors, yt-dlp, youtube-transcript-api, openai-whisper
-│   ├── setup.bat                # Windows one-click setup (installs Python, ffmpeg, all deps, desktop shortcut)
-│   ├── install.bat              # Windows installer (advanced — called by setup.bat, assumes Python exists)
-│   ├── start-companion.bat      # Windows launcher (auto-runs setup on first launch)
+│   ├── setup.bat                # Windows one-click setup (deps + companion + optional browser via app.url)
+│   ├── load-app-url.bat         # Reads web UI URL from app.url (used by setup / start-companion)
+│   ├── app.url.example          # Template: copy to app.url with your Next.js / Vercel URL
+│   ├── launch-companion-server.bat  # Starts Flask only (used by setup.bat in a new window)
+│   ├── install.bat              # Windows installer (advanced — assumes Python exists)
+│   ├── start-companion.bat      # Daily launcher (kills previous, auto-setup, opens browser)
+│   ├── stop.bat                 # Force-kills all B-Roll Scout processes (companion + web app)
 │   └── update.bat               # Windows updater (keeps yt-dlp and packages current)
 ├── tests/
 │   └── test_integration.py      # 70 integration tests
@@ -286,7 +292,8 @@ BRoll Scout/
 │   ├── cleanup_dynamo.sh        # Clean up stale DynamoDB data
 │   ├── populate_channels_local.py  # One-time: populate channel_cache with avatars via yt-dlp
 │   ├── test_e2e_flow.py         # Standalone E2E pipeline test
-│   └── package_companion.sh    # Package broll-companion into a zip for editor distribution
+│   ├── package_companion.sh    # Package broll-companion into a zip (companion-only)
+│   └── build_editor_package.sh # Build full editor zip (Next.js standalone + companion + node.exe)
 ├── requirements.txt             # Python backend dependencies
 ├── package.json                 # Node.js frontend dependencies
 └── pyproject.toml               # Python project config + pytest settings
@@ -302,50 +309,73 @@ There are two setup paths: one for **editors** (non-technical, Windows) and one 
 
 ### Editor Setup (Windows — One Click)
 
-Editors only need the **companion app** running on their Windows machine. The backend and frontend are already hosted at [https://broll.jayasim.com](https://broll.jayasim.com).
+Editors get a **single zip** that contains everything -- the web app, the companion, and a portable Node.js runtime. No Node.js or npm install required. The web app runs locally at **http://localhost:3000** and talks to the backend API on EC2.
 
 #### First-time setup
 
-1. Download the companion app: [**Download broll-companion.zip**](https://github.com/jayasim-labs/broll-scout/releases/latest/download/broll-companion.zip)
-   *(or ask your admin to share the `broll-companion` folder)*
+1. Download: [**broll-scout-editor.zip**](https://github.com/jayasim-labs/broll-scout/releases/latest/download/broll-scout-editor.zip) *(or ask your admin to share the zip)*
 2. Unzip to any folder (e.g., Desktop or Documents)
-3. Open the `broll-companion` folder and **double-click `setup.bat`** — that's it
+3. Open the `broll-scout-editor` folder and **double-click `setup.bat`**
 
-The installer automatically handles everything:
+That's it. Setup automatically:
 - Installs Python if missing (via `winget`)
 - Installs `ffmpeg` (audio processing)
 - Creates an isolated Python environment
 - Installs `yt-dlp`, `youtube-transcript-api`, `openai-whisper`, `Flask`
 - Downloads the Whisper AI model (77 MB, one-time)
-- Creates a **"B-Roll Scout Companion"** shortcut on your Desktop
+- Creates a **"B-Roll Scout"** shortcut on your Desktop
 
-Total time: ~3-5 minutes on first run. No terminal commands needed.
+Total time: ~3-5 minutes on first run. No terminal commands needed. After setup completes, it launches B-Roll Scout automatically.
 
 #### Daily use
 
-1. Double-click **"B-Roll Scout Companion"** on your Desktop (or `start-companion.bat`)
-2. Keep the black window open
-3. Go to [https://broll.jayasim.com](https://broll.jayasim.com) in your browser
-4. Paste your script and click **Scout B-Roll**
-5. Close the companion window when you're done for the day
+1. Double-click **"B-Roll Scout"** on your Desktop (or `start.bat` in the folder)
+2. Keep the window open -- your browser opens to **http://localhost:3000** automatically
+3. Paste your script and click **Scout B-Roll**
+4. Close the window when you're done for the day
 
-The `start-companion.bat` launcher is smart:
-- If setup hasn't been run yet, it runs setup automatically
-- It auto-updates `yt-dlp` each launch (YouTube changes frequently)
-- It checks dependencies and re-installs if anything is missing
+What happens behind the scenes when you click `start.bat`:
+- **Kills any previous instances** first (no duplicates, ever)
+- Starts the **web app** on `localhost:3000` (bundled Node.js + Next.js, no install needed)
+- Starts the **companion** on `localhost:9876` (yt-dlp, Whisper, etc.)
+- Opens your default browser to `http://localhost:3000`
+- Auto-updates `yt-dlp` each launch (YouTube changes frequently)
+- When you close the window or press Ctrl+C, both services stop cleanly
+
+You can also double-click **`stop.bat`** at any time to force-kill all B-Roll Scout processes.
 
 #### Updating
 
-Double-click `update.bat` to update all packages to the latest versions. This is useful if YouTube search or downloads stop working (YouTube changes their site frequently, and `yt-dlp` releases updates to keep up).
+Double-click `update.bat` to update `yt-dlp` and Python packages. Do this if YouTube search/downloads stop working.
 
 #### Troubleshooting (editors)
 
 | Problem | Fix |
 |---|---|
-| "Python is not installed" | The setup will try to install it. If it fails, download from [python.org](https://www.python.org/downloads/) — check **"Add Python to PATH"** during install, then re-run `setup.bat` |
-| "ffmpeg not found" warning | Whisper transcription won't work, but everything else will. Install later: open a terminal and run `winget install Gyan.FFmpeg` |
-| Companion starts but browser says "Companion not connected" | Make sure the companion window shows `Starting on http://127.0.0.1:9876`. If not, try running `setup.bat` again |
+| "Python is not installed" | Setup tries to install it automatically. If it fails, download from [python.org](https://www.python.org/downloads/) -- check **"Add Python to PATH"** during install, then re-run `setup.bat` |
+| "ffmpeg not found" warning | Whisper transcription won't work, but everything else will. Install later: `winget install Gyan.FFmpeg` |
+| Browser says "Companion not connected" | Make sure the B-Roll Scout window is open and shows `Starting companion on http://127.0.0.1:9876` |
 | YouTube search returns no results | Run `update.bat` to get the latest `yt-dlp` |
+| Port 3000 already in use | Close any other app on port 3000, or edit `start.bat` to change `PORT=3000` to another port |
+
+---
+
+### Building the editor package (admin)
+
+Run this on your dev machine (macOS/Linux) to produce the zip editors receive:
+
+```bash
+bash scripts/build_editor_package.sh
+```
+
+This:
+1. Builds Next.js in standalone mode (self-contained server, no `node_modules` needed)
+2. Downloads a portable `node.exe` for Windows (~40 MB, cached after first run)
+3. Copies the companion files
+4. Creates `setup.bat`, `start.bat`, `update.bat`
+5. Zips everything to `dist/broll-scout-editor.zip`
+
+The standalone Next.js server reads `BACKEND_URL=https://broll.jayasim.com` from its bundled `.env` so API calls proxy to EC2 automatically. To change the API endpoint, edit `webapp/.env` inside the zip before distributing.
 
 ---
 

@@ -25,11 +25,17 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app, origins=[
+_default_cors = [
     "https://broll.jayasim.com",
     "http://localhost:3000",
     "http://localhost:3001",
-])
+]
+_extra = os.environ.get("BROLL_CORS_ORIGINS", "").strip()
+if _extra:
+    _default_cors.extend(
+        o.strip() for o in _extra.split(",") if o.strip()
+    )
+CORS(app, origins=_default_cors)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 log = logging.getLogger("companion")
@@ -433,5 +439,6 @@ if __name__ == "__main__":
     log.info("Detecting browser cookies (default: %s)...", COOKIE_BROWSER)
     _detect_cookie_support()
     log.info("Cookie status: %s", _cookie_status)
-    log.info("Keep this running while using broll.jayasim.com")
+    log.info("CORS allowed origins: %s", _default_cors)
+    log.info("Keep this running while your B-Roll Scout tab is open in the browser")
     app.run(host="127.0.0.1", port=port, threaded=True)
