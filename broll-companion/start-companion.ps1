@@ -85,28 +85,47 @@ if (-not (Test-Path $nodeModules)) {
 }
 
 # --- Start Next.js dev server in background ---
+# NOTE: We run "npx next dev" directly instead of "npm run dev" because
+# the npm dev script uses Unix-only commands (lsof, kill) that fail on Windows.
 Write-Host ""
-Write-Host "  Starting web app (npm run dev) on http://localhost:3000 ..." -ForegroundColor White
+Write-Host "  Starting web app on http://localhost:3000 ..." -ForegroundColor White
+
+$nextBin = Join-Path $ProjectRoot "node_modules\.bin\next.cmd"
+if (-not (Test-Path $nextBin)) {
+    Write-Host "  ERROR: next.cmd not found. Run npm install first." -ForegroundColor Red
+    Write-Host "  Expected at: $nextBin" -ForegroundColor Red
+    return
+}
 
 $npmJob = Start-Process -FilePath "cmd.exe" `
-    -ArgumentList "/c cd /d `"$ProjectRoot`" && npm run dev" `
+    -ArgumentList "/c cd /d `"$ProjectRoot`" && npx next dev" `
     -WindowStyle Minimized `
     -PassThru
 
-Write-Host "  Web app starting (PID $($npmJob.Id))..." -ForegroundColor Gray
+# Wait for port 3000 to be ready (up to 30 seconds)
+Write-Host "  Waiting for web app to start..." -ForegroundColor Gray
+$ready = $false
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    $check = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+    if ($check) {
+        $ready = $true
+        break
+    }
+}
 
-# --- Open browser after a delay ---
-Start-Job -ScriptBlock {
-    Start-Sleep -Seconds 8
+if ($ready) {
+    Write-Host "  OK - Web app is running on http://localhost:3000" -ForegroundColor Green
     Start-Process "http://localhost:3000"
-} | Out-Null
+} else {
+    Write-Host "  WARNING: Web app may still be starting. Check the minimized window." -ForegroundColor Yellow
+    Write-Host "  You can manually open http://localhost:3000 in your browser." -ForegroundColor Yellow
+}
 
 # --- Info ---
 Write-Host ""
 Write-Host "  Companion:  http://127.0.0.1:9876" -ForegroundColor White
 Write-Host "  Web app:    http://localhost:3000" -ForegroundColor White
-Write-Host ""
-Write-Host "  Browser will open in a few seconds." -ForegroundColor Gray
 Write-Host "  ----------------------------------------" -ForegroundColor Gray
 Write-Host ""
 
