@@ -198,7 +198,13 @@ Write-Host "  OK - Core packages" -ForegroundColor Green
 pip install openai-whisper --quiet 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  OK - Whisper installed" -ForegroundColor Green
-    python -c "import whisper; whisper.load_model('base')" 2>$null
+    Write-Host "  Downloading Whisper base model (77 MB)..." -ForegroundColor White
+    Write-Host "  This may take a few minutes. Please wait..." -ForegroundColor Gray
+    $mj = Start-Job -ScriptBlock { python -c "import whisper; whisper.load_model('base')" }
+    $d = $mj | Wait-Job -Timeout 180
+    if ($d -and $d.State -eq "Completed") { Write-Host "  OK - Model downloaded" -ForegroundColor Green }
+    else { Write-Host "  Skipped: will download on first use." -ForegroundColor Yellow; if (-not $d) { $mj | Stop-Job } }
+    $mj | Remove-Job -Force 2>$null
 } else {
     Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
 }

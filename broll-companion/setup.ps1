@@ -127,10 +127,35 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  Videos with existing captions will still work." -ForegroundColor Yellow
 } else {
     Write-Host "  OK - Whisper installed" -ForegroundColor Green
-    Write-Host "  Downloading Whisper base model (77 MB, one-time)..." -ForegroundColor White
-    python -c "import whisper; whisper.load_model('base'); print('  OK - Model downloaded')" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  Skipped model download. Will download on first use." -ForegroundColor Yellow
+    Write-Host "  Downloading Whisper base model (77 MB)..." -ForegroundColor White
+    Write-Host "  Source: openaipublic.azureedge.net" -ForegroundColor Gray
+
+    $modelUrl = "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt"
+    $cacheDir = Join-Path $env:USERPROFILE ".cache\whisper"
+    $modelFile = Join-Path $cacheDir "base.pt"
+
+    if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+
+    # Check if already downloaded
+    if ((Test-Path $modelFile) -and (Get-Item $modelFile).Length -gt 70000000) {
+        Write-Host "  OK - Model already downloaded" -ForegroundColor Green
+    } else {
+        # Download with progress and timeout using Invoke-WebRequest
+        try {
+            Write-Host "  Downloading... (this may take a few minutes)" -ForegroundColor White
+            $ProgressPreference = 'Continue'
+            Invoke-WebRequest -Uri $modelUrl -OutFile $modelFile -TimeoutSec 120 -UseBasicParsing
+            if ((Test-Path $modelFile) -and (Get-Item $modelFile).Length -gt 70000000) {
+                Write-Host "  OK - Model downloaded" -ForegroundColor Green
+            } else {
+                Write-Host "  Download incomplete. Will retry on first use." -ForegroundColor Yellow
+                Remove-Item $modelFile -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Host "  Download failed: $_" -ForegroundColor Yellow
+            Write-Host "  Skipping. Will download on first use." -ForegroundColor Yellow
+            Remove-Item $modelFile -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
