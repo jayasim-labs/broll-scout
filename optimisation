@@ -1,0 +1,593 @@
+# Optimization: Dedup + Streaming Pipeline + Parallel Local Compute
+
+## What this covers
+
+Three safe optimizations only:
+1. **Dedup** — don't process the same video twice across shots
+2. **Streaming pipeline** — overlap search and transcript fetching (matching waits for all searches)
+3. **Parallel local compute** — run Qwen3 matching and Whisper transcription concurrently on the editor's machine
+
+No batch matching (attention dilution risk on 8B model). No transcript chunking (misses non-keyword matches). No pre-filtering (misses non-obvious matches). Every candidate gets the full single-shot matching treatment with the complete transcript.
+
+---
+
+## Optimization 1: Global Video Dedup
+
+### The problem
+
+Shot 1 searches "Sentinel Island aerial" → finds videos A, B, C, D, E
+Shot 3 searches "Sentinel Island forest" → finds videos A, B, F, G, H
+Shot 7 searches "Andaman Islands history" → finds videos A, C, G, I, J
+
+Video A appears three times. Its transcript gets fetched three times. Qwen3 matches it three times — each time reading the same 5,000 words.
+
+### The fix
+
+Collect all candidates from all shots first. Build one pool of unique videos. Map each video to every shot it's a candidate for. Fetch each transcript exactly once. Match each video once per shot (but only one transcript fetch).
+
+### Implementation in `background.py`
+
+```python
+async def process_job(job_id, segments, script_context):
+    
+    # Collect all shots across all segments
+    all_shots = []
+    shot_by_id = {}
+    for seg in segments:
+        for shot in seg.broll_shots:
+            shot._segment = seg  # Back-reference for context
+            all_shots.append(shot)
+            shot_by_id[shot.shot_id] = shot
+    
+    # ─────────────────────────────────────────
+    # PHASE 1: Search all shots (parallel)
+    # ─────────────────────────────────────────
+    search_semaphore = asyncio.Semaphore(5)
+    shot_candidates = {}  # shot_id → [candidates]
+    
+    async def search_one(shot):
+        async with search_semaphore:
+            candidates = await searcher.search_for_shot(shot, script_context)
+            return shot.shot_id, candidates
+    
+    search_results = await asyncio.gather(
+        *[search_one(shot) for shot in all_shots]
+    )
+    for shot_id, candidates in search_results:
+        shot_candidates[shot_id] = candidates
+    
+    # ─────────────────────────────────────────
+    # PHASE 2: Build global video pool + mapping
+    # ─────────────────────────────────────────
+    video_pool = {}       # video_id → video metadata (first seen)
+    video_to_shots = {}   # video_id → [shot_id, shot_id, ...]
+    
+    for shot_id, candidates in shot_candidates.items():
+        for c in candidates:
+            vid = c["video_id"]
+            if vid not in video_pool:
+                video_pool[vid] = c
+                video_to_shots[vid] = []
+            if shot_id not in video_to_shots[vid]:
+                video_to_shots[vid].append(shot_id)
+    
+    total_pairs = sum(len(c) for c in shot_candidates.values())
+    unique_videos = len(video_pool)
+    # Log: "288 candidate-shot pairs → 105 unique videos"
+    
+    # ─────────────────────────────────────────
+    # PHASE 3: Fetch transcripts + match
+    # (see Optimization 2 below for streaming)
+    # ─────────────────────────────────────────
+    ...
+```
+
+### What this saves
+
+| Metric | Before | After |
+|---|---|---|
+| Transcript fetches | ~288 (many duplicates) | ~105 unique |
+| Transcript cache checks | ~288 | ~105 |
+| Videos entering matching | ~288 pairs | ~105 videos × 1 match per shot they map to |
+
+Each video still gets a **dedicated single-shot Qwen3 call per shot** — no batch matching. If Video A maps to shots 1, 3, and 7, that's still 3 Qwen3 calls. But the transcript is fetched once, not three times.
+
+---
+
+## Optimization 2: Two-Stage Streaming Pipeline
+
+### The problem
+
+Current flow is fully sequential:
+```
+Search ALL shots (wait) → Fetch ALL transcripts (wait) → Match ALL (wait) → Rank
+```
+
+Searching 24 shots takes ~30-60 seconds. While searches are running, nothing else happens. When Shot 1's search is done in 3 seconds, its candidate videos just sit there waiting for the other 23 shots to finish searching before transcript fetching starts.
+
+### The fix
+
+Two stages:
+- **Stage A** (overlapping): searches and transcript fetches run concurrently. As soon as a search finds a new video, its transcript fetch starts immediately.
+- **Stage B** (waits for Stage A): matching starts only after ALL searches are complete. This ensures the video-to-shot mapping is final — no shot misses a video because matching started too early.
+
+### Why matching must wait
+
+If Video A is found by Shot 1's search at t=3s and matching starts immediately, but Shot 7's search (which also finds Video A) doesn't complete until t=25s — Video A gets matched only against Shot 1. Shot 7 never gets a chance. The video-to-shot mapping was incomplete when matching started.
+
+By waiting for all searches to finish before matching, we guarantee every video is matched against every shot it's relevant to.
+
+### Implementation in `background.py`
+
+```python
+async def process_job(job_id, segments, script_context):
+    
+    all_shots = collect_all_shots(segments)  # from Optimization 1
+    
+    video_pool = {}
+    video_to_shots = {}
+    transcripts = {}
+    
+    # ═══════════════════════════════════════════
+    # STAGE A: Search + Transcript fetch (overlap)
+    # Searches and transcript fetches run at the same time.
+    # As each search finds new videos, they're queued for
+    # transcript fetching immediately.
+    # ═══════════════════════════════════════════
+    
+    transcript_queue = asyncio.Queue()
+    search_semaphore = asyncio.Semaphore(5)
+    transcript_semaphore = asyncio.Semaphore(5)
+    
+    async def search_one_shot(shot):
+        """Search for one shot. Queue any NEW videos for transcript fetch."""
+        async with search_semaphore:
+            candidates = await searcher.search_for_shot(shot, script_context)
+            for c in candidates:
+                vid = c["video_id"]
+                is_new = vid not in video_pool
+                if is_new:
+                    video_pool[vid] = c
+                    video_to_shots[vid] = []
+                if shot.shot_id not in video_to_shots.get(vid, []):
+                    video_to_shots.setdefault(vid, []).append(shot.shot_id)
+                if is_new:
+                    # New video — queue for transcript fetch NOW
+                    await transcript_queue.put(vid)
+    
+    async def transcript_fetcher():
+        """Worker: fetch transcripts as videos arrive from search."""
+        while True:
+            vid = await transcript_queue.get()
+            if vid is None:
+                break  # Shutdown signal
+            async with transcript_semaphore:
+                t = await transcriber.get_transcript(vid)
+                if t and t.get("transcript_text"):
+                    transcripts[vid] = t
+            transcript_queue.task_done()
+    
+    # Start 3 transcript fetch workers (they block on the queue until videos arrive)
+    num_fetchers = 3
+    fetcher_tasks = [
+        asyncio.create_task(transcript_fetcher()) 
+        for _ in range(num_fetchers)
+    ]
+    
+    # Run all searches concurrently (max 5 at a time)
+    # As each search completes, new videos are immediately queued for fetching
+    await asyncio.gather(*[search_one_shot(shot) for shot in all_shots])
+    
+    # All searches done. Wait for remaining transcript fetches to complete.
+    await transcript_queue.join()
+    
+    # Shut down fetcher workers
+    for _ in range(num_fetchers):
+        await transcript_queue.put(None)
+    await asyncio.gather(*fetcher_tasks)
+    
+    # ═══════════════════════════════════════════
+    # STAGE A COMPLETE
+    # At this point:
+    #   - video_pool has ALL unique videos from ALL shots
+    #   - video_to_shots has the COMPLETE mapping (every shot → every video)
+    #   - transcripts has transcripts for all fetchable videos
+    # It is now safe to start matching.
+    # ═══════════════════════════════════════════
+    
+    # ═══════════════════════════════════════════
+    # STAGE B: Matching (see Optimization 3 for parallel local compute)
+    # ═══════════════════════════════════════════
+    
+    all_match_results = {}  # shot_id → [(video_id, match_result), ...]
+    match_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent Qwen3 calls
+    
+    # Build the full list of (video_id, shot_id) pairs to match
+    match_tasks = []
+    for vid, shot_ids in video_to_shots.items():
+        if vid not in transcripts:
+            continue  # No transcript available
+        for shot_id in shot_ids:
+            match_tasks.append((vid, shot_id))
+    
+    async def match_one(vid, shot_id):
+        """One Qwen3 call: one video transcript × one shot."""
+        async with match_semaphore:
+            shot = shot_by_id[shot_id]
+            result = await matcher.find_timestamp(
+                transcripts[vid], shot, script_context, video_pool[vid]
+            )
+            return shot_id, vid, result
+    
+    # Run all matching in parallel (max 3 concurrent)
+    match_results = await asyncio.gather(
+        *[match_one(vid, shot_id) for vid, shot_id in match_tasks]
+    )
+    
+    # Group results by shot
+    for shot_id, vid, result in match_results:
+        if shot_id not in all_match_results:
+            all_match_results[shot_id] = []
+        all_match_results[shot_id].append((vid, result))
+    
+    # ═══════════════════════════════════════════
+    # STAGE C: Rank per shot
+    # ═══════════════════════════════════════════
+    for shot in all_shots:
+        candidates = all_match_results.get(shot.shot_id, [])
+        ranked = ranker.rank_and_filter(candidates, shot, script_context)
+        shot._result = ranked[0] if ranked else None
+    
+    # Assemble final output...
+```
+
+### Timeline comparison
+
+```
+BEFORE (sequential):
+t=0     Search shot 1
+t=3     Search shot 2
+...
+t=60    All 24 shots searched
+t=60    Start fetching transcript for video 1
+t=63    Fetch transcript for video 2
+...
+t=180   All transcripts fetched
+t=180   Start matching video 1 × shot 1
+t=185   Match video 1 × shot 3 (SAME transcript, fetched again)
+...
+t=900   All 288 matches done
+t=900   Rank
+Total: ~15 minutes
+
+AFTER (streaming + dedup):
+t=0     Search shot 1 → finds video A, B, C → queue transcripts
+t=1     Transcript worker starts fetching video A
+t=2     Search shot 2 → finds video A (skip, already queued), D, E → queue D, E
+t=3     Transcript worker finishes video A, starts video B
+t=3     Search shot 3 → finds video A, F, G → queue F, G
+...
+t=60    All 24 shots searched. ~80% of transcripts already fetched.
+t=75    Remaining transcripts finish
+t=75    Start matching: 105 unique videos × their shots
+        (3 concurrent Qwen3 calls, each ~4 seconds)
+t=75    Match video A × shot 1 (the ONLY fetch of video A's transcript)
+t=79    Match video A × shot 3 (transcript already in memory)
+t=83    Match video A × shot 7 (transcript already in memory)
+...
+t=300   All ~200 match calls done (105 videos, some mapped to 2-3 shots)
+t=300   Rank
+Total: ~5 minutes
+```
+
+---
+
+## Optimization 3: Parallel Local Compute (Qwen3 + Whisper)
+
+### The problem
+
+The companion app on the editor's machine runs two expensive local operations:
+- **Qwen3 matching** — timestamp matching calls via Ollama
+- **Whisper transcription** — audio transcription for videos without captions (via yt-dlp download + Whisper)
+
+Currently these compete for the same resources. When Whisper is transcribing a 20-minute audio file (CPU-heavy, takes 2-3 minutes), Qwen3 matching calls wait or slow down. And vice versa.
+
+But Qwen3 and Whisper use different compute resources:
+- **Qwen3 via Ollama** uses GPU (if available) or CPU for matrix operations
+- **Whisper audio download** uses network (yt-dlp) + disk (writing MP3)
+- **Whisper transcription** uses CPU/GPU
+
+There's an opportunity to pipeline these so they don't block each other.
+
+### The fix: Separate task queues on the companion
+
+Update the companion app to manage two independent task queues with controlled concurrency:
+
+```python
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+# Two separate executors for different workload types
+ollama_executor = ThreadPoolExecutor(max_workers=3)   # Qwen3 matching
+whisper_executor = ThreadPoolExecutor(max_workers=1)  # Whisper transcription (heavy, 1 at a time)
+ytdlp_executor = ThreadPoolExecutor(max_workers=3)    # yt-dlp search + audio download
+
+@app.route("/execute", methods=["POST"])
+async def execute():
+    task = request.json
+    task_type = task.get("task_type")
+    
+    if task_type == "match_timestamp":
+        # Runs on ollama_executor — up to 3 concurrent
+        result = await asyncio.get_event_loop().run_in_executor(
+            ollama_executor, 
+            lambda: run_ollama_match(task["payload"])
+        )
+    
+    elif task_type == "transcribe_whisper":
+        # Runs on whisper_executor — 1 at a time (heavy)
+        result = await asyncio.get_event_loop().run_in_executor(
+            whisper_executor,
+            lambda: run_whisper_transcription(task["payload"])
+        )
+    
+    elif task_type in ("search", "channel_search", "video_details"):
+        # Runs on ytdlp_executor — up to 3 concurrent
+        result = await asyncio.get_event_loop().run_in_executor(
+            ytdlp_executor,
+            lambda: run_ytdlp_task(task)
+        )
+    
+    return jsonify({"results": result})
+```
+
+### Why this helps
+
+On the editor's machine, three things can now happen simultaneously:
+
+```
+Time    Thread Pool 1 (yt-dlp)     Thread Pool 2 (Ollama)     Thread Pool 3 (Whisper)
+        max 3 concurrent           max 3 concurrent           max 1 at a time
+
+t=0     Search "sentinel island"   (idle, waiting)            (idle, waiting)
+t=1     Search "andaman aerial"    (idle, waiting)            (idle, waiting)
+t=2     Search "isolated tribe"    (idle, waiting)            (idle, waiting)
+t=3     Video detail enrichment    (idle, waiting)            (idle, waiting)
+t=5     (done for now)             Match vid_001 × shot_1     (idle)
+t=5                                Match vid_002 × shot_1     Download audio for vid_099
+t=5                                Match vid_003 × shot_2     (no captions, needs Whisper)
+t=9                                Match vid_004 × shot_2     Transcribing vid_099 audio
+t=9                                Match vid_005 × shot_3     (Whisper running...)
+t=13                               Match vid_006 × shot_3     (Whisper running...)
+t=17                               Match vid_007 × shot_4     Whisper done → cache transcript
+t=17                               Match vid_008 × shot_4     Download audio for vid_134
+t=21                               Match vid_009 × shot_5     Transcribing vid_134
+...
+```
+
+Without this parallelism, Whisper blocks everything. A single video without captions takes 2-3 minutes to download + transcribe. During that time, no matching happens. With separate executors, Qwen3 keeps matching other videos while Whisper works on the caption-less ones.
+
+### Server-side changes to support parallel companion work
+
+The EC2 server needs to send tasks in a way that the companion can work on all three types simultaneously. Update the agent poll endpoint to return mixed task types:
+
+```python
+@app.post("/api/v1/agent/poll")
+async def agent_poll(body: AgentPollRequest):
+    """Return a mix of task types so companion can parallelize."""
+    tasks = []
+    
+    # Always return up to 3 search/ytdlp tasks
+    ytdlp_tasks = get_pending_tasks(task_type=["search", "channel_search", "video_details"], limit=3)
+    tasks.extend(ytdlp_tasks)
+    
+    # Return up to 3 matching tasks
+    match_tasks = get_pending_tasks(task_type=["match_timestamp"], limit=3)
+    tasks.extend(match_tasks)
+    
+    # Return up to 1 Whisper task (heavy, don't queue more)
+    whisper_tasks = get_pending_tasks(task_type=["transcribe_whisper"], limit=1)
+    tasks.extend(whisper_tasks)
+    
+    return {"tasks": tasks}
+```
+
+The companion receives a batch of mixed tasks and dispatches them to the appropriate executor. yt-dlp searches, Qwen3 matching, and Whisper transcription all run concurrently without blocking each other.
+
+### Whisper pipeline optimization
+
+When the EC2 server discovers a video without captions during Stage A (transcript fetching), instead of blocking the pipeline, it:
+
+1. Queues a `transcribe_whisper` task for the companion
+2. Continues matching other videos that DO have transcripts
+3. When the Whisper result comes back, runs the matcher on that video's transcript
+4. Adds the result to the shot's candidate list (even if ranking for that shot already completed — the result is appended as a "late arrival")
+
+```python
+# In background.py — handling caption-less videos
+
+async def handle_no_captions(vid, video_to_shots, script_context):
+    """
+    Video has no captions. Queue Whisper transcription via companion.
+    Don't block the main pipeline — other videos keep matching.
+    """
+    # Queue Whisper task to companion
+    whisper_result = await send_to_companion({
+        "task_type": "transcribe_whisper",
+        "payload": {
+            "video_id": vid,
+            "video_url": video_pool[vid]["video_url"],
+            "max_duration_seconds": 1200,  # 20 min max
+        }
+    })
+    
+    if whisper_result and whisper_result.get("transcript_text"):
+        # Cache the transcript
+        await storage.store_transcript(vid, whisper_result)
+        
+        # Now match against all relevant shots
+        for shot_id in video_to_shots[vid]:
+            shot = shot_by_id[shot_id]
+            match = await send_to_companion({
+                "task_type": "match_timestamp",
+                "payload": {
+                    "transcript": whisper_result["transcript_text"],
+                    "segment_summary": shot._segment.summary,
+                    "visual_need": shot.visual_need,
+                    "key_terms": shot.key_terms,
+                    # ... full context
+                }
+            })
+            
+            # Add as late arrival to the shot's results
+            append_late_result(shot_id, vid, match)
+
+
+# Run Whisper videos in background — don't block the main pipeline
+async def process_captionless_videos(captionless_vids, video_to_shots, script_context):
+    """Process all caption-less videos concurrently with the main matching pipeline."""
+    await asyncio.gather(*[
+        handle_no_captions(vid, video_to_shots, script_context)
+        for vid in captionless_vids
+    ])
+```
+
+In the main pipeline:
+
+```python
+async def process_job(job_id, segments, script_context):
+    # ... Stage A: search + fetch transcripts ...
+    
+    # Split videos into two groups
+    has_transcript = {vid for vid in video_pool if vid in transcripts}
+    no_transcript = {vid for vid in video_pool if vid not in transcripts 
+                     and should_try_whisper(video_pool[vid])}
+    
+    # Run BOTH concurrently:
+    # - Main matching pipeline processes videos WITH transcripts
+    # - Whisper pipeline processes videos WITHOUT transcripts
+    await asyncio.gather(
+        match_all_with_transcripts(has_transcript, ...),    # Stage B
+        process_captionless_videos(no_transcript, ...),     # Whisper parallel
+    )
+    
+    # Stage C: rank (includes both regular and late-arrival Whisper results)
+    ...
+```
+
+### Hardware concurrency guidelines
+
+The companion should detect available resources and set executor sizes accordingly:
+
+```python
+import os
+import psutil
+
+def get_companion_concurrency():
+    """Set concurrency limits based on editor's machine capabilities."""
+    
+    ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+    cpu_count = os.cpu_count()
+    
+    # Check if GPU is available for Ollama
+    gpu_available = check_ollama_gpu()  # nvidia-smi or system_profiler
+    
+    if gpu_available:
+        # GPU handles Ollama, CPU is free for Whisper and yt-dlp
+        return {
+            "ollama_workers": 3,    # GPU can handle 3 concurrent
+            "whisper_workers": 1,   # CPU-bound, keep at 1
+            "ytdlp_workers": 3,    # Network-bound, 3 is fine
+        }
+    elif ram_gb >= 16:
+        # CPU-only but enough RAM
+        return {
+            "ollama_workers": 2,    # CPU Ollama is slower, limit to 2
+            "whisper_workers": 1,   # Don't compete with Ollama for CPU
+            "ytdlp_workers": 3,    # Network-bound, doesn't compete
+        }
+    else:
+        # Low-resource machine (8GB)
+        return {
+            "ollama_workers": 1,    # One at a time
+            "whisper_workers": 1,   # One at a time
+            "ytdlp_workers": 2,    # Reduce slightly
+        }
+```
+
+Report this in the companion health endpoint:
+
+```python
+@app.route("/health")
+def health():
+    concurrency = get_companion_concurrency()
+    return jsonify({
+        "status": "ok",
+        "ollama": "running",
+        "model": MATCHER_MODEL,
+        "gpu_available": check_ollama_gpu(),
+        "ram_gb": round(psutil.virtual_memory().total / (1024**3), 1),
+        "concurrency": concurrency,
+    })
+```
+
+---
+
+## Complete pipeline timeline comparison
+
+```
+BEFORE (sequential, no dedup):
+t=0-60      Search all 24 shots (sequential batches)
+t=60-180    Fetch 288 transcripts (many duplicates, many cache hits)
+t=180-185   Video without captions → Whisper download (blocks everything)
+t=185-300   Whisper transcribing (blocks everything)
+t=300-900   288 Qwen3 matching calls (3 concurrent × 4s each)
+t=900       Rank
+Total: ~15 minutes
+
+AFTER (streaming + dedup + parallel local compute):
+t=0         Search shot 1 → new videos queued for transcript fetch
+t=0         Transcript fetcher workers start picking up videos
+t=1         Search shot 2 → more videos queued
+...
+t=45        All searches done. ~70% of transcripts already fetched.
+t=45        Caption-less videos split off → Whisper pipeline (parallel)
+t=60        Remaining transcripts fetched.
+t=60        Matching starts: 105 unique videos, each against its shots
+t=60        CONCURRENT: Qwen3 matching (3 threads) + Whisper (1 thread) + yt-dlp if needed
+t=60-240    Qwen3 processes ~180 (video × shot) pairs at 3 concurrent × 4s = 240 seconds
+t=60-180    Whisper processes 3-5 caption-less videos simultaneously (doesn't block Qwen3)
+t=240       Whisper late results merged into shot candidates
+t=240       Rank all shots
+Total: ~4-5 minutes
+```
+
+---
+
+## Files to modify
+
+### EC2 server
+- `background.py` — full restructure: dedup, two-stage streaming, Whisper parallel pipeline
+- `main.py` — update agent poll to return mixed task types
+
+### Companion app
+- `companion.py` — add ThreadPoolExecutor-based routing for Ollama/Whisper/yt-dlp, add hardware detection, add concurrency config to health endpoint
+
+### No changes needed
+- `translator.py` — segmentation is upstream of all this
+- `matcher.py` — same single-shot matching function, just called with better scheduling
+- `searcher.py` — same search logic, just called by the new pipeline orchestrator  
+- `transcriber.py` — same transcript fetch logic
+- `ranker.py` — same ranking logic, receives results from the new pipeline
+- `settings.py` — no new settings (concurrency is auto-detected from hardware)
+- `schemas.py` — no model changes
+
+## Test by
+
+1. Run a 49-minute script (the same one that found 24 shots)
+2. Check logs: "X candidate-shot pairs → Y unique videos" (Y should be significantly less than X)
+3. Check logs: "Transcript fetched for video Z" should appear only ONCE per video
+4. Check logs: Whisper transcriptions should show timestamps overlapping with Qwen3 matching timestamps (proving they ran concurrently)
+5. Compare total job time: should be 4-5 minutes instead of 15+
+6. Compare results: same quality, same number of clips, same relevance scores (±0.05)
+7. Run the same job twice — second run should be faster due to transcript caching

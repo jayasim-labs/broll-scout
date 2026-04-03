@@ -414,8 +414,7 @@ function ExpandShotButton({ jobId, segment }: { jobId: string; segment: Segment 
     setLoading(true)
     setStatus(null)
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
-      const res = await fetch(`${apiBase}/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-shots`, {
+      const res = await fetch(`/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-shots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId, segment_id: segment.segment_id, count: 1 }),
