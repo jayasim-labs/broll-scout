@@ -4,18 +4,30 @@ import logging
 import httpx
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import Segment, MatchResult, TranscriptSource
+from app.models.schemas import ScriptContext, Segment, MatchResult, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
-TIMESTAMP_PROMPT_TEMPLATE = """You are the Viral B-Roll Extractor. Given a video's captions/transcript with timestamps and a script segment description, your job is to find the PEAK VISUAL MOMENT — not just where the topic is first mentioned, but where the most visually compelling, high-retention footage exists.
+TIMESTAMP_PROMPT_TEMPLATE = """You are the Viral B-Roll Extractor finding B-roll for a specific documentary.
 
+=== OVERALL DOCUMENTARY CONTEXT ===
+This documentary is about: {script_topic}
+Domain: {script_domain}
+Geographic scope: {geographic_scope}
+Time period: {temporal_scope}
+This documentary is NOT about: {exclusion_context}
+
+=== THIS SEGMENT ===
 Segment summary: {summary}
+Context anchor: {context_anchor}
 Visual need: {visual_need}
 Emotional tone: {emotional_tone}
 Key terms: {key_terms}
+
+=== TERMS THAT INDICATE A WRONG MATCH ===
+If the transcript contains these terms prominently, this video is likely NOT relevant: {negative_keywords}
 
 Video duration: {video_duration} seconds (~{video_duration_min} minutes)
 
@@ -23,23 +35,33 @@ Captions (format is either "M:SS text" or "[M:SS → M:SS] text" where M is minu
 {transcript}
 
 CRITICAL INSTRUCTIONS:
-1. Read the ENTIRE transcript carefully, not just the beginning. The best B-roll moment is almost never in the first 30 seconds — that's usually just a talking-head intro or hook.
-2. Look for the section where the topic is SHOWN or DEMONSTRATED, not just first mentioned. Prefer scenes with: cinematic footage, archival material, data visualizations, dramatic reveals, expert demonstrations, aerial/drone shots, on-location footage, reenactments.
-3. AVOID the intro (first 30s) and outro (last 30s) — these are almost always talking heads, title cards, or subscribe prompts.
-4. The clip should be 15–90 seconds of continuous relevant content.
-5. TIMESTAMP CONVERSION: Timestamps in the transcript are in M:SS format. Convert to total seconds: 0:45 = 45s, 1:30 = 90s, 3:15 = 195s, 8:22 = 502s. Your start_time_seconds and end_time_seconds MUST be in total seconds.
+1. CONTEXT CHECK FIRST: Does this video actually discuss {script_topic} or a directly related topic? If the video is about a different region, different subject, or different context that merely shares similar keywords, return confidence_score: 0.0 and context_match: false immediately.
+2. Check for CONTEXT MISMATCH:
+   - Geographic mismatch: Video discusses a different location than {geographic_scope} → REJECT
+   - Temporal mismatch: Video discusses a different time period → REJECT
+   - Subject mismatch: Video discusses a tangentially related but different topic → REJECT
+   - If unsure whether context matches, set confidence_score below 0.3
+3. Only if the video passes the context check: find the PEAK VISUAL MOMENT — not just where the topic is mentioned, but the most visually compelling, high-retention footage.
+4. Read the ENTIRE transcript. The best moment is almost never in the first 30 seconds.
+5. Look for scenes with: cinematic footage, archival material, dramatic reveals, aerial/drone shots, on-location footage.
+6. AVOID the intro (first 30s) and outro (last 30s).
+7. The clip should be 15–90 seconds of continuous relevant content.
+8. TIMESTAMP CONVERSION: 0:45 = 45s, 1:30 = 90s, 3:15 = 195s, 8:22 = 502s.
+9. In relevance_note, explicitly state how the clip connects to {script_topic} — not just keyword overlap.
 
 Return JSON only:
 {{
-  "start_time_seconds": int (total seconds from start, e.g. 3:15 in transcript = 195),
-  "end_time_seconds": int (total seconds, must be > start_time_seconds),
-  "excerpt": "relevant transcript text from this timestamp window (max 200 words)",
+  "start_time_seconds": int,
+  "end_time_seconds": int,
+  "excerpt": "relevant transcript text (max 200 words)",
   "confidence_score": float (0.0 to 1.0),
-  "relevance_note": "one sentence on why this section matches the visual need",
-  "the_hook": "one sentence on why this specific timestamp is VISUALLY compelling — what makes it a 'peak' moment an editor would want"
+  "context_match": true/false,
+  "context_mismatch_reason": "string or null — if false, explain why",
+  "relevance_note": "must reference the overall documentary topic",
+  "the_hook": "why this timestamp is VISUALLY compelling"
 }}
 
-If no relevant section exists, return confidence_score: 0.0."""
+If no relevant section exists or context doesn't match, return confidence_score: 0.0 and context_match: false."""
 
 
 class MatcherService:
@@ -72,6 +94,7 @@ class MatcherService:
         segment: Segment,
         video_metadata: dict,
         job_id: str | None = None,
+        script_context: ScriptContext | None = None,
     ) -> MatchResult:
         if not transcript_text:
             return MatchResult(
@@ -85,12 +108,20 @@ class MatcherService:
         if len(words) > max_words:
             transcript_text = " ".join(words[:max_words])
 
+        ctx = script_context or ScriptContext()
         video_duration = video_metadata.get("video_duration_seconds", 0) or 0
         prompt = TIMESTAMP_PROMPT_TEMPLATE.format(
+            script_topic=ctx.script_topic or "general documentary",
+            script_domain=ctx.script_domain or "general",
+            geographic_scope=ctx.geographic_scope or "not specified",
+            temporal_scope=ctx.temporal_scope or "not specified",
+            exclusion_context=ctx.exclusion_context or "none specified",
             summary=segment.summary,
+            context_anchor=segment.context_anchor or segment.summary,
             visual_need=segment.visual_need,
             emotional_tone=segment.emotional_tone,
             key_terms=", ".join(segment.key_terms),
+            negative_keywords=", ".join(segment.negative_keywords) if segment.negative_keywords else "none",
             transcript=transcript_text,
             video_duration=video_duration,
             video_duration_min=round(video_duration / 60, 1),
@@ -110,6 +141,23 @@ class MatcherService:
         if parsed is None:
             return MatchResult(confidence_score=0.0, source_flag=source_flag)
 
+        ctx_match = parsed.get("context_match", True)
+        ctx_reason = parsed.get("context_mismatch_reason")
+
+        if ctx_match is False:
+            logger.info(
+                "Context mismatch rejected: %s — %s",
+                video_metadata.get("video_title", "")[:60],
+                ctx_reason or "unknown",
+            )
+            return MatchResult(
+                confidence_score=0.0,
+                source_flag=source_flag,
+                context_match=False,
+                context_mismatch_reason=ctx_reason,
+                context_match_valid=False,
+            )
+
         excerpt = parsed.get("excerpt", "")
         max_excerpt = self._get("transcript_excerpt_max_words", 200)
         excerpt_words = excerpt.split()
@@ -125,6 +173,8 @@ class MatcherService:
             the_hook=parsed.get("the_hook"),
             source_flag=source_flag,
             context_match_valid=True,
+            context_match=True,
+            context_mismatch_reason=None,
         )
 
     def validate_context_match(
@@ -180,6 +230,8 @@ class MatcherService:
         if agent_queue.is_agent_available():
             try:
                 result = await self._call_local(prompt, job_id)
+                if result and result.get("context_match") is False:
+                    return result
                 if result and result.get("confidence_score", 0) > 0:
                     return result
                 if result and result.get("matcher_source") == "local_unavailable":

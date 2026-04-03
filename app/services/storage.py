@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 from app.config import get_settings
 from app.models.schemas import (
     APICosts, JobResponse, JobStatus, JobSummary, ProjectSummary, RankedResult,
-    Segment, SegmentWithResults, Transcript, TranscriptSource,
+    ScriptContext, Segment, SegmentWithResults, Transcript, TranscriptSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class StorageService:
             "completed_at", "processing_time_seconds", "api_costs",
             "segment_count", "result_count", "english_translation",
             "script_duration_minutes", "minimum_results_met",
-            "activity_log",
+            "activity_log", "script_context",
         ):
             if param in kwargs:
                 safe = param.replace("_", "")
@@ -172,9 +172,12 @@ class StorageService:
                         clip_url=r.get("clip_url"),
                         transcript_excerpt=r.get("transcript_excerpt"),
                         the_hook=r.get("the_hook"),
+                        relevance_note=r.get("relevance_note"),
                         relevance_score=_from_dynamo_float(r.get("relevance_score", 0)),
                         confidence_score=_from_dynamo_float(r.get("confidence_score", 0)),
                         source_flag=TranscriptSource(r.get("source_flag", "no_transcript")),
+                        context_match=r.get("context_match", True),
+                        context_mismatch_reason=r.get("context_mismatch_reason"),
                         editor_rating=r.get("editor_rating"),
                         clip_used=r.get("clip_used", False),
                         editor_notes=r.get("editor_notes"),
@@ -190,12 +193,17 @@ class StorageService:
                     key_terms=seg.get("key_terms", []),
                     search_queries=seg.get("search_queries", []),
                     estimated_duration_seconds=int(seg.get("estimated_duration_seconds", 60)),
+                    context_anchor=seg.get("context_anchor", ""),
+                    negative_keywords=seg.get("negative_keywords", []),
                     results=ranked,
                 ))
 
             costs_data = item.get("api_costs", {})
             costs_data = {k: _from_dynamo_float(v) if isinstance(v, (Decimal, float)) else v
                          for k, v in costs_data.items()} if costs_data else {}
+
+            ctx_raw = item.get("script_context")
+            script_ctx = ScriptContext(**ctx_raw) if ctx_raw and isinstance(ctx_raw, dict) else None
 
             return JobResponse(
                 job_id=job_id,
@@ -213,6 +221,7 @@ class StorageService:
                 project_id=item.get("project_id"),
                 title=item.get("title"),
                 category=item.get("category"),
+                script_context=script_ctx,
                 activity_log=item.get("activity_log", []),
             )
         except ClientError:
@@ -255,7 +264,7 @@ class StorageService:
                 batch = segments[i:i + 25]
                 with table.batch_writer() as writer:
                     for seg in batch:
-                        writer.put_item(Item={
+                        item = {
                             "job_id": job_id,
                             "segment_id": seg.segment_id,
                             "title": seg.title,
@@ -265,7 +274,12 @@ class StorageService:
                             "key_terms": seg.key_terms,
                             "search_queries": seg.search_queries,
                             "estimated_duration_seconds": seg.estimated_duration_seconds,
-                        })
+                        }
+                        if seg.context_anchor:
+                            item["context_anchor"] = seg.context_anchor
+                        if seg.negative_keywords:
+                            item["negative_keywords"] = seg.negative_keywords
+                        writer.put_item(Item=item)
         except ClientError:
             logger.exception("Failed to store segments for %s", job_id)
 
@@ -299,13 +313,17 @@ class StorageService:
                             "clip_url": r.clip_url,
                             "transcript_excerpt": r.transcript_excerpt,
                             "the_hook": r.the_hook,
+                            "relevance_note": r.relevance_note,
                             "relevance_score": str(r.relevance_score),
                             "confidence_score": str(r.confidence_score),
                             "source_flag": r.source_flag.value,
+                            "context_match": r.context_match,
                             "editor_rating": r.editor_rating,
                             "clip_used": r.clip_used,
                             "editor_notes": r.editor_notes,
                         }
+                        if r.context_mismatch_reason:
+                            item["context_mismatch_reason"] = r.context_mismatch_reason
                         if category:
                             item["category"] = category
                         writer.put_item(Item=item)
@@ -419,9 +437,12 @@ class StorageService:
                     clip_url=i.get("clip_url"),
                     transcript_excerpt=i.get("transcript_excerpt"),
                     the_hook=i.get("the_hook"),
+                    relevance_note=i.get("relevance_note"),
                     relevance_score=_from_dynamo_float(i.get("relevance_score", 0)),
                     confidence_score=_from_dynamo_float(i.get("confidence_score", 0)),
                     source_flag=TranscriptSource(i.get("source_flag", "no_transcript")),
+                    context_match=i.get("context_match", True),
+                    context_mismatch_reason=i.get("context_mismatch_reason"),
                     editor_rating=i.get("editor_rating"),
                     clip_used=i.get("clip_used", False),
                 )

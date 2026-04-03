@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from app.config import DEFAULTS, get_settings
-from app.models.schemas import Segment
+from app.models.schemas import ScriptContext, Segment
 from app.utils.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
@@ -12,20 +12,31 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are the Viral B-Roll Scout — a specialist in digital storytelling and YouTube retention for a Tamil-language documentary channel.
 
 Do the following in one response:
+
 1. Translate the following Tamil script to English.
-2. Analyze the overall narrative arc to identify visual hooks, emotional peaks, and technical concepts that need strong B-roll support.
-3. Break the English translation into segments — one segment for approximately every 1–2 minutes of script. A 30-minute script must yield at least 30 segments. Segment by visual need, not just topic change: if one topic has multiple distinct visual moments (e.g., a historical event, then a map, then a person), split them into separate segments.
+
+2. FIRST, identify the overall script context and return a "script_context" object:
+   - script_topic: The primary subject (e.g., "Sentinel Island and the Sentinelese tribe")
+   - script_domain: The domain (e.g., "geography, anthropology, indigenous peoples")
+   - geographic_scope: Specific regions/countries relevant (e.g., "Andaman Islands, Bay of Bengal, India")
+   - temporal_scope: Time period covered (e.g., "prehistoric to present day, with focus on 2018 incident")
+   - exclusion_context: What this video is NOT about — topics that share keywords but are unrelated (e.g., "NOT about mainland Indian forests, NOT about wildlife reserves, NOT about tourism destinations")
+
+3. Break the English translation into segments — one segment for approximately every 1–2 minutes of script. A 30-minute script must yield at least 30 segments. Segment by visual need, not just topic change.
+
 4. For each segment, return:
    - segment_id (format: seg_001, seg_002, ...)
    - title (short, descriptive)
    - summary (2–3 sentences describing what this section covers)
-   - visual_need (what the editor needs to SEE on screen: "aerial shot of ancient Rome", "chart showing GDP growth", "archival footage of the 1971 war", "close-up of circuit board manufacturing")
-   - emotional_tone (the mood: "dramatic reveal", "explanatory calm", "tension building", "inspirational climax", "historical gravity")
+   - visual_need (what the editor needs to SEE on screen)
+   - emotional_tone (the mood)
    - key_terms (5–7 keywords a video editor would use to find relevant footage)
-   - search_queries (3 distinct YouTube search queries — one broad, one specific, one lateral/creative. Bias toward documentary footage, archival material, and cinematic explainers — NOT news clips)
+   - search_queries: 3 distinct YouTube search queries. CRITICAL: Every query MUST include the script's specific context to avoid generic results. BAD: "tropical forest documentary" (matches ANY tropical forest). GOOD: "Sentinel Island aerial forest footage" (specific to this island). Every query should contain at least one term from the geographic_scope or script_topic.
    - estimated_duration_seconds (rough estimate based on script length)
+   - context_anchor: A one-sentence statement connecting this segment to the overall script topic (e.g., "Dense tropical forest specifically on North Sentinel Island in the Andaman archipelago — NOT generic tropical forest footage")
+   - negative_keywords: 3–5 terms that would indicate a WRONG match for this segment (e.g., ["Telangana", "safari", "zoo", "wildlife reserve", "national park"])
 
-Return as valid JSON with two keys: "english_translation" (full translated text) and "segments" (JSON array). No prose, no markdown fences."""
+Return as valid JSON with three keys: "english_translation" (full translated text), "script_context" (object), and "segments" (JSON array). No prose, no markdown fences."""
 
 
 class TranslatorService:
@@ -41,8 +52,8 @@ class TranslatorService:
         script: str,
         job_id: str | None = None,
         on_progress=None,
-    ) -> tuple[list[Segment], str]:
-        """Translate a Tamil script and return (segments, english_translation).
+    ) -> tuple[list[Segment], str, ScriptContext]:
+        """Translate a Tamil script and return (segments, english_translation, script_context).
         on_progress(icon, text) is called at each sub-step.
         """
         async def _emit(icon: str, text: str):
@@ -111,12 +122,22 @@ class TranslatorService:
         segments = [Segment(**seg) for seg in segments_raw]
         english_translation = data.get("english_translation", "")
 
+        ctx_raw = data.get("script_context", {})
+        script_context = ScriptContext(
+            script_topic=ctx_raw.get("script_topic", ""),
+            script_domain=ctx_raw.get("script_domain", ""),
+            geographic_scope=ctx_raw.get("geographic_scope", ""),
+            temporal_scope=ctx_raw.get("temporal_scope", ""),
+            exclusion_context=ctx_raw.get("exclusion_context", ""),
+        )
+
         logger.info(
-            "Translation complete: %d segments, ~%d min script",
+            "Translation complete: %d segments, ~%d min script, topic=%s",
             len(segments),
             estimated_minutes,
+            script_context.script_topic[:80],
         )
-        return segments, english_translation
+        return segments, english_translation, script_context
 
     async def _call_openai(
         self, messages: list[dict], model: str

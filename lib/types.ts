@@ -58,12 +58,23 @@ export interface RankedResult {
   clip_url: string | null
   transcript_excerpt: string | null
   the_hook: string | null
+  relevance_note: string | null
   relevance_score: number
   confidence_score: number
   source_flag: TranscriptSource
+  context_match: boolean
+  context_mismatch_reason: string | null
   editor_rating: number | null
   clip_used: boolean
   editor_notes: string | null
+}
+
+export interface ScriptContext {
+  script_topic: string
+  script_domain: string
+  geographic_scope: string
+  temporal_scope: string
+  exclusion_context: string
 }
 
 export interface Segment {
@@ -75,6 +86,8 @@ export interface Segment {
   key_terms: string[]
   search_queries: string[]
   estimated_duration_seconds: number
+  context_anchor?: string
+  negative_keywords?: string[]
   results: RankedResult[]
 }
 
@@ -94,6 +107,7 @@ export interface JobResponse {
   project_id?: string | null
   title?: string | null
   category?: string | null
+  script_context?: ScriptContext | null
   activity_log?: ActivityEntry[]
 }
 

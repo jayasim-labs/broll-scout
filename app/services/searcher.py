@@ -6,13 +6,29 @@ import re
 import httpx
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import Segment, CandidateVideo
+from app.models.schemas import ScriptContext, Segment, CandidateVideo
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
+
+def contextualize_query(query: str, script_context: ScriptContext) -> str:
+    """Prepend script-level context to a search query if it lacks topic anchoring."""
+    if not script_context or not script_context.script_topic:
+        return query
+    topic_words = set(script_context.script_topic.lower().split())
+    query_words = set(query.lower().split())
+    if topic_words.intersection(query_words):
+        return query
+    geo = script_context.geographic_scope
+    if geo:
+        anchor = geo.split(",")[0].strip()
+    else:
+        anchor = script_context.script_topic.split(" and ")[0].strip()
+    return f"{anchor} {query}"
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +114,7 @@ class SearcherService:
     async def search_for_segment(
         self, segment: Segment, job_id: str | None = None, on_progress=None,
         seg_number: int = 0, total_segments: int = 0,
+        script_context: ScriptContext | None = None,
     ) -> list[CandidateVideo]:
         async def _emit(icon: str, text: str, depth: int = 2):
             if on_progress:
@@ -146,11 +163,15 @@ class SearcherService:
         else:
             tier1_video_ids = []
 
-        # (b) yt-dlp Primary Search
-        queries_str = " → ".join(q[:40] for q in segment.search_queries[:3])
+        # (b) yt-dlp Primary Search — contextualize queries to prevent generic matches
+        contextualized_queries = [
+            contextualize_query(q, script_context) if script_context else q
+            for q in segment.search_queries
+        ]
+        queries_str = " → ".join(q[:40] for q in contextualized_queries[:3])
         await _emit("globe", f"Searching yt-dlp for: {queries_str}")
         yt_results = await self._search_youtube_primary_full(
-            segment.search_queries, results_per_query, job_id, "ytdlp_only", _emit
+            contextualized_queries, results_per_query, job_id, "ytdlp_only", _emit
         )
         all_video_ids.extend(_collect(yt_results))
         await _emit("check", f"yt-dlp returned {len(yt_results)} videos")
@@ -266,6 +287,7 @@ class SearcherService:
         job_id: str | None = None,
         progress_callback=None,
         on_activity=None,
+        script_context: ScriptContext | None = None,
     ) -> dict[str, list[CandidateVideo]]:
         tier1_ids = self._get("preferred_channels_tier1") or []
         has_preferred = len(tier1_ids) > 0
@@ -286,6 +308,7 @@ class SearcherService:
                     candidates = await self.search_for_segment(
                         seg, job_id=job_id, on_progress=on_activity,
                         seg_number=seg_idx + 1, total_segments=total,
+                        script_context=script_context,
                     )
                 except Exception:
                     logger.exception("Failed to search segment %s", seg.segment_id)

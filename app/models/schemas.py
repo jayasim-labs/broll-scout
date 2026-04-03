@@ -94,6 +94,15 @@ class ChannelResolveRequest(BaseModel):
     channel_url: str
 
 
+class ScriptContext(BaseModel):
+    """Top-level context extracted from the entire script by GPT-4o."""
+    script_topic: str = ""
+    script_domain: str = ""
+    geographic_scope: str = ""
+    temporal_scope: str = ""
+    exclusion_context: str = ""
+
+
 class Segment(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -105,6 +114,8 @@ class Segment(BaseModel):
     key_terms: List[str] = Field(default_factory=list)
     search_queries: List[str] = Field(default_factory=list)
     estimated_duration_seconds: int = Field(default=60, ge=10)
+    context_anchor: str = Field(default="")
+    negative_keywords: List[str] = Field(default_factory=list)
 
     @field_validator("segment_id")
     @classmethod
@@ -144,6 +155,8 @@ class MatchResult(BaseModel):
     the_hook: Optional[str] = None
     source_flag: TranscriptSource = TranscriptSource.NONE
     context_match_valid: bool = True
+    context_match: bool = True
+    context_mismatch_reason: Optional[str] = None
 
 
 class RankedResult(BaseModel):
@@ -165,9 +178,12 @@ class RankedResult(BaseModel):
     clip_url: Optional[str] = None
     transcript_excerpt: Optional[str] = None
     the_hook: Optional[str] = None
+    relevance_note: Optional[str] = None
     relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
     source_flag: TranscriptSource = TranscriptSource.NONE
+    context_match: bool = True
+    context_mismatch_reason: Optional[str] = None
     editor_rating: Optional[int] = Field(default=None, ge=1, le=5)
     clip_used: bool = False
     editor_notes: Optional[str] = None
@@ -221,6 +237,7 @@ class JobResponse(BaseModel):
     project_id: Optional[str] = None
     title: Optional[str] = None
     category: Optional[str] = None
+    script_context: Optional[ScriptContext] = None
     activity_log: List[dict] = Field(default_factory=list)
 
 

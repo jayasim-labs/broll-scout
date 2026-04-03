@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from app.models.schemas import (
-    CandidateVideo, JobStatus, MatchResult, RankedResult, Segment,
+    CandidateVideo, JobStatus, MatchResult, RankedResult, ScriptContext, Segment,
 )
 from app.services.matcher import MatcherService
 from app.services.ranker import RankerService
@@ -95,15 +95,16 @@ async def run_pipeline(
     
 
         translator = TranslatorService()
-        segments, english_translation = await translator.translate_and_segment(
+        segments, english_translation, script_context = await translator.translate_and_segment(
             script, job_id, on_progress=_translator_progress,
         )
 
         translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
         _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} scenes, each needing different B-roll footage", group="translate")
+        if script_context.script_topic:
+            _log_activity(job_id, "shield", f"Context anchoring: \"{script_context.script_topic}\" — will reject clips about unrelated topics", depth=1, group="translate")
         for i, seg in enumerate(segments, 1):
             _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}", depth=1, group="translate")
-
 
         await storage.store_segments(job_id, segments)
         await storage.update_job_status(
@@ -111,6 +112,7 @@ async def run_pipeline(
             segment_count=len(segments),
             script_duration_minutes=script_duration,
             english_translation=english_translation,
+            script_context=script_context.model_dump() if script_context.script_topic else None,
         )
 
         # --- Stage 2: Searching ---
@@ -145,7 +147,7 @@ async def run_pipeline(
 
         candidates_by_segment = await searcher.search_batch(
             segments, job_id=job_id, progress_callback=search_progress,
-            on_activity=search_activity,
+            on_activity=search_activity, script_context=script_context,
         )
 
         search_elapsed = round(time.time() - search_start, 1)
@@ -178,7 +180,7 @@ async def run_pipeline(
 
             retry_results = await searcher.search_batch(
                 sparse_segments, job_id=job_id, progress_callback=search_progress,
-                on_activity=search_activity,
+                on_activity=search_activity, script_context=script_context,
             )
             for seg_id, new_cands in retry_results.items():
                 existing = candidates_by_segment.get(seg_id, [])
@@ -248,6 +250,7 @@ async def run_pipeline(
                         max_concurrent_candidates,
                         on_activity=_match_activity,
                         timestamp_model_name=timestamp_model,
+                        script_context=script_context,
                     ),
                     timeout=segment_timeout,
                 )
@@ -257,9 +260,15 @@ async def run_pipeline(
                 matched = []
 
             if matched:
+                context_rejected = sum(1 for _, m in matched if not m.context_match)
                 good_matches = [(c, m) for c, m in matched if m.confidence_score > 0 and m.start_time_seconds is not None]
-                no_transcript = len(matched) - len(good_matches)
-                note = f" ({no_transcript} had no usable transcript)" if no_transcript else ""
+                no_transcript = len(matched) - len(good_matches) - context_rejected
+                notes = []
+                if no_transcript > 0:
+                    notes.append(f"{no_transcript} had no usable transcript")
+                if context_rejected > 0:
+                    notes.append(f"{context_rejected} rejected as wrong context")
+                note = f" ({', '.join(notes)})" if notes else ""
                 _log_activity(job_id, "eye", f"Found relevant moments in {len(good_matches)} out of {len(cands)} videos for \"{segment.title}\"{note}", depth=2, group=seg_group)
                 for cand, match in sorted(good_matches, key=lambda x: x[1].confidence_score, reverse=True)[:3]:
                     ts_min = (match.start_time_seconds or 0) // 60
@@ -267,7 +276,7 @@ async def run_pipeline(
                     hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""
                     _log_activity(job_id, "sparkles", f"▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}", depth=3, group=seg_group)
 
-            ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg)
+            ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg, script_context=script_context)
             if ranked:
                 _log_activity(job_id, "check", f"Top {len(ranked)} clips selected for \"{segment.title}\" (ranked by AI confidence + relevance)", depth=2, group=seg_group)
             else:
@@ -282,6 +291,20 @@ async def run_pipeline(
         all_results: List[RankedResult] = []
         for results in all_segment_results.values():
             all_results.extend(results)
+
+        # --- Context audit: single LLM call to flag outlier clips ---
+        if script_context.script_topic and all_results:
+            try:
+                _log_activity(job_id, "shield", "Running context audit — checking all clips fit the documentary's theme", group="rank")
+                all_results, flagged_count = await _audit_context(
+                    all_results, script_context, matcher, job_id,
+                )
+                if flagged_count:
+                    _log_activity(job_id, "alert", f"Context audit removed {flagged_count} clips that didn't match \"{script_context.script_topic}\"", depth=1, group="rank")
+                else:
+                    _log_activity(job_id, "check", "Context audit passed — all clips are contextually appropriate", depth=1, group="rank")
+            except Exception:
+                logger.warning("Context audit failed, keeping all results")
 
         low_threshold = max(5, round(word_count / 100))
         minimum_results_met = len(all_results) >= script_duration
@@ -300,7 +323,7 @@ async def run_pipeline(
                 _set_progress(job_id, "matching", 92, "Not enough clips found — running a broader search...")
                 _log_activity(job_id, "alert", f"Only {len(all_results)} clips found so far — I need more. Re-searching {len(empty_segments)} scenes with broader, more creative queries", depth=1, group="rank")
                 recovery = await searcher.search_batch(
-                    empty_segments, job_id=job_id,
+                    empty_segments, job_id=job_id, script_context=script_context,
                 )
                 for seg in empty_segments:
                     new_cands = recovery.get(seg.segment_id, [])
@@ -311,10 +334,11 @@ async def run_pipeline(
                                 _match_candidates(
                                     new_cands, seg, matcher, transcriber, job_id,
                                     max_concurrent_candidates,
+                                    script_context=script_context,
                                 ),
                                 timeout=segment_timeout,
                             )
-                            ranked = ranker.rank_and_filter(matched, seg, settings=pipeline_cfg)
+                            ranked = ranker.rank_and_filter(matched, seg, settings=pipeline_cfg, script_context=script_context)
                             all_segment_results[seg.segment_id] = ranked
                             all_results.extend(ranked)
                         except asyncio.TimeoutError:
@@ -423,6 +447,7 @@ async def _match_candidates(
     max_concurrent: int,
     on_activity=None,
     timestamp_model_name: str = "gpt-4o-mini",
+    script_context: ScriptContext | None = None,
 ) -> List[Tuple[CandidateVideo, MatchResult]]:
     semaphore = asyncio.Semaphore(max_concurrent)
     results: List[Tuple[CandidateVideo, MatchResult]] = []
@@ -468,7 +493,8 @@ async def _match_candidates(
                 }
 
                 match = await matcher.find_timestamp(
-                    transcript.transcript_text, segment, video_meta, job_id
+                    transcript.transcript_text, segment, video_meta, job_id,
+                    script_context=script_context,
                 )
                 if matcher.context_matching_enabled:
                     match = matcher.validate_context_match(
@@ -496,3 +522,64 @@ async def _match_candidates(
 
     await asyncio.gather(*[process_one(c) for c in candidates])
     return results
+
+
+async def _audit_context(
+    all_results: List[RankedResult],
+    script_context: ScriptContext,
+    matcher: MatcherService,
+    job_id: str | None,
+) -> Tuple[List[RankedResult], int]:
+    """Single LLM call to review all clip titles for context outliers."""
+    if len(all_results) < 3:
+        return all_results, 0
+
+    clip_summaries = []
+    for idx, r in enumerate(all_results):
+        clip_summaries.append(
+            f"{idx}. \"{r.video_title}\" by {r.channel_name} (for segment {r.segment_id})"
+        )
+
+    prompt = (
+        "You are a documentary editor reviewing B-roll selections.\n\n"
+        f"This documentary is about: {script_context.script_topic}\n"
+        f"Geographic scope: {script_context.geographic_scope}\n"
+        f"Domain: {script_context.script_domain}\n"
+        f"NOT about: {script_context.exclusion_context}\n\n"
+        "Selected B-roll clips:\n"
+        + "\n".join(clip_summaries) +
+        "\n\nReview each clip and flag any that are CONTEXTUALLY WRONG — "
+        "they share keywords but are about something unrelated.\n\n"
+        "Return JSON only:\n"
+        '{"flagged": [{"index": 5, "reason": "explanation"}, ...]}\n'
+        'If all are appropriate: {"flagged": []}'
+    )
+
+    backend = matcher._get("matcher_backend", "auto")
+    parsed = await matcher._route_call(prompt, backend, job_id)
+    if not parsed:
+        return all_results, 0
+
+    flagged_indices = set()
+    for f in parsed.get("flagged", []):
+        try:
+            flagged_indices.add(int(f["index"]))
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    if not flagged_indices:
+        return all_results, 0
+
+    for idx in flagged_indices:
+        if idx < len(all_results):
+            reason = next(
+                (f.get("reason", "") for f in parsed["flagged"] if f.get("index") == idx),
+                "",
+            )
+            logger.info(
+                "Context audit flagged [%d] %s — %s",
+                idx, all_results[idx].video_title[:60], reason,
+            )
+
+    filtered = [r for i, r in enumerate(all_results) if i not in flagged_indices]
+    return filtered, len(flagged_indices)
