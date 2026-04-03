@@ -82,7 +82,7 @@ function ServiceBreakdown({ period, pricing }: { period: UsagePeriod; pricing: R
   const miniCost =
     (miniIn / 1000) * (pricing.gpt4o_mini_input_per_1k || 0.00015) +
     (miniOut / 1000) * (pricing.gpt4o_mini_output_per_1k || 0.0006)
-  const whisperCost = period.whisper_minutes * (pricing.whisper_per_minute || 0.006)
+  const whisperCost = period.whisper_minutes * (pricing.whisper_per_minute || 0)
   const geminiCost = period.gemini_calls * (pricing.gemini_flash_per_call || 0.0001)
 
   const services = [
@@ -105,11 +105,11 @@ function ServiceBreakdown({ period, pricing }: { period: UsagePeriod; pricing: R
       bg: "bg-blue-500/10",
     },
     {
-      name: "Whisper (Transcription)",
+      name: "Whisper (Local)",
       icon: Mic,
       calls: period.whisper_calls,
-      tokens: `${period.whisper_minutes.toFixed(1)} minutes transcribed`,
-      cost: whisperCost,
+      tokens: `${period.whisper_minutes.toFixed(1)} minutes transcribed locally`,
+      cost: 0,
       color: "text-green-500",
       bg: "bg-green-500/10",
     },
@@ -363,7 +363,7 @@ export default function UsagePage() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Whisper</span>
-                  <span className="font-mono">${pricing.whisper_per_minute || 0.006}/minute</span>
+                  <span className="font-mono">$0.00/minute (local)</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Gemini 1.5 Flash</span>

@@ -10,7 +10,7 @@ PRICING = {
     "gpt4o_output_per_1k": 0.015,
     "gpt4o_mini_input_per_1k": 0.00015,
     "gpt4o_mini_output_per_1k": 0.0006,
-    "whisper_per_minute": 0.006,
+    "whisper_per_minute": 0.0,  # Whisper runs locally via companion — zero cost
     "youtube_search_units": 100,
     "youtube_details_per_id": 1,
     "google_cse_per_call": 0.005,

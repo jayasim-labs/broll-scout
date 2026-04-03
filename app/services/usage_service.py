@@ -84,13 +84,16 @@ class UsageService:
                 _accumulate(daily[d], costs)
 
         totals["job_count"] = job_count
+        totals["estimated_cost_usd"] = _recalculate_cost(totals)
         totals["last_calculated"] = datetime.now(timezone.utc).isoformat()
 
         await self._store_period("all_time", totals)
         for m, data in monthly.items():
+            data["estimated_cost_usd"] = _recalculate_cost(data)
             data["last_calculated"] = totals["last_calculated"]
             await self._store_period(m, data)
         for d, data in daily.items():
+            data["estimated_cost_usd"] = _recalculate_cost(data)
             data["last_calculated"] = totals["last_calculated"]
             await self._store_period(d, data)
 
@@ -186,7 +189,20 @@ _INT_KEYS = [
     "google_cse_calls", "gemini_calls", "ytdlp_searches",
     "ytdlp_detail_lookups", "job_count",
 ]
-_FLOAT_KEYS = ["whisper_minutes", "estimated_cost_usd"]
+_FLOAT_KEYS = ["whisper_minutes"]
+
+
+def _recalculate_cost(totals: Dict) -> float:
+    """Recompute estimated cost from raw counters using current PRICING."""
+    cost = 0.0
+    cost += (_dec(totals.get("gpt4o_input_tokens", 0)) / 1000) * PRICING["gpt4o_input_per_1k"]
+    cost += (_dec(totals.get("gpt4o_output_tokens", 0)) / 1000) * PRICING["gpt4o_output_per_1k"]
+    cost += (_dec(totals.get("gpt4o_mini_input_tokens", 0)) / 1000) * PRICING["gpt4o_mini_input_per_1k"]
+    cost += (_dec(totals.get("gpt4o_mini_output_tokens", 0)) / 1000) * PRICING["gpt4o_mini_output_per_1k"]
+    cost += _dec(totals.get("whisper_minutes", 0)) * PRICING["whisper_per_minute"]
+    cost += _dec(totals.get("google_cse_calls", 0)) * PRICING["google_cse_per_call"]
+    cost += _dec(totals.get("gemini_calls", 0)) * PRICING.get("gemini_flash_per_call", 0.0001)
+    return round(cost, 4)
 
 
 def _accumulate(totals: Dict, costs: Dict) -> None:
