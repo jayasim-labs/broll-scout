@@ -134,7 +134,7 @@ export default function ProjectsPage() {
     <div className="min-h-screen bg-background">
       <Navbar />
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pt-4 pb-8 space-y-6">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
@@ -292,7 +292,7 @@ function ProjectCard({
       "transition-all",
       isExpanded && "ring-1 ring-primary/20",
     )}>
-      <CardHeader className="pb-2">
+      <CardHeader className="px-4 py-3 pb-2">
         <div className="flex items-center gap-3">
           <button onClick={onToggle} className="flex items-center gap-2 flex-1 text-left min-w-0">
             <div className="flex-shrink-0">

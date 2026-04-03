@@ -141,6 +141,8 @@ class MatcherService:
         if parsed is None:
             return MatchResult(confidence_score=0.0, source_flag=source_flag)
 
+        actual_source = parsed.pop("_matcher_source", None)
+
         ctx_match = parsed.get("context_match", True)
         ctx_reason = parsed.get("context_mismatch_reason")
 
@@ -156,6 +158,7 @@ class MatcherService:
                 context_match=False,
                 context_mismatch_reason=ctx_reason,
                 context_match_valid=False,
+                matcher_source=actual_source,
             )
 
         excerpt = parsed.get("excerpt", "")
@@ -175,6 +178,7 @@ class MatcherService:
             context_match_valid=True,
             context_match=True,
             context_mismatch_reason=None,
+            matcher_source=actual_source,
         )
 
     def validate_context_match(
@@ -219,20 +223,30 @@ class MatcherService:
         self, prompt: str, backend: str, job_id: str | None,
     ) -> dict | None:
         """Route timestamp matching to local Ollama or OpenAI API."""
+        matcher_model = self._get("matcher_model", "qwen3:8b")
+
         if backend == "local":
-            return await self._call_local(prompt, job_id)
+            result = await self._call_local(prompt, job_id)
+            if result:
+                result["_matcher_source"] = f"Ollama/{matcher_model}"
+            return result
 
         if backend == "api":
             model = self._get("timestamp_model", "gpt-4o-mini")
-            return await self._call_api(prompt, model, job_id)
+            result = await self._call_api(prompt, model, job_id)
+            if result:
+                result["_matcher_source"] = model
+            return result
 
         # "auto" — try local first, fall back to API
         if agent_queue.is_agent_available():
             try:
                 result = await self._call_local(prompt, job_id)
                 if result and result.get("context_match") is False:
+                    result["_matcher_source"] = f"Ollama/{matcher_model}"
                     return result
                 if result and result.get("confidence_score", 0) > 0:
+                    result["_matcher_source"] = f"Ollama/{matcher_model}"
                     return result
                 if result and result.get("matcher_source") == "local_unavailable":
                     logger.info("Local model unavailable, falling back to API")
@@ -242,7 +256,10 @@ class MatcherService:
                 logger.warning("Local matcher failed, falling back to API")
 
         model = self._get("timestamp_model", "gpt-4o-mini")
-        return await self._call_api(prompt, model, job_id)
+        result = await self._call_api(prompt, model, job_id)
+        if result:
+            result["_matcher_source"] = model
+        return result
 
     # ------------------------------------------------------------------
     # Local Ollama via companion agent

@@ -157,6 +157,7 @@ class MatchResult(BaseModel):
     context_match_valid: bool = True
     context_match: bool = True
     context_mismatch_reason: Optional[str] = None
+    matcher_source: Optional[str] = None
 
 
 class RankedResult(BaseModel):

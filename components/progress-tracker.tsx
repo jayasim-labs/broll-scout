@@ -122,29 +122,29 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
       id: "translate",
       stage: "translating",
       icon: Languages,
-      title: "Translate & Segment",
-      detail: "GPT-4o translates your Tamil script to English, identifies visual themes, and breaks it into scenes with search queries.",
+      title: "Translate & Anchor",
+      detail: "GPT-4o translates your script, extracts the documentary's topic/geography/domain, and breaks it into scenes — each with context anchors and negative keywords to prevent wrong matches.",
     },
     {
       id: "search",
       stage: "searching",
       icon: Search,
-      title: "Search Videos",
-      detail: "For each scene, searches preferred YouTube channels first, then YouTube API / yt-dlp for candidate B-roll videos.",
+      title: "Context-Aware Search",
+      detail: "For each scene, searches preferred channels then yt-dlp. Generic queries are auto-anchored to the script's topic so 'tropical forest' becomes 'Sentinel Island tropical forest'.",
     },
     {
       id: "match",
       stage: "matching",
       icon: Eye,
-      title: "Find Timestamps",
-      detail: "Fetches transcripts (cache → YouTube captions → Whisper), then GPT-4o-mini pinpoints the exact second where each scene's topic is discussed.",
+      title: "Match & Reject",
+      detail: "Fetches transcripts (cache → YouTube captions → Whisper), then the LLM checks geographic/subject context FIRST — rejects mismatches before finding the peak visual timestamp.",
     },
     {
       id: "rank",
       stage: "ranking",
       icon: Sparkles,
-      title: "Rank & Filter",
-      detail: "Scores clips by keyword density, views, channel authority, caption quality, and recency. Deduplicates across scenes.",
+      title: "Rank & Audit",
+      detail: "Scores clips by AI confidence, context relevance, views, and recency. Hard-rejects negative keyword hits. Final context audit reviews all clips in one pass.",
     },
   ]
 
@@ -441,12 +441,13 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
             <div className="mt-3 px-2 py-2 bg-secondary/30 rounded-md">
               <p className="text-[10px] text-muted-foreground leading-relaxed">
                 <strong className="text-foreground/80">Example:</strong>{" "}
-                Your script mentions &quot;India&apos;s Chandrayaan mission&quot; →{" "}
-                <span className="text-violet-400">GPT-4o</span> translates &amp; creates scene: &quot;Chandrayaan-3 landing&quot; →{" "}
-                <span className="text-blue-400">YouTube/yt-dlp</span> finds 15 candidate videos →{" "}
+                Your script is about North Sentinel Island →{" "}
+                <span className="text-violet-400">GPT-4o</span> translates, extracts context (&quot;Andaman Islands, NOT mainland forests&quot;), creates scene: &quot;Dense tropical forest on the island&quot; with negative keywords [&quot;Telangana&quot;, &quot;safari&quot;] →{" "}
+                <span className="text-blue-400">yt-dlp</span> searches &quot;Sentinel Island tropical forest&quot; (not generic &quot;tropical forest&quot;) →{" "}
                 <span className="text-teal-400">Whisper</span> transcribes audio →{" "}
-                <span className="text-pink-400">GPT-4o-mini</span> locates the exact second (e.g., 2:34) where the landing is discussed →{" "}
-                <span className="text-amber-400">Ranker</span> scores by relevance, views &amp; recency → Editor gets a pre-filled clip ready to preview &amp; download.
+                <span className="text-pink-400">LLM</span> checks context first — rejects a Telangana forest video (wrong geography), finds Andaman drone footage at 2:34 →{" "}
+                <span className="text-amber-400">Ranker</span> hard-filters negative keywords, scores context relevance + views + recency →{" "}
+                <span className="text-indigo-400">Audit</span> reviews all clips in one pass, flags any remaining outliers → Editor gets contextually accurate clips.
               </p>
             </div>
           </CardContent>

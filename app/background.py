@@ -202,9 +202,16 @@ async def run_pipeline(
         est_m_min = est_match_sec // 60
         est_m_sec = est_match_sec % 60
         est_m_str = f"{est_m_min}m {est_m_sec}s" if est_m_min else f"{est_m_sec}s"
-        timestamp_model = pipeline_cfg.get("timestamp_model", "gpt-4o-mini")
+        matcher_backend = pipeline_cfg.get("matcher_backend", "auto")
+        matcher_model = pipeline_cfg.get("matcher_model", "qwen3:8b")
+        if matcher_backend == "api":
+            match_label = pipeline_cfg.get("timestamp_model", "gpt-4o-mini")
+        elif matcher_backend == "local":
+            match_label = f"Ollama/{matcher_model}"
+        else:
+            match_label = f"Ollama/{matcher_model} (API fallback)"
         _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})", group="match")
-        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {timestamp_model} finds peak visual moment → validate timestamp", depth=1, group="match")
+        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {match_label} finds peak visual moment → validate timestamp", depth=1, group="match")
 
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService()
@@ -244,12 +251,11 @@ async def run_pipeline(
                 _log_activity(job_id, icon, text, depth=2, group=seg_group)
 
             try:
-                matched = await asyncio.wait_for(
+                    matched = await asyncio.wait_for(
                     _match_candidates(
                         cands, segment, matcher, transcriber, job_id,
                         max_concurrent_candidates,
                         on_activity=_match_activity,
-                        timestamp_model_name=timestamp_model,
                         script_context=script_context,
                     ),
                     timeout=segment_timeout,
@@ -446,7 +452,6 @@ async def _match_candidates(
     job_id: str,
     max_concurrent: int,
     on_activity=None,
-    timestamp_model_name: str = "gpt-4o-mini",
     script_context: ScriptContext | None = None,
 ) -> List[Tuple[CandidateVideo, MatchResult]]:
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -511,7 +516,8 @@ async def _match_candidates(
                     s_start = match.start_time_seconds or 0
                     s_end = match.end_time_seconds or 0
                     ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
-                    await _emit("brain", f"  🤖 {timestamp_model_name} → \"{short_title}\" → {match.confidence_score:.0%} confidence at {ts_label}")
+                    model_label = match.matcher_source or "LLM"
+                    await _emit("brain", f"  🤖 {model_label} → \"{short_title}\" → {match.confidence_score:.0%} confidence at {ts_label}")
 
                 async with lock:
                     results.append((cand, match))
