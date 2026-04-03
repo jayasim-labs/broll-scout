@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 def _to_dynamo(val: Any) -> Any:
     if isinstance(val, float):
         return Decimal(str(val))
+    if isinstance(val, dict):
+        return {k: _to_dynamo(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_to_dynamo(item) for item in val]
     return val
 
 
@@ -89,7 +93,7 @@ class StorageService:
         for param in (
             "completed_at", "processing_time_seconds", "api_costs",
             "segment_count", "result_count", "english_translation",
-            "script_duration_minutes", "minimum_results_met",
+            "script_duration_minutes", "coverage_assessment", "warnings",
             "activity_log", "script_context",
         ):
             if param in kwargs:
@@ -214,6 +218,29 @@ class StorageService:
             ctx_raw = item.get("script_context")
             script_ctx = ScriptContext(**ctx_raw) if ctx_raw and isinstance(ctx_raw, dict) else None
 
+            coverage_raw = item.get("coverage_assessment")
+            coverage = None
+            if coverage_raw and isinstance(coverage_raw, dict):
+                from app.models.schemas import CoverageAssessment
+                coverage = CoverageAssessment(
+                    shots_per_minute=_from_dynamo_float(coverage_raw.get("shots_per_minute", 0)),
+                    clips_found=int(coverage_raw.get("clips_found", 0)),
+                    total_shots=int(coverage_raw.get("total_shots", 0)),
+                    longest_no_broll_gap_seconds=int(coverage_raw.get("longest_no_broll_gap_seconds", 0)),
+                    longest_no_broll_gap_segments=coverage_raw.get("longest_no_broll_gap_segments", []),
+                    note=coverage_raw.get("note", ""),
+                    warnings_count=int(coverage_raw.get("warnings_count", 0)),
+                )
+
+            warnings_raw = item.get("warnings", [])
+            from app.models.schemas import ShotWarning
+            shot_warnings = [
+                ShotWarning(**w) for w in warnings_raw if isinstance(w, dict)
+            ]
+
+            computed_total_shots = sum(s.broll_count for s in segments_with_results)
+            computed_no_broll = sum(1 for s in segments_with_results if s.broll_count == 0)
+
             return JobResponse(
                 job_id=job_id,
                 status=JobStatus(item.get("status", "processing")),
@@ -222,8 +249,11 @@ class StorageService:
                 processing_time_seconds=_from_dynamo_float(item.get("processing_time_seconds")) if item.get("processing_time_seconds") else None,
                 script_duration_minutes=int(item.get("script_duration_minutes", 0)),
                 total_segments=len(segments),
+                total_shots=computed_total_shots,
                 total_results=len(results),
-                minimum_results_met=item.get("minimum_results_met", True),
+                segments_with_no_broll=computed_no_broll,
+                coverage_assessment=coverage,
+                warnings=shot_warnings,
                 api_costs=APICosts(**{k: (int(v) if isinstance(v, int) else _from_dynamo_float(v)) for k, v in costs_data.items()}) if costs_data else APICosts(),
                 segments=segments_with_results,
                 english_translation=item.get("english_translation"),

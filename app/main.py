@@ -15,6 +15,7 @@ from app.models.schemas import (
     LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
     ProjectCreateRequest, ProjectListResponse, ProjectResponse, ProjectSummary,
     DeepSearchRequest, AddToJobRequest, FindSimilarRequest, RecategorizeRequest,
+    ExpandShotRequest, BRollShot,
 )
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
@@ -165,6 +166,39 @@ async def cancel_job(
 
     task.cancel()
     return {"job_id": job_id, "status": "cancelled", "cancelled": True}
+
+
+@app.post("/api/v1/jobs/{job_id}/segments/{segment_id}/expand-shots")
+async def expand_segment_shots(
+    job_id: str,
+    segment_id: str,
+    body: ExpandShotRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    """Editor-driven: generate additional B-roll shots for a specific segment."""
+    _verify_key(x_api_key)
+    storage = get_storage()
+    job = await storage.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    target_seg = None
+    for seg in job.segments:
+        if seg.segment_id == segment_id:
+            target_seg = seg
+            break
+    if not target_seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+
+    from app.services.expand_shots import expand_shots_for_segment
+    asyncio.create_task(
+        expand_shots_for_segment(job_id, target_seg, body.count, job.script_context)
+    )
+    return {
+        "job_id": job_id,
+        "segment_id": segment_id,
+        "message": f"Generating {body.count} new shot(s) for \"{target_seg.title}\" — refresh in ~30s to see results",
+    }
 
 
 @app.get("/api/v1/jobs/{job_id}")

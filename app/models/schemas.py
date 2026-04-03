@@ -235,6 +235,22 @@ class SegmentWithResults(Segment):
     results: List[RankedResult] = Field(default_factory=list)
 
 
+class ShotWarning(BaseModel):
+    segment_id: str
+    message: str
+    severity: str = "info"
+
+
+class CoverageAssessment(BaseModel):
+    shots_per_minute: float = 0.0
+    clips_found: int = 0
+    total_shots: int = 0
+    longest_no_broll_gap_seconds: int = 0
+    longest_no_broll_gap_segments: List[str] = Field(default_factory=list)
+    note: str = ""
+    warnings_count: int = 0
+
+
 class JobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -248,7 +264,8 @@ class JobResponse(BaseModel):
     total_shots: int = 0
     total_results: int = 0
     segments_with_no_broll: int = 0
-    minimum_results_met: bool = True
+    coverage_assessment: Optional[CoverageAssessment] = None
+    warnings: List[ShotWarning] = Field(default_factory=list)
     api_costs: APICosts = Field(default_factory=APICosts)
     segments: List[SegmentWithResults] = Field(default_factory=list)
     english_translation: Optional[str] = None
@@ -378,6 +395,13 @@ class RecategorizeRequest(BaseModel):
     categories: List[str] = Field(default_factory=list)
     add: List[str] = Field(default_factory=list)
     remove: List[str] = Field(default_factory=list)
+
+
+class ExpandShotRequest(BaseModel):
+    """Editor requests additional shots for a specific segment."""
+    job_id: str
+    segment_id: str
+    count: int = Field(default=1, ge=1, le=3)
 
 
 class AgentPollRequest(BaseModel):

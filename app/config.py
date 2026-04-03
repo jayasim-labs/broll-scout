@@ -36,8 +36,9 @@ DEFAULTS = {
     "total_results_target": 30,
     "gemini_expanded_queries": 5,
 
-    "min_broll_per_minute": 1,
-    "max_broll_per_minute": 2,
+    "min_broll_per_segment": 0,
+    "warn_long_no_broll_sec": 180,
+    "max_no_broll_gap_sec": 300,
     "min_segment_duration_sec": 20,
     "max_segment_duration_sec": 180,
     "allow_zero_broll_segments": True,

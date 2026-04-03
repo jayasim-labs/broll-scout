@@ -103,6 +103,22 @@ export interface Segment {
   results: RankedResult[]
 }
 
+export interface ShotWarning {
+  segment_id: string
+  message: string
+  severity: "info" | "warning"
+}
+
+export interface CoverageAssessment {
+  shots_per_minute: number
+  clips_found: number
+  total_shots: number
+  longest_no_broll_gap_seconds: number
+  longest_no_broll_gap_segments: string[]
+  note: string
+  warnings_count: number
+}
+
 export interface JobResponse {
   job_id: string
   status: JobStatus
@@ -114,7 +130,8 @@ export interface JobResponse {
   total_shots: number
   total_results: number
   segments_with_no_broll: number
-  minimum_results_met: boolean
+  coverage_assessment?: CoverageAssessment | null
+  warnings?: ShotWarning[]
   api_costs: APICosts
   segments: Segment[]
   english_translation: string | null

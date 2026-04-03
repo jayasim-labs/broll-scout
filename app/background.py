@@ -338,10 +338,17 @@ async def run_pipeline(
             except Exception:
                 logger.warning("Context audit failed, keeping all results")
 
-        low_threshold = max(5, round(word_count / 100))
-        minimum_results_met = len(all_results) >= script_duration
+        # --- Validate shot coverage (quality check, not quantity enforcement) ---
+        warnings = _validate_shot_coverage(segments, pipeline_cfg)
+        coverage_assessment = _build_coverage_assessment(
+            segments, all_results, script_duration, warnings,
+        )
+        if warnings:
+            for w in warnings:
+                _log_activity(job_id, "alert", w["message"], depth=1, group="rank")
 
-        # --- Recovery search ---
+        # --- Recovery search (only for segments with zero results) ---
+        low_threshold = max(3, len(active_segments) // 3)
         if len(all_results) < low_threshold:
             logger.info(
                 "Only %d results (below threshold %d), running recovery",
@@ -376,15 +383,13 @@ async def run_pipeline(
                         except asyncio.TimeoutError:
                             pass
 
-        minimum_results_met = len(all_results) >= script_duration
+        shots_filled = len(all_results)
+        shots_per_min = round(shots_filled / max(script_duration, 1), 2)
 
         # --- Stage 4: Storing ---
         _set_progress(job_id, "ranking", 95, "Saving your results...")
         if all_results:
-            status_note = ""
-            if not minimum_results_met:
-                status_note = f" (target was {script_duration}+ clips for a ~{script_duration}-min script)"
-            _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips found for {total_active_shots} shots across {len(active_segments)} segments{status_note}", group="rank")
+            _log_activity(job_id, "check", f"All done! {shots_filled} B-roll clips found for {total_active_shots} shots across {len(active_segments)} segments ({shots_per_min} clips/min)", group="rank")
         else:
             _log_activity(job_id, "alert", "No clips found. Ensure the companion app is running so yt-dlp can search and Whisper can transcribe audio locally.", group="rank")
         await storage.store_results(job_id, all_results, category=category)
@@ -406,7 +411,8 @@ async def run_pipeline(
             processing_time_seconds=elapsed,
             result_count=len(all_results),
             api_costs=api_costs,
-            minimum_results_met=minimum_results_met,
+            coverage_assessment=coverage_assessment,
+            warnings=warnings,
             activity_log=final_log,
         )
 
@@ -459,6 +465,98 @@ async def run_pipeline(
             await get_usage_service().recalculate()
         except Exception:
             logger.warning("Failed to recalculate usage after job %s", job_id)
+
+
+def _validate_shot_coverage(
+    segments: List[Segment],
+    settings: dict,
+) -> List[dict]:
+    """Quality check: flag segments that might need more visual variety.
+    These are INFO-level notes for the editor, not hard errors."""
+    warn_long_sec = settings.get("warn_long_no_broll_sec", 180)
+    max_gap_sec = settings.get("max_no_broll_gap_sec", 300)
+    warnings: List[dict] = []
+
+    for seg in segments:
+        if seg.broll_count == 0:
+            continue
+        dur = seg.estimated_duration_seconds or 0
+        if dur > warn_long_sec and seg.broll_count == 1:
+            warnings.append({
+                "segment_id": seg.segment_id,
+                "message": f"'{seg.title}' is {dur}s long with only 1 B-roll shot. The editor may want additional variety.",
+                "severity": "info",
+            })
+
+    gap_acc = 0
+    gap_segs: List[str] = []
+    for seg in segments:
+        if seg.broll_count == 0:
+            gap_acc += seg.estimated_duration_seconds or 0
+            gap_segs.append(seg.segment_id)
+        else:
+            if gap_acc > max_gap_sec:
+                warnings.append({
+                    "segment_id": gap_segs[0],
+                    "message": f"Consecutive no-B-roll segments ({', '.join(gap_segs)}) span {gap_acc}s. Long stretch without visual variety.",
+                    "severity": "info",
+                })
+            gap_acc = 0
+            gap_segs = []
+    if gap_acc > max_gap_sec:
+        warnings.append({
+            "segment_id": gap_segs[0],
+            "message": f"Consecutive no-B-roll segments ({', '.join(gap_segs)}) span {gap_acc}s at the end of the script.",
+            "severity": "info",
+        })
+
+    return warnings
+
+
+def _build_coverage_assessment(
+    segments: List[Segment],
+    results: list,
+    script_duration: int,
+    warnings: List[dict],
+) -> dict:
+    """Build a neutral coverage summary for the job output."""
+    total_shots = sum(seg.broll_count for seg in segments)
+    no_broll_segs = [seg for seg in segments if seg.broll_count == 0]
+
+    longest_gap = 0
+    longest_gap_segs: List[str] = []
+    gap_acc = 0
+    gap_segs: List[str] = []
+    for seg in segments:
+        if seg.broll_count == 0:
+            gap_acc += seg.estimated_duration_seconds or 0
+            gap_segs.append(seg.segment_id)
+        else:
+            if gap_acc > longest_gap:
+                longest_gap = gap_acc
+                longest_gap_segs = list(gap_segs)
+            gap_acc = 0
+            gap_segs = []
+    if gap_acc > longest_gap:
+        longest_gap = gap_acc
+        longest_gap_segs = list(gap_segs)
+
+    note = (
+        f"{len(results)} clips for {total_shots} shots across {len(segments)} segments. "
+        f"{len(no_broll_segs)} segments are host-on-camera."
+    )
+    if longest_gap:
+        note += f" Longest no-B-roll gap: {longest_gap}s ({', '.join(longest_gap_segs)})."
+
+    return {
+        "shots_per_minute": round(total_shots / max(script_duration, 1), 2),
+        "clips_found": len(results),
+        "total_shots": total_shots,
+        "longest_no_broll_gap_seconds": longest_gap,
+        "longest_no_broll_gap_segments": longest_gap_segs,
+        "note": note,
+        "warnings_count": len(warnings),
+    }
 
 
 _TRANSCRIPT_SOURCE_LABELS = {

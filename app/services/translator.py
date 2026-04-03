@@ -41,12 +41,12 @@ Do the following in one response:
    - estimated_duration_seconds (rough estimate of how long this section of the script runs)
    - context_anchor: A one-sentence statement connecting this segment to the overall script topic
    - negative_keywords: 3–5 terms that would indicate a WRONG match for this segment
-   - broll_count: how many DIFFERENT B-roll clips this segment needs. Guidelines:
-       * 0 clips: segment is host-on-camera, personal narration, or intro/outro that doesn't need B-roll
-       * 1 clip: segment is under 45 seconds, or is a simple single-concept explanation
-       * 2 clips: segment is 45-90 seconds, or covers two distinct visual ideas
-       * 3 clips: segment is 90-150 seconds, or has multiple visual beats
-       * 4+ clips: segment is over 150 seconds with several distinct visual moments
+   - broll_count: how many DIFFERENT B-roll clips this segment needs. Determine based on CONTENT, not duration:
+       * 0 clips: host on camera, personal narration, interview clips where the speaker IS the visual, intro/outro cards, sections where the audience should focus on the narrator's face and emotion. Mark with broll_note explaining why.
+       * 1 clip: a single concept, location, or event. One strong visual is enough.
+       * 2-3 clips: multiple distinct visual ideas — e.g., a location PLUS a historical event PLUS data. Each shot must be a genuinely different visual need, NOT the same concept rephrased.
+       * 4+ clips: rare. Only for rapid-fire montage sections or segments covering many distinct events/locations in sequence.
+       Do NOT pad broll_count to hit a target number. If the script naturally needs 24 shots across 20 segments, return 24. Quality over quantity — precisely targeted shots are more useful than vague padded ones.
    - broll_note: if broll_count is 0, explain why (e.g., "Host on camera — no B-roll needed"). Otherwise null.
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
@@ -80,8 +80,7 @@ Do the following in one response:
    - total_segments: count
    - total_broll_shots: sum of all broll_count values
    - segments_needing_no_broll: count of segments with broll_count = 0
-   The total_broll_shots MUST be >= script duration in minutes.
-   If it's too low, add more shots to the longer segments.
+   - coverage_note: a brief assessment, e.g., "24 shots across 20 segments. 5 segments are host-on-camera. Longest gap without B-roll: seg_012-seg_013 (3 minutes) — narrator personal story section."
 
 Return as valid JSON with four keys: "english_translation" (string), "script_context" (object), "segments" (JSON array), and "segment_summary" (object). No prose, no markdown fences."""
 
@@ -139,27 +138,11 @@ class TranslatorService:
             total_shots = sum(s.get("broll_count", 1) for s in segments_raw)
         no_broll_count = summary.get("segments_needing_no_broll", 0)
 
-        await _emit("brain", f"Identified {len(segments_raw)} natural segments with {total_shots} total B-roll shots ({no_broll_count} segments need no B-roll)")
-
-        if total_shots < estimated_minutes:
-            await _emit("alert", f"Only {total_shots} B-roll shots — your {estimated_minutes}-min script needs at least {estimated_minutes}. Asking GPT-4o to add more shots to longer segments...")
-            messages.append(
-                {"role": "assistant", "content": json.dumps(data)}
-            )
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"The script is approximately {estimated_minutes} minutes. "
-                    f"You returned {len(segments_raw)} segments with only {total_shots} total B-roll shots. "
-                    f"I need at least {estimated_minutes} B-roll shots total. "
-                    "Add more broll_shots to the longer segments — they need more visual variety. "
-                    "Do NOT split segments artificially. Instead increase broll_count and add more broll_shots entries."
-                ),
-            })
-            data = await self._call_openai(messages, translation_model)
-            segments_raw = data.get("segments", [])
-            total_shots = sum(s.get("broll_count", 1) for s in segments_raw)
-            await _emit("check", f"Now {len(segments_raw)} segments with {total_shots} B-roll shots")
+        coverage_note = summary.get("coverage_note", "")
+        shots_per_min = round(total_shots / max(estimated_minutes, 1), 2)
+        await _emit("brain", f"Identified {len(segments_raw)} natural segments with {total_shots} B-roll shots ({no_broll_count} host-on-camera segments) — {shots_per_min} shots/min")
+        if coverage_note:
+            await _emit("check", f"Coverage: {coverage_note}")
 
         cost_tracker = get_cost_tracker()
         if job_id:

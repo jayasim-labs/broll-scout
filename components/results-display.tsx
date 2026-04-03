@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useMemo } from "react"
 import {
   Download, ChevronDown, ChevronUp, ExternalLink, RefreshCw,
   ThumbsUp, ThumbsDown, Clock, Eye, Play, Scissors,
-  Check, Pause, SkipBack, SkipForward, X,
+  Check, Pause, SkipBack, SkipForward, X, Plus, Loader2,
   Brain, Search, Globe, Sparkles, Filter, AlertTriangle, Zap,
   Mic, Shield, Terminal, ChevronRight, Languages,
   type LucideIcon,
@@ -75,17 +75,35 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-        <StatCard label="Segments" value={job.total_segments} />
-        <StatCard label="B-Roll Shots" value={job.total_shots || job.total_results} />
-        <StatCard label="Clips Found" value={job.total_results} />
-        <StatCard
-          label="Min Met"
-          value={job.minimum_results_met ? "Yes" : "No"}
-          accent={job.minimum_results_met}
-        />
-        <StatCard label="Duration" value={`${job.script_duration_minutes} min`} />
-        <StatCard label="API Cost" value={`$${job.api_costs.estimated_cost_usd.toFixed(2)}`} />
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          {job.script_duration_minutes}-minute script &middot;{" "}
+          {job.total_segments} segments &middot;{" "}
+          {job.total_shots || job.total_results} B-roll shots &middot;{" "}
+          {job.segments_with_no_broll} host-on-camera segments
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <StatCard label="Duration" value={`${job.script_duration_minutes} min`} />
+          <StatCard label="Segments" value={job.total_segments} />
+          <StatCard label="B-Roll Shots" value={job.total_shots || job.total_results} />
+          <StatCard label="Clips Found" value={job.total_results} />
+          <StatCard label="API Cost" value={`$${job.api_costs.estimated_cost_usd.toFixed(2)}`} />
+        </div>
+        {job.coverage_assessment?.note && (
+          <p className="text-xs text-muted-foreground italic">
+            {job.coverage_assessment.note}
+          </p>
+        )}
+        {job.warnings && job.warnings.length > 0 && (
+          <div className="space-y-1">
+            {job.warnings.map((w, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>{w.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <Tabs defaultValue="clips" className="w-full">
@@ -378,12 +396,63 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
                   </>
                 )}
                 <LibrarySuggestions segment={segment} />
+                <ExpandShotButton jobId={jobId} segment={segment} />
               </>
             )}
           </CardContent>
         </CollapsibleContent>
       </Card>
     </Collapsible>
+  )
+}
+
+function ExpandShotButton({ jobId, segment }: { jobId: string; segment: Segment }) {
+  const [loading, setLoading] = useState(false)
+  const [status, setStatus] = useState<string | null>(null)
+
+  const handleExpand = async () => {
+    setLoading(true)
+    setStatus(null)
+    try {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+      const res = await fetch(`${apiBase}/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-shots`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId, segment_id: segment.segment_id, count: 1 }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setStatus(data.message || "New shot queued — refresh to see results")
+      } else {
+        setStatus("Failed to request additional shot")
+      }
+    } catch {
+      setStatus("Failed to connect to backend")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="mt-2">
+      {!status ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-xs text-muted-foreground gap-1.5 hover:text-primary"
+          onClick={handleExpand}
+          disabled={loading}
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+          Add another shot for this segment
+        </Button>
+      ) : (
+        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <Check className="w-3.5 h-3.5 text-green-500" />
+          {status}
+        </p>
+      )}
+    </div>
   )
 }
 
