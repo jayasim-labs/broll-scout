@@ -112,6 +112,15 @@ def is_agent_available() -> bool:
     return any(now - t < 30 for t in _active_agents.values())
 
 
+def pending_task_count(task_type: str | None = None) -> int:
+    """Count pending + claimed tasks, optionally filtered by task_type."""
+    return sum(
+        1 for t in _pending.values()
+        if t["status"] in ("pending", "claimed")
+        and (task_type is None or t["task_type"] == task_type)
+    )
+
+
 async def cleanup_stale(max_age: float = 120) -> None:
     """Remove tasks older than max_age seconds that were never completed."""
     async with _lock:

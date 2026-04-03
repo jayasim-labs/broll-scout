@@ -282,18 +282,27 @@ export function useAgentLoop(jobActive: boolean) {
             const hResp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
             const hData = await hResp.json()
             companionOk = hData.status === "ok"
-          } catch { /* not running */ }
+          } catch {
+            await sleep(POLL_INTERVAL_IDLE)
+            continue
+          }
 
           if (!companionOk) {
             await sleep(POLL_INTERVAL_IDLE)
             continue
           }
 
-          const pollResp = await fetch("/api/v1/agent/poll", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ agent_id: "browser-agent" }),
-          })
+          let pollResp: Response
+          try {
+            pollResp = await fetch("/api/v1/agent/poll", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ agent_id: "browser-agent" }),
+            })
+          } catch {
+            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
+            continue
+          }
 
           if (!pollResp.ok) {
             await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
@@ -307,8 +316,6 @@ export function useAgentLoop(jobActive: boolean) {
             continue
           }
 
-          // Execute tasks sequentially to avoid overwhelming the single-threaded companion.
-          // Whisper/clip tasks can take minutes, so running them in parallel blocks everything.
           for (const task of tasks) {
             try {
               const execResp = await fetch(`${COMPANION_URL}/execute`, {
@@ -327,9 +334,8 @@ export function useAgentLoop(jobActive: boolean) {
                   status: "completed",
                   result: execData.results || [],
                 }),
-              })
-            } catch (e) {
-              console.error("Agent task failed:", e)
+              }).catch(() => {})
+            } catch {
               await fetch("/api/v1/agent/result", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -341,8 +347,7 @@ export function useAgentLoop(jobActive: boolean) {
               }).catch(() => {})
             }
           }
-        } catch (e) {
-          console.error("Agent loop error:", e)
+        } catch {
           await sleep(POLL_INTERVAL_IDLE)
         }
       }

@@ -53,10 +53,62 @@ def _log_activity(
     if group:
         entry["group"] = group
     log.append(entry)
-    if len(log) > 500:
-        log = log[-500:]
     existing["activity_log"] = log
     _progress[job_id] = existing
+
+
+def _compact_activity_log(log: list, max_entries: int = 800) -> list:
+    """Compact the activity log for DynamoDB storage while preserving key events.
+
+    Strategy: keep all depth-0/1 headers and group summaries, keep all warnings/errors
+    (icon=alert), keep first+last entry per group of depth-2 successes, and collapse
+    the middle into a count summary.
+    """
+    if len(log) <= max_entries:
+        return log
+
+    important = []
+    group_items: dict[str, list] = {}
+
+    for entry in log:
+        icon = entry.get("icon", "")
+        depth = entry.get("depth", 0)
+        group = entry.get("group", "")
+
+        is_alert = icon == "alert"
+        is_header = depth <= 1
+        is_important = is_alert or is_header or "timed out" in entry.get("text", "").lower()
+
+        if is_important:
+            important.append(entry)
+        elif group:
+            group_items.setdefault(group, []).append(entry)
+        else:
+            important.append(entry)
+
+    compacted = list(important)
+
+    budget = max_entries - len(compacted)
+    num_groups = max(len(group_items), 1)
+    per_group = max(3, budget // num_groups)
+
+    for group_key, items in group_items.items():
+        if len(items) <= per_group:
+            compacted.extend(items)
+        else:
+            compacted.extend(items[:2])
+            skipped = len(items) - 3
+            compacted.append({
+                "time": items[len(items) // 2].get("time", ""),
+                "icon": "clock",
+                "text": f"… {skipped} more events in this group (see full log during processing)",
+                "depth": items[0].get("depth", 2),
+                "group": group_key,
+            })
+            compacted.append(items[-1])
+
+    compacted.sort(key=lambda e: e.get("time", ""))
+    return compacted
 
 
 async def run_pipeline(
@@ -225,6 +277,7 @@ async def run_pipeline(
                     if not cand:
                         transcript_queue.task_done()
                         continue
+                    yt_link = f"https://youtu.be/{vid}"
                     try:
                         t = await transcriber.get_transcript(
                             vid,
@@ -238,15 +291,18 @@ async def run_pipeline(
                         transcript_sources[vid] = source_label
                         short_title = cand.video_title[:45]
                         if t.transcript_text:
-                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}", depth=2, group="search")
+                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label} — {yt_link}", depth=2, group="search")
                         else:
                             failed_fetches.add(vid)
-                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" — no transcript available", depth=2, group="search")
+                            affected = video_to_shots.get(vid, [])
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
                     except Exception:
                         logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
                         transcript_cache[vid] = None
                         transcript_sources[vid] = "error"
                         failed_fetches.add(vid)
+                        short_title = cand.video_title[:45]
+                        _log_activity(job_id, "alert", f"✗ \"{short_title}\" — fetch error — {yt_link}", depth=2, group="search")
 
                 async with progress_lock:
                     transcripts_fetched += 1
@@ -269,19 +325,25 @@ async def run_pipeline(
         )
 
         # All searches complete — no more new videos will be queued.
-        # Wait for all queued transcript fetches to finish (with timeout).
-        TRANSCRIPT_FETCH_TIMEOUT = pipeline_cfg.get("segment_timeout_sec", 300)
+        # Wait for all queued transcript fetches to finish.
+        # Whisper runs serially on companion (~45s each). Worst case all videos
+        # need Whisper; best case most have YouTube captions/cache.
+        # Budget ~15s per video (most will be fast cache/caption hits, some will be Whisper).
+        # Min 5 min, max 30 min.
+        TRANSCRIPT_FETCH_TIMEOUT = min(1800, max(300, len(video_pool) * 15))
+        _log_activity(job_id, "clock", f"Waiting up to {TRANSCRIPT_FETCH_TIMEOUT // 60}m for {len(video_pool)} transcript fetches (Whisper runs serially on companion)", depth=1, group="search")
         try:
             await asyncio.wait_for(
                 transcript_queue.join(),
                 timeout=TRANSCRIPT_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            pending_count = len(video_pool) - len(transcript_cache) - len(failed_fetches)
             logger.error(
-                "Job %s: transcript fetch timed out after %ds — proceeding with %d/%d transcripts",
-                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), len(video_pool),
+                "Job %s: transcript fetch timed out after %ds — %d/%d fetched, %d still pending",
+                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), len(video_pool), pending_count,
             )
-            _log_activity(job_id, "alert", f"Transcript fetch timed out — proceeding with {len(transcript_cache)} of {len(video_pool)} transcripts", depth=1, group="search")
+            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT}s — proceeding with {len(transcript_cache)} of {len(video_pool)} transcripts ({pending_count} still pending, likely waiting for Whisper)", depth=1, group="search")
 
         # Shut down workers cleanly
         for _ in range(NUM_FETCH_WORKERS):
@@ -533,7 +595,7 @@ async def run_pipeline(
         _set_progress(job_id, "completed", 100, "Scouting complete!")
         _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
 
-        final_log = _progress.get(job_id, {}).get("activity_log", [])
+        final_log = _compact_activity_log(_progress.get(job_id, {}).get("activity_log", []))
         await storage.update_job_status(
             job_id, JobStatus.COMPLETE,
             completed_at=datetime.utcnow().isoformat(),
@@ -561,7 +623,7 @@ async def run_pipeline(
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Cancelled after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
-        cancel_log = _progress.get(job_id, {}).get("activity_log", [])
+        cancel_log = _compact_activity_log(_progress.get(job_id, {}).get("activity_log", []))
         await storage.update_job_status(
             job_id, JobStatus.CANCELLED,
             completed_at=datetime.utcnow().isoformat(),
@@ -579,7 +641,7 @@ async def run_pipeline(
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Failed after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
-        fail_log = _progress.get(job_id, {}).get("activity_log", [])
+        fail_log = _compact_activity_log(_progress.get(job_id, {}).get("activity_log", []))
         await storage.update_job_status(
             job_id, JobStatus.FAILED,
             completed_at=datetime.utcnow().isoformat(),

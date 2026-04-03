@@ -50,6 +50,7 @@ DEFAULTS = {
     "api_fallback_enabled": False,
     "confidence_threshold": 0.15,
     "whisper_max_video_duration_min": 60,
+    "avg_whisper_processing_sec": 45,
     "whisper_audio_trim_min": 20,
     "transcript_excerpt_max_words": 200,
 

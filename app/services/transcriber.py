@@ -95,8 +95,9 @@ class TranscriberService:
         max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
         effective_duration = video_duration_seconds or 300
         agent_up = agent_queue.is_agent_available()
-        logger.warning("[transcript] Whisper check for %s: duration=%ds, max=%ds, agent_available=%s",
-                       video_id, effective_duration, max_whisper_duration, agent_up)
+        whisper_queue_depth = agent_queue.pending_task_count("whisper")
+        logger.info("[transcript] Whisper check for %s: duration=%ds, max=%ds, agent=%s, queue_depth=%d",
+                    video_id, effective_duration, max_whisper_duration, agent_up, whisper_queue_depth)
         if effective_duration <= max_whisper_duration:
             try:
                 logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
@@ -169,8 +170,13 @@ class TranscriberService:
             "video_id": video_id,
             "max_duration_min": max_dur_min,
         })
-        timeout = min(600, max(180, duration_seconds + 120))
-        logger.warning("[whisper] Task %s created for %s, waiting %ds", task_id[:8], video_id, timeout)
+        queue_depth = agent_queue.pending_task_count("whisper")
+        avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 45)
+        queue_wait = queue_depth * avg_whisper_sec
+        processing_time = max(180, duration_seconds + 120)
+        timeout = min(1800, queue_wait + processing_time)
+        logger.info("[whisper] Task %s for %s — queue_depth=%d, queue_wait≈%ds, processing≈%ds, timeout=%ds",
+                    task_id[:8], video_id, queue_depth, queue_wait, processing_time, timeout)
         results = await agent_queue.wait_for_result(task_id, timeout=timeout)
         if not results:
             logger.warning("[whisper] Task timed out or empty for %s", video_id)

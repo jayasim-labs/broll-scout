@@ -326,6 +326,32 @@ function ActivityLine({ entry, isLatest, depth }: { entry: ActivityEntry; isLate
   )
 }
 
+function renderTextWithLinks(text: string) {
+  const parts = text.split(/(https?:\/\/[^\s)]+)/)
+  if (parts.length === 1) return text
+  return parts.map((part, i) => {
+    const isUrl = i % 2 === 1
+    if (isUrl) {
+      const label = part.startsWith("https://youtu.be/")
+        ? `🔗 ${part.replace("https://youtu.be/", "")}`
+        : part
+      return (
+        <a
+          key={i}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline decoration-dotted underline-offset-2 hover:text-blue-400 transition-colors"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {label}
+        </a>
+      )
+    }
+    return part ? <span key={i}>{part}</span> : null
+  })
+}
+
 function ActivityLineInner({ entry, isLatest }: { entry: ActivityEntry; isLatest: boolean }) {
   const IconComp = iconMap[entry.icon] || Zap
   const color = iconColor[entry.icon] || "text-muted-foreground"
@@ -343,7 +369,7 @@ function ActivityLineInner({ entry, isLatest }: { entry: ActivityEntry; isLatest
           entry.icon === "terminal" && "font-mono text-[10px] text-lime-400/80",
         )}
       >
-        {entry.text}
+        {renderTextWithLinks(entry.text)}
       </span>
     </>
   )

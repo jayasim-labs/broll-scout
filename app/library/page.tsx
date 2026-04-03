@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { Navbar } from "@/components/navbar"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -9,10 +9,9 @@ import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import {
-  Search, ExternalLink, Copy, Plus, Eye, Star, Clock,
-  Database, FileText, MessageSquare, BarChart3, ChevronDown,
-  ChevronUp, Loader2, Sparkles, Library as LibraryIcon,
-  Film, Filter, X, ArrowUpDown,
+  Search, ExternalLink, Copy, Eye, Star, Clock,
+  Database, FileText, Loader2, Sparkles, Library as LibraryIcon,
+  Film, Filter, X, ArrowUpDown, ChevronDown, ChevronUp,
 } from "lucide-react"
 import type {
   LibraryClip, LibraryStats, LibraryCategoryCount, LibrarySearchResponse,
@@ -93,6 +92,13 @@ export default function LibraryPage() {
   const [searched, setSearched] = useState(false)
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
 
+  // Autocomplete
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [allTitles, setAllTitles] = useState<string[]>([])
+  const searchRef = useRef<HTMLDivElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+
   const fetchStats = useCallback(async () => {
     try {
       const resp = await fetch(`${API_BASE}/library/stats`)
@@ -103,27 +109,27 @@ export default function LibraryPage() {
     } catch { /* silent */ }
   }, [])
 
-  useEffect(() => {
-    fetchStats()
-    doSearch(true)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Actual search function that takes explicit params to avoid stale closures
+  const executeSearch = useCallback(async (params: {
+    q?: string
+    searchMode?: "metadata" | "deep"
+    sortBy?: string
+    rating?: string
+    usedFilter?: string
+    cats?: Set<string>
+    pageNum?: number
+  }) => {
+    const q = (params.q ?? query).trim()
+    const searchMode = params.searchMode ?? mode
+    const sortBy = params.sortBy ?? sort
+    const rating = params.rating ?? minRating
+    const usedFilter = params.usedFilter ?? used
+    const cats = params.cats ?? activeCategories
+    const pageNum = params.pageNum ?? page
 
-  const doSearch = useCallback(async (initial = false) => {
     setLoading(true)
     try {
-      const params = new URLSearchParams()
-      const q = initial ? "" : query.trim()
-      if (q) params.set("q", q)
-      if (activeCategories.size > 0) {
-        params.set("categories", Array.from(activeCategories).join(","))
-      }
-      if (minRating) params.set("min_rating", minRating)
-      if (used) params.set("used", used)
-      params.set("sort", sort)
-      params.set("page", String(page))
-      params.set("per_page", "50")
-
-      if (mode === "deep" && q) {
+      if (searchMode === "deep" && q) {
         const resp = await fetch(`${API_BASE}/library/deep-search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -133,31 +139,57 @@ export default function LibraryPage() {
           const data: LibrarySearchResponse = await resp.json()
           setResults(data.results)
           setTotal(data.total)
-          setStats(data.stats)
+          if (data.stats) setStats(data.stats)
           setCategories(data.categories || [])
         }
       } else {
-        const resp = await fetch(`${API_BASE}/library/search?${params.toString()}`)
+        const urlParams = new URLSearchParams()
+        if (q) urlParams.set("q", q)
+        if (cats.size > 0) urlParams.set("categories", Array.from(cats).join(","))
+        if (rating) urlParams.set("min_rating", rating)
+        if (usedFilter) urlParams.set("used", usedFilter)
+        urlParams.set("sort", sortBy)
+        urlParams.set("page", String(pageNum))
+        urlParams.set("per_page", "50")
+
+        const resp = await fetch(`${API_BASE}/library/search?${urlParams.toString()}`)
         if (resp.ok) {
           const data: LibrarySearchResponse = await resp.json()
           setResults(data.results)
           setTotal(data.total)
-          setStats(data.stats)
+          if (data.stats) setStats(data.stats)
           setCategories(data.categories || [])
         }
       }
     } catch { /* silent */ }
     setLoading(false)
-    if (!initial) setSearched(true)
+    setSearched(true)
   }, [query, mode, sort, minRating, used, activeCategories, page])
+
+  // Initial load
+  useEffect(() => {
+    fetchStats()
+    executeSearch({ pageNum: 1 })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-search when filters/sort/page change (but NOT on query change — that requires Enter/click)
+  useEffect(() => {
+    if (!searched) return
+    executeSearch({ pageNum: page })
+  }, [sort, minRating, used, activeCategories, page]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSearch = () => {
     setPage(1)
-    doSearch()
+    executeSearch({ pageNum: 1 })
+    setShowSuggestions(false)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") handleSearch()
+    if (e.key === "Enter") {
+      handleSearch()
+    } else if (e.key === "Escape") {
+      setShowSuggestions(false)
+    }
   }
 
   const toggleCategory = (cat: string) => {
@@ -167,6 +199,15 @@ export default function LibraryPage() {
       else next.add(cat)
       return next
     })
+    setPage(1)
+  }
+
+  const clearAllFilters = () => {
+    setActiveCategories(new Set())
+    setMinRating("")
+    setUsed("")
+    setSort("relevance")
+    setPage(1)
   }
 
   const copyUrl = async (clip: LibraryClip) => {
@@ -175,6 +216,58 @@ export default function LibraryPage() {
     setCopyFeedback(clip.result_id)
     setTimeout(() => setCopyFeedback(null), 1500)
   }
+
+  // Build autocomplete index from results
+  useEffect(() => {
+    if (results.length === 0) return
+    const titles = new Set<string>()
+    for (const clip of results) {
+      if (clip.video_title) titles.add(clip.video_title)
+      if (clip.channel_name) titles.add(clip.channel_name)
+      const cats = clip.categories || []
+      for (const c of cats) {
+        const label = FIXED_CATEGORIES.find(fc => fc.value === c)?.label ?? c
+        titles.add(label)
+      }
+    }
+    setAllTitles(Array.from(titles))
+  }, [results])
+
+  // Autocomplete filtering
+  const handleQueryChange = (value: string) => {
+    setQuery(value)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      if (value.trim().length >= 2 && allTitles.length > 0) {
+        const lower = value.trim().toLowerCase()
+        const matches = allTitles
+          .filter(t => t.toLowerCase().includes(lower))
+          .slice(0, 8)
+        setSuggestions(matches)
+        setShowSuggestions(matches.length > 0)
+      } else {
+        setShowSuggestions(false)
+      }
+    }, 150)
+  }
+
+  const selectSuggestion = (s: string) => {
+    setQuery(s)
+    setShowSuggestions(false)
+    setPage(1)
+    executeSearch({ q: s, pageNum: 1 })
+  }
+
+  // Close suggestions on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false)
+      }
+    }
+    document.addEventListener("mousedown", handler)
+    return () => document.removeEventListener("mousedown", handler)
+  }, [])
 
   const groupedResults = useMemo(() => {
     const groups = new Map<string, LibraryClip[]>()
@@ -190,7 +283,11 @@ export default function LibraryPage() {
     return groups
   }, [results])
 
+  const hasActiveFilters = activeCategories.size > 0 || minRating || used
+
   const isEmpty = stats && stats.clips_found === 0
+
+  const totalPages = Math.ceil(total / 50)
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -221,18 +318,44 @@ export default function LibraryPage() {
           <EmptyLibrary />
         ) : (
           <>
-            {/* Search bar */}
+            {/* Search bar with autocomplete */}
             <div className="flex flex-col gap-3 mb-4">
               <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <div className="relative flex-1" ref={searchRef}>
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
                   <Input
                     value={query}
-                    onChange={e => setQuery(e.target.value)}
+                    onChange={e => handleQueryChange(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onFocus={() => {
+                      if (suggestions.length > 0 && query.trim().length >= 2) setShowSuggestions(true)
+                    }}
                     placeholder="Search transcripts, topics, channels..."
                     className="pl-10"
                   />
+                  {query && (
+                    <button
+                      onClick={() => { setQuery(""); setShowSuggestions(false) }}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {/* Autocomplete dropdown */}
+                  {showSuggestions && suggestions.length > 0 && (
+                    <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+                      {suggestions.map((s, i) => (
+                        <button
+                          key={i}
+                          onClick={() => selectSuggestion(s)}
+                          className="w-full text-left px-4 py-2 text-sm hover:bg-accent transition-colors truncate"
+                        >
+                          <Search className="w-3 h-3 inline mr-2 text-muted-foreground" />
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <Button onClick={handleSearch} disabled={loading}>
                   {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
@@ -244,7 +367,7 @@ export default function LibraryPage() {
               <div className="flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
                   <button
-                    onClick={() => setMode("metadata")}
+                    onClick={() => { setMode("metadata"); if (searched) { setPage(1); executeSearch({ searchMode: "metadata", pageNum: 1 }) } }}
                     className={cn(
                       "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
                       mode === "metadata" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
@@ -253,7 +376,7 @@ export default function LibraryPage() {
                     Metadata
                   </button>
                   <button
-                    onClick={() => setMode("deep")}
+                    onClick={() => { setMode("deep"); if (searched && query.trim()) { setPage(1); executeSearch({ searchMode: "deep", pageNum: 1 }) } }}
                     className={cn(
                       "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
                       mode === "deep" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
@@ -268,21 +391,32 @@ export default function LibraryPage() {
                     Searches cached transcripts via local LLM — no API calls, 10-30s
                   </span>
                 )}
-                <button
-                  onClick={() => setShowFilters(!showFilters)}
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground ml-auto"
-                >
-                  <Filter className="w-3.5 h-3.5" />
-                  Filters
-                  {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                </button>
+                <div className="flex items-center gap-2 ml-auto">
+                  {hasActiveFilters && (
+                    <button
+                      onClick={clearAllFilters}
+                      className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300"
+                    >
+                      <X className="w-3 h-3" />
+                      Clear filters
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowFilters(!showFilters)}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    <Filter className="w-3.5 h-3.5" />
+                    Filters
+                    {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                </div>
               </div>
             </div>
 
             {/* Category pills */}
             <div className="flex flex-wrap gap-2 mb-4">
               <button
-                onClick={() => setActiveCategories(new Set())}
+                onClick={() => { setActiveCategories(new Set()); setPage(1) }}
                 className={cn(
                   "px-3 py-1 text-xs font-medium rounded-full border transition-colors",
                   activeCategories.size === 0
@@ -318,19 +452,19 @@ export default function LibraryPage() {
                 <FilterSelect
                   label="Min rating"
                   value={minRating}
-                  onChange={setMinRating}
+                  onChange={v => { setMinRating(v); setPage(1) }}
                   options={RATING_OPTIONS}
                 />
                 <FilterSelect
                   label="Used in video"
                   value={used}
-                  onChange={setUsed}
+                  onChange={v => { setUsed(v); setPage(1) }}
                   options={USED_OPTIONS}
                 />
                 <FilterSelect
                   label="Sort by"
                   value={sort}
-                  onChange={setSort}
+                  onChange={v => { setSort(v); setPage(1) }}
                   options={SORT_OPTIONS}
                 />
               </div>
@@ -343,6 +477,9 @@ export default function LibraryPage() {
                   <>
                     <span className="font-medium text-foreground">{total}</span> clips
                     {query.trim() && <> matching &ldquo;{query.trim()}&rdquo;</>}
+                    {activeCategories.size > 0 && (
+                      <> in {Array.from(activeCategories).map(c => FIXED_CATEGORIES.find(fc => fc.value === c)?.label ?? c).join(", ")}</>
+                    )}
                   </>
                 ) : searched ? (
                   "No clips found"
@@ -354,7 +491,7 @@ export default function LibraryPage() {
                 <ArrowUpDown className="w-3.5 h-3.5 text-muted-foreground" />
                 <select
                   value={sort}
-                  onChange={e => setSort(e.target.value)}
+                  onChange={e => { setSort(e.target.value); setPage(1) }}
                   className="text-xs bg-muted border border-border rounded px-2 py-1"
                 >
                   {SORT_OPTIONS.map(o => (
@@ -369,11 +506,11 @@ export default function LibraryPage() {
               <div className="flex flex-col items-center justify-center py-20 gap-3">
                 <Loader2 className="w-8 h-8 animate-spin text-primary" />
                 <span className="text-sm text-muted-foreground">
-                  {mode === "deep" ? "Searching cached transcripts..." : "Searching library..."}
+                  {mode === "deep" ? "Searching cached transcripts via local LLM..." : "Searching library..."}
                 </span>
               </div>
             ) : results.length === 0 && searched ? (
-              <NoResults query={query} />
+              <NoResults query={query} hasFilters={hasActiveFilters} onClear={clearAllFilters} />
             ) : (
               <div className="space-y-8">
                 {Array.from(groupedResults.entries()).map(([category, clips]) => (
@@ -398,27 +535,56 @@ export default function LibraryPage() {
             )}
 
             {/* Pagination */}
-            {total > 50 && (
-              <div className="flex justify-center gap-2 mt-8">
+            {totalPages > 1 && (
+              <div className="flex justify-center items-center gap-2 mt-8">
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page <= 1}
-                  onClick={() => { setPage(p => p - 1); doSearch() }}
+                  disabled={page <= 1 || loading}
+                  onClick={() => setPage(p => p - 1)}
                 >
                   Previous
                 </Button>
-                <span className="text-sm text-muted-foreground flex items-center px-3">
-                  Page {page} of {Math.ceil(total / 50)}
-                </span>
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                    let pageNum: number
+                    if (totalPages <= 7) {
+                      pageNum = i + 1
+                    } else if (page <= 4) {
+                      pageNum = i + 1
+                    } else if (page >= totalPages - 3) {
+                      pageNum = totalPages - 6 + i
+                    } else {
+                      pageNum = page - 3 + i
+                    }
+                    return (
+                      <button
+                        key={pageNum}
+                        onClick={() => setPage(pageNum)}
+                        disabled={loading}
+                        className={cn(
+                          "w-8 h-8 text-xs rounded-md transition-colors",
+                          pageNum === page
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                        )}
+                      >
+                        {pageNum}
+                      </button>
+                    )
+                  })}
+                </div>
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page >= Math.ceil(total / 50)}
-                  onClick={() => { setPage(p => p + 1); doSearch() }}
+                  disabled={page >= totalPages || loading}
+                  onClick={() => setPage(p => p + 1)}
                 >
                   Next
                 </Button>
+                <span className="text-xs text-muted-foreground ml-2">
+                  {total} clips
+                </span>
               </div>
             )}
           </>
@@ -611,7 +777,7 @@ function EmptyLibrary() {
 }
 
 
-function NoResults({ query }: { query: string }) {
+function NoResults({ query, hasFilters, onClear }: { query: string; hasFilters: boolean; onClear: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
       <Search className="w-12 h-12 text-muted-foreground/40 mb-4" />
@@ -622,6 +788,12 @@ function NoResults({ query }: { query: string }) {
           : "Try different filters or run more Scout jobs to grow your library."
         }
       </p>
+      {hasFilters && (
+        <Button variant="outline" size="sm" onClick={onClear} className="mt-4">
+          <X className="w-3.5 h-3.5 mr-1" />
+          Clear all filters
+        </Button>
+      )}
     </div>
   )
 }
