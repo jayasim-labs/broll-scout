@@ -137,14 +137,14 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
       stage: "matching",
       icon: Eye,
       title: "Match & Reject",
-      detail: "Fetches transcripts (cache → YouTube captions → Whisper), then the LLM checks geographic/subject context FIRST — rejects mismatches before finding the peak visual timestamp.",
+      detail: "Fetches transcripts (cache → YouTube captions → Whisper), then your local Qwen3 model (via Ollama) checks geographic/subject context FIRST — rejects mismatches before pinpointing the exact visual timestamp. Falls back to GPT-4o-mini if the local model is unavailable.",
     },
     {
       id: "rank",
       stage: "ranking",
       icon: Sparkles,
       title: "Rank & Audit",
-      detail: "Scores clips by AI confidence, context relevance, views, and recency. Hard-rejects negative keyword hits. Final context audit reviews all clips in one pass.",
+      detail: "Scores each clip on AI confidence, keyword density, context relevance, views, channel authority, caption quality, and recency. Hard-rejects negative keyword hits and context mismatches. Each shot gets exactly one best clip.",
     },
   ]
 
@@ -442,12 +442,12 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
               <p className="text-[10px] text-muted-foreground leading-relaxed">
                 <strong className="text-foreground/80">Example:</strong>{" "}
                 Your script is about North Sentinel Island →{" "}
-                <span className="text-violet-400">GPT-4o</span> translates, extracts context (&quot;Andaman Islands, NOT mainland forests&quot;), creates scene: &quot;Dense tropical forest on the island&quot; with negative keywords [&quot;Telangana&quot;, &quot;safari&quot;] →{" "}
-                <span className="text-blue-400">yt-dlp</span> searches &quot;Sentinel Island tropical forest&quot; (not generic &quot;tropical forest&quot;) →{" "}
+                <span className="text-violet-400">GPT-4o</span> translates, extracts context (&quot;Andaman Islands, NOT mainland forests&quot;), creates scene with 3 shots: &quot;aerial island view&quot;, &quot;dense canopy&quot;, &quot;coral reef&quot; — each with its own search queries &amp; negative keywords [&quot;Telangana&quot;, &quot;safari&quot;] →{" "}
+                <span className="text-blue-400">yt-dlp</span> searches &quot;Sentinel Island tropical forest&quot; per shot (not generic &quot;tropical forest&quot;) →{" "}
                 <span className="text-teal-400">Whisper</span> transcribes audio →{" "}
-                <span className="text-pink-400">LLM</span> checks context first — rejects a Telangana forest video (wrong geography), finds Andaman drone footage at 2:34 →{" "}
-                <span className="text-amber-400">Ranker</span> hard-filters negative keywords, scores context relevance + views + recency →{" "}
-                <span className="text-indigo-400">Audit</span> reviews all clips in one pass, flags any remaining outliers → Editor gets contextually accurate clips.
+                <span className="text-orange-400">Qwen3 (local Ollama)</span> reads each transcript, checks geographic context first — rejects a Telangana forest video (wrong geography), pinpoints Andaman drone footage at 2:34. If the local model is offline, <span className="text-pink-400">GPT-4o-mini</span> takes over →{" "}
+                <span className="text-amber-400">Ranker</span> scores confidence + keyword density + context + views + recency, hard-rejects negative keyword hits →{" "}
+                Editor gets one best clip per shot, contextually accurate.
               </p>
             </div>
           </CardContent>

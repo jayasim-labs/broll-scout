@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -191,25 +192,41 @@ class TranslatorService:
     async def _call_openai(
         self, messages: list[dict], model: str
     ) -> dict:
-        """Make a single OpenAI chat completion request and return parsed JSON."""
+        """Make an OpenAI chat completion request with retry on transient errors."""
         self._last_input_tokens = 0
         self._last_output_tokens = 0
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                self.api_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.7,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            response.raise_for_status()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=180.0) as client:
+                    response = await client.post(
+                        self.api_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": 0.7,
+                            "response_format": {"type": "json_object"},
+                        },
+                    )
+                if response.status_code == 429:
+                    wait = (2 ** attempt) * 5
+                    logger.warning("OpenAI rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                    continue
+                response.raise_for_status()
+                break
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                if attempt < max_retries - 1:
+                    wait = (2 ** attempt) * 3
+                    logger.warning("OpenAI timeout (%s), retrying in %ds (attempt %d/%d)", type(e).__name__, wait, attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
         result = response.json()
         usage = result.get("usage", {})
@@ -232,7 +249,7 @@ class TranslatorService:
         self, messages: list[dict], model: str
     ) -> dict:
         """Single retry for invalid JSON responses."""
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(
                 self.api_url,
                 headers={
