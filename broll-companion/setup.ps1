@@ -14,7 +14,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # --- 1. Check Node.js ---
-Write-Host "[1/6] Checking Node.js..." -ForegroundColor Yellow
+Write-Host "[1/8] Checking Node.js..." -ForegroundColor Yellow
 
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
@@ -33,7 +33,7 @@ if ($major -lt 18) {
 
 # --- 2. Check Python ---
 Write-Host ""
-Write-Host "[2/6] Checking Python..." -ForegroundColor Yellow
+Write-Host "[2/8] Checking Python..." -ForegroundColor Yellow
 
 $pythonCmd = $null
 $pythonExe = Get-Command python -ErrorAction SilentlyContinue
@@ -71,7 +71,7 @@ if (-not $pythonCmd) {
 
 # --- 3. Check yt-dlp and ffmpeg ---
 Write-Host ""
-Write-Host "[3/6] Checking yt-dlp and ffmpeg..." -ForegroundColor Yellow
+Write-Host "[3/8] Checking yt-dlp and ffmpeg..." -ForegroundColor Yellow
 
 $ytdlp = Get-Command yt-dlp -ErrorAction SilentlyContinue
 $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -98,7 +98,7 @@ if (-not $ytdlp -or -not $ffmpeg) {
 
 # --- 4. npm install ---
 Write-Host ""
-Write-Host "[4/6] Installing npm dependencies..." -ForegroundColor Yellow
+Write-Host "[4/8] Installing npm dependencies..." -ForegroundColor Yellow
 
 Set-Location $ProjectRoot
 npm install --legacy-peer-deps
@@ -110,7 +110,7 @@ Write-Host "  OK - npm dependencies installed" -ForegroundColor Green
 
 # --- 5. Environment file ---
 Write-Host ""
-Write-Host "[5/6] Setting up environment (.env.local)..." -ForegroundColor Yellow
+Write-Host "[5/8] Setting up environment (.env.local)..." -ForegroundColor Yellow
 
 $envLocal = Join-Path $ProjectRoot ".env.local"
 $envExample = Join-Path $ProjectRoot ".env.example"
@@ -146,7 +146,7 @@ Write-Host "  OK - Backend: broll.jayasim.com" -ForegroundColor Green
 
 # --- 6. Python companion venv + packages ---
 Write-Host ""
-Write-Host "[6/6] Setting up Python companion..." -ForegroundColor Yellow
+Write-Host "[6/8] Setting up Python companion..." -ForegroundColor Yellow
 
 $activateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
 
@@ -168,8 +168,8 @@ Write-Host "  Activating environment..." -ForegroundColor White
 Write-Host "  Upgrading pip..." -ForegroundColor White
 & python -m pip install --upgrade pip --quiet 2>$null
 
-Write-Host "  Installing flask, flask-cors, yt-dlp, youtube-transcript-api..." -ForegroundColor White
-pip install flask flask-cors yt-dlp youtube-transcript-api --quiet
+Write-Host "  Installing flask, flask-cors, yt-dlp, youtube-transcript-api, ollama..." -ForegroundColor White
+pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: Companion package installation failed." -ForegroundColor Red
     exit 1
@@ -190,7 +190,49 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-# --- 7. Desktop shortcut ---
+# --- 7. Install Ollama (local LLM for timestamp matching) ---
+Write-Host ""
+Write-Host "[7/8] Setting up Ollama (local LLM, free timestamp matching)..." -ForegroundColor Yellow
+
+$ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+if (-not $ollamaCmd) {
+    Write-Host "  Ollama not found. Downloading installer..." -ForegroundColor White
+    $ollamaInstaller = Join-Path $env:TEMP "ollama-setup.exe"
+    try {
+        Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaInstaller -TimeoutSec 120
+        Write-Host "  Running Ollama installer (this may take a minute)..." -ForegroundColor White
+        Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -Wait -ErrorAction Stop
+        Remove-Item $ollamaInstaller -ErrorAction SilentlyContinue
+        $env:PATH = "$env:LOCALAPPDATA\Programs\Ollama;$env:PATH"
+        $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+        if ($ollamaCmd) {
+            Write-Host "  OK - Ollama installed" -ForegroundColor Green
+        } else {
+            Write-Host "  NOTE: Ollama installed but not on PATH yet. Restart terminal after setup." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  Could not install Ollama automatically: $_" -ForegroundColor Yellow
+        Write-Host "  Install manually from: https://ollama.com/download" -ForegroundColor White
+        Write-Host "  Timestamp matching will use GPT-4o-mini (API) as fallback." -ForegroundColor Gray
+    }
+} else {
+    Write-Host "  OK - Ollama already installed" -ForegroundColor Green
+}
+
+$ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+if ($ollamaCmd) {
+    Write-Host "  Pulling Qwen3 8B model (~5GB, one-time download)..." -ForegroundColor White
+    Write-Host "  This may take several minutes on first run." -ForegroundColor Gray
+    & ollama pull qwen3:8b
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  OK - Qwen3 8B model ready" -ForegroundColor Green
+    } else {
+        Write-Host "  NOTE: Model pull failed. You can run 'ollama pull qwen3:8b' later." -ForegroundColor Yellow
+        Write-Host "  Timestamp matching will use GPT-4o-mini (API) as fallback." -ForegroundColor Gray
+    }
+}
+
+# --- 8. Desktop shortcut ---
 Write-Host ""
 Write-Host "  Creating desktop shortcut..." -ForegroundColor Yellow
 try {

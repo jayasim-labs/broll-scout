@@ -37,6 +37,8 @@ DEFAULTS = {
 
     "timestamp_model": "gpt-4o-mini",
     "translation_model": "gpt-4o",
+    "matcher_backend": "auto",
+    "matcher_model": "qwen3:8b",
     "confidence_threshold": 0.15,
     "whisper_max_video_duration_min": 60,
     "whisper_audio_trim_min": 20,

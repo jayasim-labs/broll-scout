@@ -127,6 +127,7 @@ export default function HomePage() {
     enableGeminiExpansion: boolean
     title: string
     projectId?: string
+    category?: string
   }) => {
     setIsLoading(true)
     try {
@@ -139,6 +140,7 @@ export default function HomePage() {
           project_id: options.projectId || null,
           editor_id: 'default_editor',
           enable_gemini_expansion: options.enableGeminiExpansion,
+          category: options.category || null,
         })
       })
 

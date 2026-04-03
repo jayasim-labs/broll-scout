@@ -34,6 +34,8 @@ export interface APICosts {
   gemini_calls: number
   ytdlp_searches: number
   ytdlp_detail_lookups: number
+  local_matcher_calls: number
+  local_matcher_avg_latency_ms: number
   estimated_cost_usd: number
   search_mode?: string
   quota_exhausted?: boolean
@@ -91,6 +93,7 @@ export interface JobResponse {
   english_translation: string | null
   project_id?: string | null
   title?: string | null
+  category?: string | null
   activity_log?: ActivityEntry[]
 }
 
@@ -102,6 +105,36 @@ export interface JobSummary {
   result_count: number
   project_id?: string | null
   title?: string | null
+  category?: string | null
+}
+
+export type VideoCategory =
+  | "history"
+  | "mystery"
+  | "current_affairs"
+  | "science"
+  | "finance"
+  | "ai_tech"
+  | "geo_politics"
+  | "societal_issues"
+  | "sports"
+
+export const CATEGORY_OPTIONS: { value: VideoCategory; label: string }[] = [
+  { value: "history", label: "History" },
+  { value: "mystery", label: "Mystery" },
+  { value: "current_affairs", label: "Current Affairs" },
+  { value: "science", label: "Science" },
+  { value: "finance", label: "Finance" },
+  { value: "ai_tech", label: "AI & Tech" },
+  { value: "geo_politics", label: "Geo Politics" },
+  { value: "societal_issues", label: "Societal Issues" },
+  { value: "sports", label: "Sports" },
+]
+
+export function categoryLabel(value: string | null | undefined): string {
+  if (!value) return ""
+  const found = CATEGORY_OPTIONS.find(c => c.value === value)
+  return found?.label ?? value
 }
 
 export interface ProjectSummary {
@@ -111,6 +144,7 @@ export interface ProjectSummary {
   updated_at: string
   job_count: number
   total_clips: number
+  category?: string | null
 }
 
 export interface ProjectWithJobs extends ProjectSummary {
@@ -161,6 +195,8 @@ export interface PipelineSettings {
   gemini_expanded_queries: number
   timestamp_model: string
   translation_model: string
+  matcher_backend: string
+  matcher_model: string
   confidence_threshold: number
   whisper_max_video_duration_min: number
   whisper_audio_trim_min: number

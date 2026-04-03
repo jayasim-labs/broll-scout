@@ -18,6 +18,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { JobResponse, Segment, RankedResult, ActivityEntry } from "@/lib/types"
+import { categoryLabel } from "@/lib/types"
 
 interface ResultsDisplayProps {
   job: JobResponse
@@ -63,6 +64,17 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
 
   return (
     <div className="space-y-6">
+      {(job.title || job.category) && (
+        <div className="flex items-center gap-3">
+          {job.title && <h2 className="text-lg font-semibold">{job.title}</h2>}
+          {job.category && (
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
+              {categoryLabel(job.category)}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard label="Segments" value={job.total_segments} />
         <StatCard label="Clips Found" value={job.total_results} />
@@ -141,7 +153,15 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
           <p className="text-sm text-muted-foreground mb-2">API & Resource Usage</p>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1.5 text-xs">
             <span className="text-muted-foreground">GPT-4o <span className="text-foreground/70">(translation)</span>: <span className="text-foreground">{job.api_costs.openai_calls}</span> calls</span>
-            <span className="text-muted-foreground">GPT-4o-mini <span className="text-foreground/70">(timestamps)</span>: <span className="text-foreground">{job.api_costs.openai_mini_calls}</span> calls</span>
+            {(job.api_costs.openai_mini_calls || 0) > 0 && (
+              <span className="text-muted-foreground">GPT-4o-mini <span className="text-foreground/70">(timestamps)</span>: <span className="text-foreground">{job.api_costs.openai_mini_calls}</span> calls</span>
+            )}
+            {(job.api_costs.local_matcher_calls || 0) > 0 && (
+              <span className="text-muted-foreground">Local LLM <span className="text-foreground/70">(timestamps, $0)</span>: <span className="text-foreground">{job.api_costs.local_matcher_calls}</span> calls{job.api_costs.local_matcher_avg_latency_ms > 0 ? ` (~${(job.api_costs.local_matcher_avg_latency_ms / 1000).toFixed(1)}s avg)` : ''}</span>
+            )}
+            {(job.api_costs.openai_mini_calls || 0) === 0 && (job.api_costs.local_matcher_calls || 0) === 0 && (
+              <span className="text-muted-foreground">Timestamps: <span className="text-foreground">0</span> calls</span>
+            )}
             <span className="text-muted-foreground">Whisper base <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.whisper_calls || 0}</span> videos{job.api_costs.whisper_minutes > 0 ? ` (${job.api_costs.whisper_minutes.toFixed(1)} min audio)` : ''}</span>
             <span className="text-muted-foreground">yt-dlp searches <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.ytdlp_searches || 0}</span></span>
             <span className="text-muted-foreground">YouTube API: <span className="text-foreground">{job.api_costs.youtube_api_units}</span> units</span>

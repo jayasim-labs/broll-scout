@@ -6,6 +6,7 @@ import httpx
 from app.config import get_settings, DEFAULTS
 from app.models.schemas import Segment, MatchResult, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
+from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,13 @@ If no relevant section exists, return confidence_score: 0.0."""
 
 
 class MatcherService:
-    """Finds peak visual moments in transcripts using GPT-4o-mini."""
+    """Finds peak visual moments in transcripts.
+
+    Supports three backends controlled by the ``matcher_backend`` setting:
+      - ``"auto"``  (default) — try local Ollama via companion, fall back to API
+      - ``"local"`` — always use local Ollama, fail if unavailable
+      - ``"api"``   — always use OpenAI API (original behaviour)
+    """
 
     def __init__(self, pipeline_settings: dict | None = None):
         settings = get_settings()
@@ -72,7 +79,6 @@ class MatcherService:
                 source_flag=TranscriptSource.NONE,
             )
 
-        model = self._get("timestamp_model", "gpt-4o-mini")
         special_instructions = self._get("special_instructions", "")
         max_words = 12000
         words = transcript_text.split()
@@ -98,7 +104,9 @@ class MatcherService:
         except ValueError:
             source_flag = TranscriptSource.NONE
 
-        parsed = await self._call_model(prompt, model, job_id)
+        backend = self._get("matcher_backend", "auto")
+        parsed = await self._route_call(prompt, backend, job_id)
+
         if parsed is None:
             return MatchResult(confidence_score=0.0, source_flag=source_flag)
 
@@ -153,8 +161,84 @@ class MatcherService:
 
         return match
 
-    async def _call_model(
-        self, prompt: str, model: str, job_id: str | None
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    async def _route_call(
+        self, prompt: str, backend: str, job_id: str | None,
+    ) -> dict | None:
+        """Route timestamp matching to local Ollama or OpenAI API."""
+        if backend == "local":
+            return await self._call_local(prompt, job_id)
+
+        if backend == "api":
+            model = self._get("timestamp_model", "gpt-4o-mini")
+            return await self._call_api(prompt, model, job_id)
+
+        # "auto" — try local first, fall back to API
+        if agent_queue.is_agent_available():
+            try:
+                result = await self._call_local(prompt, job_id)
+                if result and result.get("confidence_score", 0) > 0:
+                    return result
+                if result and result.get("matcher_source") == "local_unavailable":
+                    logger.info("Local model unavailable, falling back to API")
+                else:
+                    logger.info("Local model returned zero confidence, falling back to API")
+            except Exception:
+                logger.warning("Local matcher failed, falling back to API")
+
+        model = self._get("timestamp_model", "gpt-4o-mini")
+        return await self._call_api(prompt, model, job_id)
+
+    # ------------------------------------------------------------------
+    # Local Ollama via companion agent
+    # ------------------------------------------------------------------
+
+    async def _call_local(
+        self, prompt: str, job_id: str | None,
+    ) -> dict | None:
+        if not agent_queue.is_agent_available():
+            logger.info("No agent available for local matching")
+            return {"confidence_score": 0, "matcher_source": "local_unavailable"}
+
+        matcher_model = self._get("matcher_model", "qwen3:8b")
+        task_id = await agent_queue.create_task("match_timestamp", {
+            "prompt": prompt,
+            "model": matcher_model,
+        })
+        results = await agent_queue.wait_for_result(task_id, timeout=120)
+        if not results:
+            logger.warning("Local match task timed out or returned empty")
+            return None
+
+        parsed = results[0]
+        source = parsed.get("matcher_source", "local")
+
+        if source in ("local_unavailable", "local_error"):
+            return parsed
+
+        if job_id:
+            costs = get_cost_tracker().get_job_costs(job_id)
+            if costs:
+                latency = parsed.get("matcher_latency_ms", 0)
+                costs.add_local_match(latency)
+
+        logger.info(
+            "Local match: confidence=%.2f model=%s latency=%dms",
+            parsed.get("confidence_score", 0),
+            parsed.get("matcher_model", matcher_model),
+            parsed.get("matcher_latency_ms", 0),
+        )
+        return parsed
+
+    # ------------------------------------------------------------------
+    # OpenAI API (original path)
+    # ------------------------------------------------------------------
+
+    async def _call_api(
+        self, prompt: str, model: str, job_id: str | None,
     ) -> dict | None:
         if not self.api_key:
             logger.error("No OpenAI API key configured")

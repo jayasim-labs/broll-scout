@@ -22,12 +22,19 @@ class TranscriptSource(str, Enum):
     NONE = "no_transcript"
 
 
+VALID_CATEGORIES = [
+    "history", "mystery", "current_affairs", "science",
+    "finance", "ai_tech", "geo_politics", "societal_issues", "sports",
+]
+
+
 class JobCreateRequest(BaseModel):
     script: str = Field(..., min_length=100)
     title: str = Field(default="")
     project_id: Optional[str] = Field(default=None)
     editor_id: str = Field(default="default_editor")
     enable_gemini_expansion: bool = Field(default=False)
+    category: Optional[str] = Field(default=None)
 
     @field_validator("script")
     @classmethod
@@ -35,6 +42,16 @@ class JobCreateRequest(BaseModel):
         if len(v.strip()) < 100:
             raise ValueError("Script must be at least 100 characters")
         return v.strip()
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v and v not in VALID_CATEGORIES:
+            raise ValueError(f"Invalid category: {v}")
+        return v or None
 
 
 class ProjectSummary(BaseModel):
@@ -44,6 +61,7 @@ class ProjectSummary(BaseModel):
     updated_at: str
     job_count: int = 0
     total_clips: int = 0
+    category: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -53,6 +71,7 @@ class ProjectResponse(BaseModel):
     updated_at: str
     job_count: int = 0
     total_clips: int = 0
+    category: Optional[str] = None
     jobs: List["JobSummary"] = Field(default_factory=list)
 
 
@@ -201,6 +220,7 @@ class JobResponse(BaseModel):
     english_translation: Optional[str] = None
     project_id: Optional[str] = None
     title: Optional[str] = None
+    category: Optional[str] = None
     activity_log: List[dict] = Field(default_factory=list)
 
 
@@ -212,6 +232,7 @@ class JobSummary(BaseModel):
     result_count: int = 0
     project_id: Optional[str] = None
     title: Optional[str] = None
+    category: Optional[str] = None
 
 
 class JobListResponse(BaseModel):
@@ -220,6 +241,7 @@ class JobListResponse(BaseModel):
 
 class ProjectCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
+    category: Optional[str] = Field(default=None)
 
 
 class ProjectListResponse(BaseModel):

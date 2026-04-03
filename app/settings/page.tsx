@@ -745,7 +745,37 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <Label className="text-sm">Timestamp model</Label>
+              <Label className="text-sm">Matcher backend</Label>
+              <Select value={settings.matcher_backend || "auto"} onValueChange={(v) => onChange("matcher_backend", v)}>
+                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto — local Ollama first, fall back to API</SelectItem>
+                  <SelectItem value="local">Local only — Ollama via companion ($0 cost)</SelectItem>
+                  <SelectItem value="api">API only — OpenAI GPT-4o-mini</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Auto tries the local Qwen3 model via Ollama (free), and falls back to GPT-4o-mini if the companion isn&apos;t running or the model isn&apos;t available.
+              </p>
+            </div>
+            <div>
+              <Label className="text-sm">Local LLM model</Label>
+              <Select value={settings.matcher_model || "qwen3:8b"} onValueChange={(v) => onChange("matcher_model", v)}>
+                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="qwen3:8b">Qwen3 8B (~5GB, recommended)</SelectItem>
+                  <SelectItem value="qwen3:4b">Qwen3 4B (~2.5GB, faster, less accurate)</SelectItem>
+                  <SelectItem value="llama3.3:8b">Llama 3.3 8B (~4.7GB)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Used when matcher backend is &quot;auto&quot; or &quot;local&quot;. Requires Ollama installed and the model pulled (e.g., <code className="text-[10px]">ollama pull qwen3:8b</code>).
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="text-sm">API timestamp model (fallback)</Label>
               <Select value={settings.timestamp_model} onValueChange={(v) => onChange("timestamp_model", v)}>
                 <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -754,7 +784,7 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground/70 mt-1">
-                Called once per candidate video (30–80 per job). GPT-4o-mini is 17× cheaper and handles structured JSON extraction well.
+                Used when backend is &quot;api&quot; or as fallback in &quot;auto&quot; mode. Called once per candidate video (30–80 per job).
               </p>
             </div>
             <div>

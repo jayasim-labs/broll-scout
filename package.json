@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "dev": "lsof -ti:3000,3001,9876 | xargs kill -9 2>/dev/null; cd broll-companion && (.venv/bin/python companion.py &) && cd .. && next dev",
+    "dev": "bash scripts/dev.sh",
     "lint": "eslint .",
     "start": "next start"
   },

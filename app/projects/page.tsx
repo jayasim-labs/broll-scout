@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type { ProjectSummary, ProjectWithJobs, JobSummary } from "@/lib/types"
+import { categoryLabel } from "@/lib/types"
 
 const API = "/api/v1"
 
@@ -323,7 +324,14 @@ function ProjectCard({
                   onClick={(e) => e.stopPropagation()}
                 />
               ) : (
-                <CardTitle className="text-base truncate">{project.title}</CardTitle>
+                <div className="flex items-center gap-2 min-w-0">
+                  <CardTitle className="text-base truncate">{project.title}</CardTitle>
+                  {project.category && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium shrink-0">
+                      {categoryLabel(project.category)}
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </button>

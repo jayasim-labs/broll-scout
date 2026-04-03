@@ -37,6 +37,8 @@ class JobCosts:
     youtube_api_units: int = 0
     google_cse_calls: int = 0
     gemini_calls: int = 0
+    local_matcher_calls: int = 0
+    local_matcher_total_latency_ms: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_gpt4o(self, input_tokens: int, output_tokens: int) -> None:
@@ -72,6 +74,11 @@ class JobCosts:
         with self._lock:
             self.gemini_calls += 1
 
+    def add_local_match(self, latency_ms: int = 0) -> None:
+        with self._lock:
+            self.local_matcher_calls += 1
+            self.local_matcher_total_latency_ms += latency_ms
+
     def calculate_cost(self) -> float:
         cost = 0.0
         cost += (self.openai_gpt4o_input_tokens / 1000) * PRICING["gpt4o_input_per_1k"]
@@ -98,6 +105,11 @@ class JobCosts:
             "youtube_api_units": self.youtube_api_units,
             "google_cse_calls": self.google_cse_calls,
             "gemini_calls": self.gemini_calls,
+            "local_matcher_calls": self.local_matcher_calls,
+            "local_matcher_avg_latency_ms": (
+                round(self.local_matcher_total_latency_ms / self.local_matcher_calls)
+                if self.local_matcher_calls > 0 else 0
+            ),
             "estimated_cost_usd": self.calculate_cost(),
         }
 

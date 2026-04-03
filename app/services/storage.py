@@ -56,6 +56,7 @@ class StorageService:
         self, job_id: str, script_hash: str,
         editor_id: str = "default_editor", script_language: str = "ta",
         project_id: Optional[str] = None, title: Optional[str] = None,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         item = {
             "job_id": job_id,
@@ -72,6 +73,7 @@ class StorageService:
             "english_translation": None,
             "project_id": project_id,
             "title": title,
+            "category": category,
         }
         try:
             await self._run(self._table("jobs").put_item, Item=item)
@@ -210,6 +212,7 @@ class StorageService:
                 english_translation=item.get("english_translation"),
                 project_id=item.get("project_id"),
                 title=item.get("title"),
+                category=item.get("category"),
                 activity_log=item.get("activity_log", []),
             )
         except ClientError:
@@ -221,7 +224,7 @@ class StorageService:
             resp = await self._run(
                 self._table("jobs").scan,
                 Limit=min(limit, 100),
-                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title",
+                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category",
                 ExpressionAttributeNames={"#st": "status"},
             )
             items = resp.get("Items", [])
@@ -235,6 +238,7 @@ class StorageService:
                     result_count=int(i.get("result_count", 0)),
                     project_id=i.get("project_id"),
                     title=i.get("title"),
+                    category=i.get("category"),
                 )
                 for i in items[:limit]
             ]
@@ -265,7 +269,10 @@ class StorageService:
         except ClientError:
             logger.exception("Failed to store segments for %s", job_id)
 
-    async def store_results(self, job_id: str, results: List[RankedResult]) -> None:
+    async def store_results(
+        self, job_id: str, results: List[RankedResult],
+        category: Optional[str] = None,
+    ) -> None:
         if not results:
             return
         try:
@@ -274,7 +281,7 @@ class StorageService:
                 batch = results[i:i + 25]
                 with table.batch_writer() as writer:
                     for r in batch:
-                        writer.put_item(Item={
+                        item = {
                             "job_id": job_id,
                             "result_id": r.result_id,
                             "segment_id": r.segment_id,
@@ -298,7 +305,10 @@ class StorageService:
                             "editor_rating": r.editor_rating,
                             "clip_used": r.clip_used,
                             "editor_notes": r.editor_notes,
-                        })
+                        }
+                        if category:
+                            item["category"] = category
+                        writer.put_item(Item=item)
         except ClientError:
             logger.exception("Failed to store results for %s", job_id)
 
@@ -424,9 +434,11 @@ class StorageService:
 
     # ─── Project CRUD ───
 
-    async def create_project(self, project_id: str, title: str) -> Dict[str, Any]:
+    async def create_project(
+        self, project_id: str, title: str, category: Optional[str] = None,
+    ) -> Dict[str, Any]:
         now = datetime.utcnow().isoformat()
-        item = {
+        item: Dict[str, Any] = {
             "project_id": project_id,
             "title": title,
             "created_at": now,
@@ -434,6 +446,8 @@ class StorageService:
             "job_count": 0,
             "total_clips": 0,
         }
+        if category:
+            item["category"] = category
         try:
             await self._run(self._table("projects").put_item, Item=item)
         except ClientError:
@@ -485,6 +499,7 @@ class StorageService:
                     updated_at=i.get("updated_at", ""),
                     job_count=live_counts.get(i.get("project_id", ""), (0, 0))[0] or int(i.get("job_count", 0)),
                     total_clips=live_counts.get(i.get("project_id", ""), (0, 0))[1] or int(i.get("total_clips", 0)),
+                    category=i.get("category"),
                 )
                 for i in items[:limit]
             ]

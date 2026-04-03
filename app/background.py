@@ -66,6 +66,7 @@ async def run_pipeline(
     enable_gemini_expansion: bool = False,
     project_id: str | None = None,
     title: str | None = None,
+    category: str | None = None,
 ) -> None:
     """Full pipeline: translate -> search -> match -> rank -> store."""
     storage = get_storage()
@@ -79,7 +80,7 @@ async def run_pipeline(
     script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
 
     cost_tracker.start_job(job_id)
-    await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title)
+    await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title, category=category)
 
     try:
         # --- Stage 1: Translation ---
@@ -330,7 +331,7 @@ async def run_pipeline(
             _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes{status_note}", group="rank")
         else:
             _log_activity(job_id, "alert", "No clips found. Ensure the companion app is running so yt-dlp can search and Whisper can transcribe audio locally.", group="rank")
-        await storage.store_results(job_id, all_results)
+        await storage.store_results(job_id, all_results, category=category)
 
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}

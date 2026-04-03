@@ -8,13 +8,15 @@ import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import type { ProjectSummary } from "@/lib/types"
+import type { ProjectSummary, VideoCategory } from "@/lib/types"
+import { CATEGORY_OPTIONS } from "@/lib/types"
 
 interface ScriptInputProps {
   onSubmit: (script: string, options: {
     enableGeminiExpansion: boolean
     title: string
     projectId?: string
+    category?: string
   }) => void
   isLoading: boolean
   projects?: ProjectSummary[]
@@ -27,6 +29,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(
     preselectedProjectId ?? undefined
   )
+  const [category, setCategory] = useState<VideoCategory | "">("")
   const [enableGeminiExpansion, setEnableGeminiExpansion] = useState(false)
 
   const charCount = script.length
@@ -40,10 +43,12 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
   const handleSubmit = () => {
     if (charCount < 100) return
     if (!title.trim() && !selectedProjectId) return
+    if (!category) return
     onSubmit(script, {
       enableGeminiExpansion,
       title: title.trim(),
       projectId: selectedProjectId,
+      category: category || undefined,
     })
   }
 
@@ -59,7 +64,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
     reader.readAsText(file)
   }
 
-  const isValid = charCount >= 100 && (title.trim() || selectedProjectId)
+  const isValid = charCount >= 100 && (title.trim() || selectedProjectId) && !!category
 
   return (
     <div className="space-y-6">
@@ -105,7 +110,10 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                     } else {
                       setSelectedProjectId(v)
                       const proj = projects.find(p => p.project_id === v)
-                      if (proj) setTitle(proj.title)
+                      if (proj) {
+                        setTitle(proj.title)
+                        if (proj.category) setCategory(proj.category as VideoCategory)
+                      }
                     }
                   }}
                   className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
@@ -138,6 +146,28 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
             )}
             <p className="text-[11px] text-muted-foreground">
               Each script becomes a job inside a project folder. You can add multiple scripts to the same project.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="category-select" className="text-sm font-medium">
+              Category <span className="text-destructive">*</span>
+            </Label>
+            <select
+              id="category-select"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as VideoCategory | "")}
+              className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="">Select a category...</option>
+              {CATEGORY_OPTIONS.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground">
+              Tag this project for indexing — helps organize and search across your B-roll library.
             </p>
           </div>
 

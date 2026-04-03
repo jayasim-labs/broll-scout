@@ -115,20 +115,24 @@ async def create_job(
 
     project_id = body.project_id
     title = body.title.strip() if body.title else ""
+    category = body.category
 
     if not project_id and title:
         project_id = str(uuid.uuid4())
-        await storage.create_project(project_id, title)
+        await storage.create_project(project_id, title, category=category)
     elif project_id:
         existing = await storage.get_project(project_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Project not found")
+        if not category:
+            category = existing.get("category")
 
     task = asyncio.create_task(run_pipeline(
         job_id, body.script, body.editor_id,
         enable_gemini_expansion=body.enable_gemini_expansion,
         project_id=project_id,
         title=title,
+        category=category,
     ))
     _running_tasks[job_id] = task
     task.add_done_callback(lambda t: _running_tasks.pop(job_id, None))
@@ -137,6 +141,7 @@ async def create_job(
         "job_id": job_id,
         "project_id": project_id,
         "title": title,
+        "category": category,
         "status": "processing",
         "estimated_time_seconds": 120,
     }
@@ -372,8 +377,8 @@ async def create_project(
     _verify_key(x_api_key)
     storage = get_storage()
     project_id = str(uuid.uuid4())
-    await storage.create_project(project_id, body.title.strip())
-    return {"project_id": project_id, "title": body.title.strip()}
+    await storage.create_project(project_id, body.title.strip(), category=body.category)
+    return {"project_id": project_id, "title": body.title.strip(), "category": body.category}
 
 
 @app.get("/api/v1/projects/{project_id}")
@@ -398,6 +403,7 @@ async def get_project(
         updated_at=proj.get("updated_at", ""),
         job_count=len(project_jobs),
         total_clips=sum(j.result_count for j in project_jobs),
+        category=proj.get("category"),
         jobs=project_jobs,
     )
 

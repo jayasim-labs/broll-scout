@@ -10,19 +10,28 @@ Start:  python companion.py
 Stop:   Ctrl+C  (or quit from system tray)
 
 Prerequisites:
-  pip install flask flask-cors
+  pip install flask flask-cors ollama
   brew install yt-dlp   # or: pip install yt-dlp
+  ollama pull qwen3:8b
 """
 
+import atexit
 import json
 import logging
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+
+try:
+    import ollama as ollama_client
+    _ollama_available = True
+except ImportError:
+    _ollama_available = False
 
 app = Flask(__name__)
 _default_cors = [
@@ -42,6 +51,81 @@ log = logging.getLogger("companion")
 
 YTDLP_TIMEOUT = 60
 _executor = ThreadPoolExecutor(max_workers=4)
+
+# ---------------------------------------------------------------------------
+# Ollama (local LLM) configuration
+# ---------------------------------------------------------------------------
+MATCHER_MODEL = os.environ.get("BROLL_MATCHER_MODEL", "qwen3:8b")
+_ollama_process = None
+_ollama_server_ready = False
+_ollama_model_ready = False
+
+
+def ensure_ollama_running() -> bool:
+    """Start Ollama server if not already running. Called on companion startup."""
+    global _ollama_process, _ollama_server_ready
+    if not _ollama_available:
+        log.warning("ollama Python package not installed — local matching disabled")
+        return False
+    try:
+        ollama_client.list()
+        _ollama_server_ready = True
+        log.info("Ollama server already running")
+        return True
+    except Exception:
+        pass
+
+    try:
+        log.info("Starting Ollama server...")
+        _ollama_process = subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(30):
+            time.sleep(1)
+            try:
+                ollama_client.list()
+                _ollama_server_ready = True
+                log.info("Ollama server started (PID: %d)", _ollama_process.pid)
+                return True
+            except Exception:
+                continue
+        log.warning("Ollama server did not start within 30 seconds")
+        return False
+    except FileNotFoundError:
+        log.warning("Ollama binary not found — install from https://ollama.com")
+        return False
+    except Exception as e:
+        log.warning("Failed to start Ollama server: %s", e)
+        return False
+
+
+def ensure_model_loaded() -> bool:
+    """Check if the matcher model is pulled locally."""
+    global _ollama_model_ready
+    if not _ollama_available or not _ollama_server_ready:
+        return False
+    try:
+        models = ollama_client.list()
+        model_names = [m.model for m in models.models]
+        base_name = MATCHER_MODEL.split(":")[0]
+        if any(base_name in m for m in model_names):
+            _ollama_model_ready = True
+            log.info("Model %s ready", MATCHER_MODEL)
+            return True
+        log.warning("Model %s not found. Run: ollama pull %s", MATCHER_MODEL, MATCHER_MODEL)
+        return False
+    except Exception:
+        return False
+
+
+@atexit.register
+def _cleanup_ollama():
+    """Stop Ollama server if we started it."""
+    if _ollama_process and _ollama_process.poll() is None:
+        log.info("Stopping Ollama server (PID: %d)...", _ollama_process.pid)
+        _ollama_process.terminate()
 
 # ---------------------------------------------------------------------------
 # Browser cookie configuration
@@ -97,23 +181,49 @@ def _detect_cookie_support() -> None:
 
 @app.route("/health")
 def health():
+    result = {"status": "ok", "cookie_status": _cookie_status}
+
+    # yt-dlp
     try:
         proc = subprocess.run(
             ["yt-dlp", "--version"],
             capture_output=True, text=True, timeout=5,
         )
-        return jsonify({
-            "status": "ok",
-            "ytdlp_version": proc.stdout.strip(),
-            "cookie_status": _cookie_status,
-        })
+        result["ytdlp_version"] = proc.stdout.strip()
+        result["ytdlp_ok"] = True
     except FileNotFoundError:
-        return jsonify({
-            "status": "error",
-            "message": "yt-dlp not installed. Run: pip install yt-dlp",
-        }), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        result["ytdlp_ok"] = False
+    except Exception:
+        result["ytdlp_ok"] = False
+
+    # ffmpeg
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        first_line = proc.stdout.split("\n")[0] if proc.stdout else ""
+        result["ffmpeg_version"] = first_line.split(" ")[2] if "version" in first_line else first_line[:40]
+        result["ffmpeg_ok"] = True
+    except FileNotFoundError:
+        result["ffmpeg_ok"] = False
+    except Exception:
+        result["ffmpeg_ok"] = False
+
+    # Whisper
+    try:
+        import whisper as _whisper_check  # noqa: F811
+        result["whisper_ok"] = True
+    except ImportError:
+        result["whisper_ok"] = False
+
+    # Ollama + model
+    result["ollama_available"] = _ollama_available
+    result["ollama_server"] = "running" if _ollama_server_ready else "not running"
+    result["matcher_model"] = MATCHER_MODEL
+    result["model_loaded"] = _ollama_model_ready
+
+    return jsonify(result)
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -158,6 +268,9 @@ def execute():
         results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
     elif task_type == "whisper":
         results = whisper_transcribe(payload["video_id"], payload.get("max_duration_min", 60))
+    elif task_type == "match_timestamp":
+        result = ollama_match_timestamp(payload)
+        return jsonify({"results": [result]})
     elif task_type == "clip":
         result = clip_download(
             payload["video_id"],
@@ -344,6 +457,70 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
         return [{"video_id": video_id, "transcript": transcript_text, "source": "whisper_transcription"}]
 
 
+def ollama_match_timestamp(payload: dict) -> dict:
+    """Run timestamp matching locally using Ollama."""
+    if not _ollama_available or not _ollama_server_ready or not _ollama_model_ready:
+        return {
+            "start_time_seconds": 0, "end_time_seconds": 0,
+            "excerpt": "", "confidence_score": 0.0,
+            "relevance_note": "Local model not available",
+            "the_hook": "", "matcher_source": "local_unavailable",
+        }
+
+    model = payload.get("model", MATCHER_MODEL)
+    prompt = payload.get("prompt", "")
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "start_time_seconds": {"type": "integer"},
+            "end_time_seconds": {"type": "integer"},
+            "excerpt": {"type": "string"},
+            "confidence_score": {"type": "number"},
+            "relevance_note": {"type": "string"},
+            "the_hook": {"type": "string"},
+        },
+        "required": [
+            "start_time_seconds", "end_time_seconds",
+            "excerpt", "confidence_score",
+            "relevance_note", "the_hook",
+        ],
+    }
+
+    start_t = time.time()
+    try:
+        response = ollama_client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are the Viral B-Roll Extractor. Return JSON only. /nothink"},
+                {"role": "user", "content": prompt},
+            ],
+            format=schema,
+            options={
+                "temperature": 0,
+                "num_ctx": 32768,
+                "num_predict": 512,
+            },
+        )
+        elapsed_ms = int((time.time() - start_t) * 1000)
+        result = json.loads(response["message"]["content"])
+        result["matcher_source"] = "local"
+        result["matcher_model"] = model
+        result["matcher_latency_ms"] = elapsed_ms
+        log.info("Local match done in %dms (model=%s, confidence=%.2f)",
+                 elapsed_ms, model, result.get("confidence_score", 0))
+        return result
+    except Exception as e:
+        elapsed_ms = int((time.time() - start_t) * 1000)
+        log.error("Ollama match failed after %dms: %s", elapsed_ms, e)
+        return {
+            "start_time_seconds": 0, "end_time_seconds": 0,
+            "excerpt": "", "confidence_score": 0.0,
+            "relevance_note": f"Local model error: {str(e)[:100]}",
+            "the_hook": "", "matcher_source": "local_error",
+        }
+
+
 def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_dir: str | None = None) -> dict:
     """Download a clipped section of a YouTube video using yt-dlp --download-sections."""
     import os
@@ -438,9 +615,23 @@ def _normalize(data: dict) -> dict:
 if __name__ == "__main__":
     port = 9876
     log.info("B-Roll Scout Companion starting on http://127.0.0.1:%d", port)
+
     log.info("Detecting browser cookies (default: %s)...", COOKIE_BROWSER)
     _detect_cookie_support()
     log.info("Cookie status: %s", _cookie_status)
+
+    log.info("Matcher model: %s", MATCHER_MODEL)
+    ollama_ok = ensure_ollama_running()
+    if ollama_ok:
+        model_ok = ensure_model_loaded()
+        if model_ok:
+            log.info("Local LLM ready — timestamp matching will use %s ($0 cost)", MATCHER_MODEL)
+        else:
+            log.warning("Model not pulled — run: ollama pull %s", MATCHER_MODEL)
+            log.warning("Timestamp matching will fall back to GPT-4o-mini via API")
+    else:
+        log.warning("Ollama not available — timestamp matching will use GPT-4o-mini via API")
+
     log.info("CORS allowed origins: %s", _default_cors)
     log.info("Keep this running while your B-Roll Scout tab is open in the browser")
     app.run(host="127.0.0.1", port=port, threaded=True)

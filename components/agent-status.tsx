@@ -1,12 +1,12 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { Wifi, WifiOff, Download, X } from "lucide-react"
+import { Wifi, WifiOff, Download, X, ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const COMPANION_URL = "http://localhost:9876"
-const POLL_INTERVAL_ACTIVE = 500    // fast polling when job is running
-const POLL_INTERVAL_IDLE = 10000    // slow polling when no job
+const POLL_INTERVAL_ACTIVE = 500
+const POLL_INTERVAL_IDLE = 10000
 const HEALTH_CHECK_INTERVAL = 15000
 
 type AgentState = "connected" | "disconnected" | "checking"
@@ -14,13 +14,21 @@ type AgentState = "connected" | "disconnected" | "checking"
 interface CompanionHealth {
   status: string
   ytdlp_version?: string
+  ytdlp_ok?: boolean
+  ffmpeg_ok?: boolean
+  ffmpeg_version?: string
+  whisper_ok?: boolean
   cookie_status?: string
+  ollama_available?: boolean
+  ollama_server?: string
+  matcher_model?: string
+  model_loaded?: boolean
 }
 
 export function AgentStatusBadge() {
   const [state, setState] = useState<AgentState>("checking")
-  const [version, setVersion] = useState<string>("")
-  const [cookieStatus, setCookieStatus] = useState<string>("")
+  const [health, setHealth] = useState<CompanionHealth | null>(null)
+  const [showPanel, setShowPanel] = useState(false)
 
   useEffect(() => {
     checkCompanion()
@@ -28,50 +36,153 @@ export function AgentStatusBadge() {
     return () => clearInterval(interval)
   }, [])
 
+  useEffect(() => {
+    if (!showPanel) return
+    function handleClick(e: MouseEvent) {
+      const target = e.target as HTMLElement
+      if (!target.closest("[data-agent-panel]")) setShowPanel(false)
+    }
+    document.addEventListener("click", handleClick)
+    return () => document.removeEventListener("click", handleClick)
+  }, [showPanel])
+
   async function checkCompanion() {
     try {
       const resp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
       const data: CompanionHealth = await resp.json()
-      if (data.status === "ok") {
+      if (data.status === "ok" || data.ytdlp_ok) {
         setState("connected")
-        setVersion(data.ytdlp_version || "")
-        setCookieStatus(data.cookie_status || "")
+        // Back-compat: older companion doesn't send *_ok booleans
+        if (data.ytdlp_version && data.ytdlp_ok === undefined) {
+          data.ytdlp_ok = true
+        }
+        setHealth(data)
       } else {
         setState("disconnected")
+        setHealth(null)
       }
     } catch {
       setState("disconnected")
+      setHealth(null)
     }
   }
 
   if (state === "checking") return null
 
-  const cookieOk = cookieStatus.startsWith("active")
+  const activeCount = health
+    ? [health.ytdlp_ok, health.ffmpeg_ok, health.whisper_ok, health.model_loaded].filter(Boolean).length
+    : 0
 
   return (
-    <div
-      className={cn(
-        "flex items-center gap-1.5 text-xs px-2 py-1 rounded-full",
-        state === "connected"
-          ? "bg-emerald-500/10 text-emerald-400"
-          : "bg-muted text-muted-foreground"
+    <div className="relative" data-agent-panel>
+      <button
+        onClick={() => setShowPanel(!showPanel)}
+        className={cn(
+          "flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full transition-colors",
+          state === "connected"
+            ? "bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+            : "bg-muted text-muted-foreground hover:bg-muted/80"
+        )}
+      >
+        {state === "connected" ? (
+          <Wifi className="w-3 h-3" />
+        ) : (
+          <WifiOff className="w-3 h-3" />
+        )}
+        <span className="hidden sm:inline">
+          {state === "connected"
+            ? `Agent · ${activeCount}/4`
+            : "No Agent"}
+        </span>
+        <ChevronDown className={cn("w-3 h-3 transition-transform", showPanel && "rotate-180")} />
+      </button>
+
+      {showPanel && (
+        <div className="absolute right-0 top-full mt-2 w-72 bg-popover border border-border rounded-lg shadow-xl z-50 p-3 space-y-2.5">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-semibold text-foreground">Local Agents</span>
+            {state === "connected" ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">Connected</span>
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400">Offline</span>
+            )}
+          </div>
+
+          {state === "disconnected" ? (
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Companion app not running. Start <code className="text-[10px] bg-secondary px-1 rounded">companion.py</code> or double-click the Desktop shortcut.
+            </p>
+          ) : health && (
+            <div className="space-y-1.5">
+              <AgentRow
+                name="yt-dlp"
+                detail={health.ytdlp_ok ? `v${health.ytdlp_version}` : "Not installed"}
+                ok={!!health.ytdlp_ok}
+                description="YouTube search & video download"
+              />
+              <AgentRow
+                name="ffmpeg"
+                detail={health.ffmpeg_ok ? (health.ffmpeg_version || "installed") : "Not installed"}
+                ok={!!health.ffmpeg_ok}
+                description="Video clipping & audio extraction"
+              />
+              <AgentRow
+                name="Whisper"
+                detail={health.whisper_ok ? "base model" : "Not installed"}
+                ok={!!health.whisper_ok}
+                description="Local speech-to-text transcription"
+              />
+              <AgentRow
+                name={health.matcher_model?.split(":")[0] || "Qwen3"}
+                detail={
+                  health.model_loaded
+                    ? health.matcher_model || "qwen3:8b"
+                    : health.ollama_server === "running"
+                      ? "Model not pulled"
+                      : "Ollama not running"
+                }
+                ok={!!health.model_loaded}
+                description="Local LLM for timestamp matching ($0)"
+              />
+              {health.cookie_status && health.cookie_status !== "disabled" && (
+                <div className="pt-1 border-t border-border/50">
+                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                    <span>Cookies: {health.cookie_status}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
-      title={
-        state === "connected"
-          ? `Local agent connected (yt-dlp ${version})${cookieStatus ? ` · Cookies: ${cookieStatus}` : ''}`
-          : "Local agent not detected"
-      }
-    >
-      {state === "connected" ? (
-        <Wifi className="w-3 h-3" />
-      ) : (
-        <WifiOff className="w-3 h-3" />
-      )}
-      <span className="hidden sm:inline">
-        {state === "connected"
-          ? `Agent${cookieOk ? ' · 🍪' : ''}`
-          : "No agent"}
-      </span>
+    </div>
+  )
+}
+
+function AgentRow({ name, detail, ok, description }: {
+  name: string
+  detail: string
+  ok: boolean
+  description: string
+}) {
+  return (
+    <div className="flex items-center gap-2.5 py-1">
+      <div className={cn(
+        "w-2 h-2 rounded-full shrink-0",
+        ok ? "bg-emerald-400" : "bg-red-400/60"
+      )} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-medium text-foreground">{name}</span>
+          <span className={cn(
+            "text-[10px] font-mono",
+            ok ? "text-muted-foreground" : "text-red-400/80"
+          )}>
+            {detail}
+          </span>
+        </div>
+        <p className="text-[10px] text-muted-foreground/60 leading-tight">{description}</p>
+      </div>
     </div>
   )
 }
