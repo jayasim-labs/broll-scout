@@ -1273,6 +1273,658 @@ class TestTranscriberWhisperFallback:
 # 19d. Gemini expansion toggle
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 19e. validate_shot_coverage — quality checks (not quantity enforcement)
+# ---------------------------------------------------------------------------
+
+class TestValidateShotCoverage:
+
+    def test_no_warnings_for_healthy_segments(self):
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Intro", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+            Segment(segment_id="seg_002", title="Body", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=120, broll_count=2),
+        ]
+        warnings = _validate_shot_coverage(segments, {})
+        assert warnings == []
+
+    def test_warns_long_segment_with_single_shot(self):
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Very long section", summary="S",
+                    visual_need="v", emotional_tone="calm", key_terms=["a"],
+                    search_queries=["a"], estimated_duration_seconds=200, broll_count=1),
+        ]
+        warnings = _validate_shot_coverage(segments, {"warn_long_no_broll_sec": 180})
+        assert len(warnings) == 1
+        assert "seg_001" in warnings[0]["segment_id"]
+        assert warnings[0]["severity"] == "info"
+
+    def test_no_warning_for_long_segment_with_multiple_shots(self):
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Long but covered", summary="S",
+                    visual_need="v", emotional_tone="calm", key_terms=["a"],
+                    search_queries=["a"], estimated_duration_seconds=250, broll_count=3),
+        ]
+        warnings = _validate_shot_coverage(segments, {"warn_long_no_broll_sec": 180})
+        assert warnings == []
+
+    def test_warns_consecutive_no_broll_gap(self):
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Active", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=2),
+            Segment(segment_id="seg_002", title="Host cam 1", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=200, broll_count=0),
+            Segment(segment_id="seg_003", title="Host cam 2", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=200, broll_count=0),
+            Segment(segment_id="seg_004", title="Active again", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+        ]
+        warnings = _validate_shot_coverage(segments, {"max_no_broll_gap_sec": 300})
+        assert len(warnings) == 1
+        assert "seg_002" in warnings[0]["segment_id"]
+        assert "400s" in warnings[0]["message"]
+
+    def test_no_gap_warning_when_gap_is_short(self):
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Active", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+            Segment(segment_id="seg_002", title="Short host cam", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=45, broll_count=0),
+            Segment(segment_id="seg_003", title="Back", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=90, broll_count=2),
+        ]
+        warnings = _validate_shot_coverage(segments, {"max_no_broll_gap_sec": 300})
+        assert warnings == []
+
+    def test_skips_broll_count_zero_for_long_warning(self):
+        """Segments with broll_count=0 should never trigger the long-segment warning."""
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Host cam", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=300, broll_count=0),
+        ]
+        warnings = _validate_shot_coverage(segments, {"warn_long_no_broll_sec": 180})
+        assert warnings == []
+
+    def test_trailing_no_broll_gap_warns(self):
+        """No-B-roll gap at the end of the script still triggers warning."""
+        from app.background import _validate_shot_coverage
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="Active", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=2),
+            Segment(segment_id="seg_002", title="Outro 1", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=180, broll_count=0),
+            Segment(segment_id="seg_003", title="Outro 2", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=180, broll_count=0),
+        ]
+        warnings = _validate_shot_coverage(segments, {"max_no_broll_gap_sec": 300})
+        assert len(warnings) == 1
+        assert "at the end" in warnings[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# 19f. build_coverage_assessment — neutral coverage summary
+# ---------------------------------------------------------------------------
+
+class TestBuildCoverageAssessment:
+
+    def test_basic_coverage(self):
+        from app.background import _build_coverage_assessment
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="A", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=120, broll_count=2),
+            Segment(segment_id="seg_002", title="B", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+            Segment(segment_id="seg_003", title="C host", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=45, broll_count=0),
+        ]
+        results = ["r1", "r2", "r3"]
+        assessment = _build_coverage_assessment(segments, results, 5, [])
+        assert assessment["total_shots"] == 3
+        assert assessment["clips_found"] == 3
+        assert assessment["shots_per_minute"] == 0.6
+        assert assessment["warnings_count"] == 0
+        assert "3 clips" in assessment["note"]
+        assert "1 segments are host-on-camera" in assessment["note"]
+
+    def test_coverage_with_gap(self):
+        from app.background import _build_coverage_assessment
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="A", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+            Segment(segment_id="seg_002", title="Host1", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=120, broll_count=0),
+            Segment(segment_id="seg_003", title="Host2", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=90, broll_count=0),
+            Segment(segment_id="seg_004", title="B", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=2),
+        ]
+        assessment = _build_coverage_assessment(segments, ["r1", "r2"], 6, [])
+        assert assessment["longest_no_broll_gap_seconds"] == 210
+        assert assessment["longest_no_broll_gap_segments"] == ["seg_002", "seg_003"]
+        assert "210s" in assessment["note"]
+
+    def test_coverage_no_gaps(self):
+        from app.background import _build_coverage_assessment
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="A", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=120, broll_count=3),
+        ]
+        assessment = _build_coverage_assessment(segments, ["r1", "r2", "r3"], 2, [])
+        assert assessment["longest_no_broll_gap_seconds"] == 0
+        assert assessment["longest_no_broll_gap_segments"] == []
+
+    def test_zero_duration_no_crash(self):
+        from app.background import _build_coverage_assessment
+        from app.models.schemas import Segment
+        segments = [
+            Segment(segment_id="seg_001", title="A", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1),
+        ]
+        assessment = _build_coverage_assessment(segments, [], 0, [{"some": "warning"}])
+        assert assessment["shots_per_minute"] == 1.0
+        assert assessment["warnings_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 19g. Schema models — CoverageAssessment, ShotWarning, ExpandShotRequest
+# ---------------------------------------------------------------------------
+
+class TestNewSchemaModels:
+
+    def test_shot_warning_model(self):
+        from app.models.schemas import ShotWarning
+        w = ShotWarning(segment_id="seg_001", message="Test warning")
+        assert w.severity == "info"
+        assert w.segment_id == "seg_001"
+
+    def test_coverage_assessment_defaults(self):
+        from app.models.schemas import CoverageAssessment
+        ca = CoverageAssessment()
+        assert ca.shots_per_minute == 0.0
+        assert ca.clips_found == 0
+        assert ca.longest_no_broll_gap_segments == []
+        assert ca.note == ""
+
+    def test_coverage_assessment_full(self):
+        from app.models.schemas import CoverageAssessment
+        ca = CoverageAssessment(
+            shots_per_minute=0.49, clips_found=24, total_shots=24,
+            longest_no_broll_gap_seconds=180,
+            longest_no_broll_gap_segments=["seg_012", "seg_013"],
+            note="24 shots across 20 segments.", warnings_count=1,
+        )
+        assert ca.total_shots == 24
+        assert len(ca.longest_no_broll_gap_segments) == 2
+
+    def test_expand_shot_request(self):
+        from app.models.schemas import ExpandShotRequest
+        req = ExpandShotRequest(job_id="j1", segment_id="seg_001", count=2)
+        assert req.count == 2
+        assert req.job_id == "j1"
+
+    def test_expand_shot_request_defaults(self):
+        from app.models.schemas import ExpandShotRequest
+        req = ExpandShotRequest(job_id="j1", segment_id="seg_001")
+        assert req.count == 1
+
+    def test_expand_shot_request_clamped(self):
+        from app.models.schemas import ExpandShotRequest
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            ExpandShotRequest(job_id="j1", segment_id="seg_001", count=5)
+        with pytest.raises(ValidationError):
+            ExpandShotRequest(job_id="j1", segment_id="seg_001", count=0)
+
+    def test_job_response_has_coverage_fields(self):
+        from app.models.schemas import JobResponse, JobStatus, CoverageAssessment, ShotWarning
+        jr = JobResponse(
+            job_id="j1", status=JobStatus.COMPLETE, created_at="2026-01-01",
+            coverage_assessment=CoverageAssessment(shots_per_minute=0.5, total_shots=24),
+            warnings=[ShotWarning(segment_id="seg_007", message="Long segment")],
+        )
+        assert jr.coverage_assessment is not None
+        assert jr.coverage_assessment.total_shots == 24
+        assert len(jr.warnings) == 1
+        assert jr.warnings[0].segment_id == "seg_007"
+
+    def test_job_response_no_minimum_results_met_field(self):
+        """The old minimum_results_met field should not exist on JobResponse."""
+        from app.models.schemas import JobResponse
+        assert "minimum_results_met" not in JobResponse.model_fields
+
+
+# ---------------------------------------------------------------------------
+# 19h. Config — new warning thresholds replaced old min_broll_per_minute
+# ---------------------------------------------------------------------------
+
+class TestConfigWarningThresholds:
+
+    def test_min_broll_per_minute_removed(self):
+        from app.config import DEFAULTS
+        assert "min_broll_per_minute" not in DEFAULTS
+        assert "max_broll_per_minute" not in DEFAULTS
+
+    def test_new_warning_thresholds_exist(self):
+        from app.config import DEFAULTS
+        assert DEFAULTS["min_broll_per_segment"] == 0
+        assert DEFAULTS["warn_long_no_broll_sec"] == 180
+        assert DEFAULTS["max_no_broll_gap_sec"] == 300
+
+
+# ---------------------------------------------------------------------------
+# 19i. Translator prompt — no forced minimum, has quality guidance
+# ---------------------------------------------------------------------------
+
+class TestTranslatorPromptQuality:
+
+    def test_prompt_no_forced_minimum(self):
+        from app.services.translator import SYSTEM_PROMPT
+        assert "MUST be >=" not in SYSTEM_PROMPT
+        assert "add more shots to the longer segments" not in SYSTEM_PROMPT
+        assert "too low" not in SYSTEM_PROMPT
+
+    def test_prompt_has_quality_guidance(self):
+        from app.services.translator import SYSTEM_PROMPT
+        assert "Do NOT pad broll_count" in SYSTEM_PROMPT
+        assert "Quality over quantity" in SYSTEM_PROMPT
+        assert "coverage_note" in SYSTEM_PROMPT
+
+    def test_prompt_has_content_based_guidelines(self):
+        from app.services.translator import SYSTEM_PROMPT
+        assert "Determine based on CONTENT, not duration" in SYSTEM_PROMPT
+
+    @pytest.mark.asyncio
+    async def test_translator_no_retry_on_low_shots(self):
+        """The translator should NOT retry when shot count is below script duration."""
+        from app.services.translator import TranslatorService
+
+        mock_response = {
+            "english_translation": "Test translation",
+            "script_context": {
+                "script_topic": "Test topic",
+                "script_domain": "test",
+                "geographic_scope": "global",
+                "temporal_scope": "modern",
+                "exclusion_context": "none",
+            },
+            "segments": [
+                {
+                    "segment_id": "seg_001", "title": "Seg 1", "summary": "S",
+                    "visual_need": "v", "emotional_tone": "calm",
+                    "key_terms": ["test"], "search_queries": ["test"],
+                    "estimated_duration_seconds": 300, "broll_count": 3,
+                    "broll_shots": [
+                        {"shot_id": "seg_001_shot_1", "visual_need": "v1", "search_queries": ["q1"], "key_terms": ["k1"]},
+                        {"shot_id": "seg_001_shot_2", "visual_need": "v2", "search_queries": ["q2"], "key_terms": ["k2"]},
+                        {"shot_id": "seg_001_shot_3", "visual_need": "v3", "search_queries": ["q3"], "key_terms": ["k3"]},
+                    ],
+                },
+            ],
+            "segment_summary": {
+                "total_segments": 1,
+                "total_broll_shots": 3,
+                "segments_needing_no_broll": 0,
+                "coverage_note": "3 shots for 1 segment. Adequate for content.",
+            },
+        }
+
+        call_count = {"n": 0}
+
+        async def mock_call_openai(self_inner, messages, model):
+            call_count["n"] += 1
+            self_inner._last_input_tokens = 100
+            self_inner._last_output_tokens = 200
+            return mock_response
+
+        with patch.object(TranslatorService, "_call_openai", mock_call_openai):
+            ts = TranslatorService()
+            ts.api_key = "fake"
+            # 4926 words → ~49 minutes, but only 3 shots — should NOT retry
+            big_script = " ".join(["word"] * 4926)
+            segments, translation, ctx = await ts.translate_and_segment(big_script)
+
+        assert call_count["n"] == 1  # Only one call, no retry
+        assert len(segments) == 1
+        assert segments[0].broll_count == 3
+
+
+# ---------------------------------------------------------------------------
+# 19j. Expand shots endpoint
+# ---------------------------------------------------------------------------
+
+class TestExpandShotsEndpoint:
+
+    @pytest.fixture
+    def client(self):
+        from httpx import AsyncClient, ASGITransport
+        from app.main import app
+        transport = ASGITransport(app=app)
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    @pytest.mark.asyncio
+    async def test_expand_shots_nonexistent_job(self, client):
+        async with client as c:
+            resp = await c.post(
+                "/api/v1/jobs/nonexistent/segments/seg_001/expand-shots",
+                json={"job_id": "nonexistent", "segment_id": "seg_001", "count": 1},
+            )
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_expand_shots_success(self, client):
+        from app.models.schemas import (
+            JobResponse, JobStatus, SegmentWithResults, BRollShot, ScriptContext,
+        )
+        mock_job = JobResponse(
+            job_id="test-job", status=JobStatus.COMPLETE, created_at="2026-01-01",
+            segments=[
+                SegmentWithResults(
+                    segment_id="seg_001", title="Maritime History", summary="History of ocean trade",
+                    visual_need="ship footage", emotional_tone="dramatic",
+                    key_terms=["maritime", "ocean"], search_queries=["maritime history"],
+                    estimated_duration_seconds=150, broll_count=1,
+                    broll_shots=[BRollShot(shot_id="seg_001_shot_1", visual_need="old ships",
+                                           search_queries=["old ships"], key_terms=["ships"])],
+                    results=[],
+                ),
+            ],
+            script_context=ScriptContext(
+                script_topic="Maritime History", script_domain="history",
+                geographic_scope="Indian Ocean", temporal_scope="1500-1900",
+                exclusion_context="not about modern shipping",
+            ),
+        )
+
+        mock_storage = AsyncMock()
+        mock_storage.get_job.return_value = mock_job
+
+        with patch("app.main.get_storage", return_value=mock_storage), \
+             patch("app.services.expand_shots.expand_shots_for_segment", new_callable=AsyncMock) as mock_expand:
+            async with client as c:
+                resp = await c.post(
+                    "/api/v1/jobs/test-job/segments/seg_001/expand-shots",
+                    json={"job_id": "test-job", "segment_id": "seg_001", "count": 1},
+                )
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["segment_id"] == "seg_001"
+                assert "refresh" in data["message"].lower() or "generating" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_expand_shots_segment_not_found(self, client):
+        from app.models.schemas import JobResponse, JobStatus, SegmentWithResults
+        mock_job = JobResponse(
+            job_id="test-job", status=JobStatus.COMPLETE, created_at="2026-01-01",
+            segments=[
+                SegmentWithResults(
+                    segment_id="seg_001", title="T", summary="S", visual_need="v",
+                    emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+                    estimated_duration_seconds=60, broll_count=1, results=[],
+                ),
+            ],
+        )
+        mock_storage = AsyncMock()
+        mock_storage.get_job.return_value = mock_job
+
+        with patch("app.main.get_storage", return_value=mock_storage):
+            async with client as c:
+                resp = await c.post(
+                    "/api/v1/jobs/test-job/segments/seg_999/expand-shots",
+                    json={"job_id": "test-job", "segment_id": "seg_999", "count": 1},
+                )
+                assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 19k. Expand shots service — _generate_shots mocked
+# ---------------------------------------------------------------------------
+
+class TestExpandShotsService:
+
+    @pytest.mark.asyncio
+    async def test_expand_generates_and_searches(self):
+        """expand_shots_for_segment should generate new shots, search, match, rank, and store."""
+        from app.services.expand_shots import expand_shots_for_segment
+        from app.models.schemas import (
+            BRollShot, CandidateVideo, MatchResult, Segment, ScriptContext,
+            TranscriptSource, Transcript,
+        )
+
+        segment = Segment(
+            segment_id="seg_007", title="Maritime trade routes", summary="Historic routes",
+            visual_need="map of trade routes", emotional_tone="informative",
+            key_terms=["maritime", "trade"], search_queries=["maritime trade routes"],
+            estimated_duration_seconds=150, broll_count=1,
+            broll_shots=[BRollShot(shot_id="seg_007_shot_1", visual_need="trade route map",
+                                    search_queries=["trade route map"], key_terms=["trade", "map"])],
+        )
+
+        new_shot = BRollShot(
+            shot_id="seg_007_shot_2", visual_need="old sailing ships",
+            search_queries=["old sailing ships documentary"], key_terms=["sailing", "ships"],
+        )
+
+        candidate = CandidateVideo(
+            video_id="vid_expand", video_url="https://youtube.com/watch?v=vid_expand",
+            video_title="Ancient Ships", channel_name="HistCh", channel_id="UC_h",
+            channel_subscribers=100000, thumbnail_url="", video_duration_seconds=1800,
+            published_at="2025-01-01T00:00:00Z", view_count=500000,
+        )
+
+        transcript = Transcript(
+            video_id="vid_expand",
+            transcript_text="0:00 Ancient sailing ships\n2:00 Trade routes of the Indian Ocean",
+            transcript_source=TranscriptSource.YOUTUBE_MANUAL,
+            video_duration_seconds=1800,
+        )
+
+        match = MatchResult(
+            start_time_seconds=120, end_time_seconds=180,
+            confidence_score=0.82, source_flag=TranscriptSource.YOUTUBE_MANUAL,
+            context_match_valid=True,
+        )
+
+        ctx = ScriptContext(
+            script_topic="Maritime History", script_domain="history",
+            geographic_scope="Indian Ocean", temporal_scope="1500-1900",
+            exclusion_context="",
+        )
+
+        mock_storage = AsyncMock()
+        mock_settings_svc = AsyncMock()
+        mock_settings_svc.get_all_settings.return_value = {
+            "segment_timeout_sec": 30, "max_concurrent_candidates": 2,
+            "top_results_per_segment": 1,
+        }
+        mock_searcher = AsyncMock()
+        mock_searcher.search_for_shot.return_value = [candidate]
+
+        mock_matcher = MagicMock()
+        mock_matcher.find_timestamp = AsyncMock(return_value=match)
+        mock_matcher.context_matching_enabled = True
+        mock_matcher.validate_context_match = MagicMock(return_value=match)
+
+        mock_transcriber = MagicMock()
+        mock_transcriber.get_transcript = AsyncMock(return_value=transcript)
+
+        with patch("app.services.expand_shots.get_settings_service", return_value=mock_settings_svc), \
+             patch("app.services.expand_shots.get_storage", return_value=mock_storage), \
+             patch("app.services.expand_shots._generate_shots", new_callable=AsyncMock, return_value=[new_shot]), \
+             patch("app.services.expand_shots.SearcherService", return_value=mock_searcher), \
+             patch("app.services.expand_shots.MatcherService", return_value=mock_matcher), \
+             patch("app.services.expand_shots.TranscriberService", return_value=mock_transcriber):
+
+            await expand_shots_for_segment("job-123", segment, count=1, script_context=ctx)
+
+        mock_storage.store_results.assert_called_once()
+        stored = mock_storage.store_results.call_args[0][1]
+        assert len(stored) == 1
+        assert stored[0].video_id == "vid_expand"
+
+    @pytest.mark.asyncio
+    async def test_expand_no_shots_generated(self):
+        """If LLM returns no new shots, nothing is stored."""
+        from app.services.expand_shots import expand_shots_for_segment
+        from app.models.schemas import Segment
+
+        segment = Segment(
+            segment_id="seg_001", title="T", summary="S", visual_need="v",
+            emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+            estimated_duration_seconds=60, broll_count=1,
+        )
+
+        mock_settings_svc = AsyncMock()
+        mock_settings_svc.get_all_settings.return_value = {}
+        mock_storage = AsyncMock()
+
+        with patch("app.services.expand_shots.get_settings_service", return_value=mock_settings_svc), \
+             patch("app.services.expand_shots.get_storage", return_value=mock_storage), \
+             patch("app.services.expand_shots._generate_shots", new_callable=AsyncMock, return_value=[]):
+
+            await expand_shots_for_segment("job-123", segment, count=1)
+
+        mock_storage.store_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expand_search_fails_gracefully(self):
+        """If search fails for a shot, the expansion should not crash."""
+        from app.services.expand_shots import expand_shots_for_segment
+        from app.models.schemas import BRollShot, Segment
+
+        segment = Segment(
+            segment_id="seg_001", title="T", summary="S", visual_need="v",
+            emotional_tone="calm", key_terms=["a"], search_queries=["a"],
+            estimated_duration_seconds=60, broll_count=1,
+        )
+        new_shot = BRollShot(
+            shot_id="seg_001_shot_2", visual_need="new visual",
+            search_queries=["query"], key_terms=["key"],
+        )
+
+        mock_settings_svc = AsyncMock()
+        mock_settings_svc.get_all_settings.return_value = {"segment_timeout_sec": 5}
+        mock_storage = AsyncMock()
+        mock_searcher = AsyncMock()
+        mock_searcher.search_for_shot.side_effect = Exception("search failed")
+
+        with patch("app.services.expand_shots.get_settings_service", return_value=mock_settings_svc), \
+             patch("app.services.expand_shots.get_storage", return_value=mock_storage), \
+             patch("app.services.expand_shots._generate_shots", new_callable=AsyncMock, return_value=[new_shot]), \
+             patch("app.services.expand_shots.SearcherService", return_value=mock_searcher), \
+             patch("app.services.expand_shots.MatcherService"), \
+             patch("app.services.expand_shots.TranscriberService"):
+
+            await expand_shots_for_segment("job-123", segment, count=1)
+
+        mock_storage.store_results.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 19l. DynamoDB storage — _to_dynamo handles nested structures
+# ---------------------------------------------------------------------------
+
+class TestToDynamoRecursive:
+
+    def test_nested_dict_floats_converted(self):
+        from app.services.storage import _to_dynamo
+        from decimal import Decimal
+        val = {"a": 1.5, "b": {"c": 2.5, "d": "str"}}
+        result = _to_dynamo(val)
+        assert result["a"] == Decimal("1.5")
+        assert result["b"]["c"] == Decimal("2.5")
+        assert result["b"]["d"] == "str"
+
+    def test_list_of_dicts_floats_converted(self):
+        from app.services.storage import _to_dynamo
+        from decimal import Decimal
+        val = [{"score": 0.85}, {"score": 0.92}]
+        result = _to_dynamo(val)
+        assert result[0]["score"] == Decimal("0.85")
+        assert result[1]["score"] == Decimal("0.92")
+
+    def test_plain_values_pass_through(self):
+        from app.services.storage import _to_dynamo
+        assert _to_dynamo(42) == 42
+        assert _to_dynamo("hello") == "hello"
+        assert _to_dynamo(None) is None
+        assert _to_dynamo(True) is True
+
+    def test_empty_structures(self):
+        from app.services.storage import _to_dynamo
+        assert _to_dynamo({}) == {}
+        assert _to_dynamo([]) == []
+
+
+# ---------------------------------------------------------------------------
+# 19m. TypeScript types consistency check (read-only validation)
+# ---------------------------------------------------------------------------
+
+class TestTypeScriptConsistency:
+    """Verify the TypeScript types file has the new interfaces."""
+
+    def test_types_file_has_coverage_assessment(self):
+        import os
+        types_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "lib", "types.ts",
+        )
+        with open(types_path) as f:
+            content = f.read()
+        assert "interface CoverageAssessment" in content
+        assert "interface ShotWarning" in content
+        assert "coverage_assessment" in content
+        assert "warnings" in content
+
+    def test_types_no_minimum_results_met(self):
+        import os
+        types_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "lib", "types.ts",
+        )
+        with open(types_path) as f:
+            content = f.read()
+        assert "minimum_results_met" not in content
+
+
 class TestGeminiExpansionToggle:
 
     def test_default_gemini_expansion_off(self):

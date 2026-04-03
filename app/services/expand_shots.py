@@ -31,9 +31,11 @@ async def expand_shots_for_segment(
 
         existing_needs = [
             s.visual_need for s in (segment.broll_shots or [])
-        ] + [
-            r.shot_visual_need for r in segment.results if r.shot_visual_need
         ]
+        if hasattr(segment, "results"):
+            existing_needs += [
+                r.shot_visual_need for r in segment.results if r.shot_visual_need
+            ]
 
         new_shots = await _generate_shots(
             segment, existing_needs, count, script_context
