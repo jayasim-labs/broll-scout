@@ -328,7 +328,7 @@ class LibraryClip(BaseModel):
     editor_rating: Optional[int] = None
     clip_used: bool = False
     editor_notes: Optional[str] = None
-    category: Optional[str] = None
+    categories: List[str] = Field(default_factory=list)
     job_id: Optional[str] = None
     job_title: Optional[str] = None
 
@@ -375,7 +375,9 @@ class FindSimilarRequest(BaseModel):
 class RecategorizeRequest(BaseModel):
     result_id: str
     job_id: str
-    category: str
+    categories: List[str] = Field(default_factory=list)
+    add: List[str] = Field(default_factory=list)
+    remove: List[str] = Field(default_factory=list)
 
 
 class AgentPollRequest(BaseModel):

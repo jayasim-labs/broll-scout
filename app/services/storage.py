@@ -300,6 +300,7 @@ class StorageService:
     async def store_results(
         self, job_id: str, results: List[RankedResult],
         category: Optional[str] = None,
+        categories: Optional[List[str]] = None,
     ) -> None:
         if not results:
             return
@@ -340,8 +341,10 @@ class StorageService:
                         }
                         if r.context_mismatch_reason:
                             item["context_mismatch_reason"] = r.context_mismatch_reason
-                        if category:
-                            item["category"] = category
+                        if categories:
+                            item["categories"] = categories
+                        elif category:
+                            item["categories"] = [category]
                         writer.put_item(Item=item)
         except ClientError:
             logger.exception("Failed to store results for %s", job_id)

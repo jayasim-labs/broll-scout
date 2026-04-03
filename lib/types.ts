@@ -243,7 +243,7 @@ export interface LibraryClip {
   editor_rating: number | null
   clip_used: boolean
   editor_notes: string | null
-  category: string | null
+  categories: string[]
   job_id: string | null
   job_title: string | null
 }

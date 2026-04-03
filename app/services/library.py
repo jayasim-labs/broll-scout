@@ -29,6 +29,17 @@ def _from_dynamo_float(val) -> float:
         return 0.0
 
 
+def _get_categories(r: dict) -> list[str]:
+    """Extract categories list, handling legacy single-string field."""
+    cats = r.get("categories")
+    if isinstance(cats, list):
+        return [c for c in cats if c]
+    legacy = r.get("category")
+    if legacy and isinstance(legacy, str):
+        return [legacy]
+    return []
+
+
 def _result_to_clip(r: dict) -> LibraryClip:
     return LibraryClip(
         result_id=r.get("result_id", ""),
@@ -57,7 +68,7 @@ def _result_to_clip(r: dict) -> LibraryClip:
         editor_rating=r.get("editor_rating"),
         clip_used=r.get("clip_used", False),
         editor_notes=r.get("editor_notes"),
-        category=r.get("category"),
+        categories=_get_categories(r),
         job_id=r.get("job_id"),
         job_title=r.get("job_title"),
     )
@@ -105,8 +116,8 @@ class LibraryService:
             if used == "unused" and item.get("clip_used"):
                 continue
             if cat_filter:
-                item_cat = (item.get("category") or "").lower()
-                if item_cat and item_cat not in cat_filter:
+                item_cats = set(c.lower() for c in _get_categories(item))
+                if not item_cats & cat_filter:
                     continue
 
             if tokens:
@@ -134,10 +145,14 @@ class LibraryService:
 
         clips = [_result_to_clip(item) for item, _ in page_items]
 
-        cat_counts = Counter(
-            (item.get("category") or "uncategorized").lower()
-            for item, _ in scored
-        )
+        cat_counts: Counter = Counter()
+        for item, _ in scored:
+            item_cats = _get_categories(item)
+            if item_cats:
+                for c in item_cats:
+                    cat_counts[c.lower()] += 1
+            else:
+                cat_counts["uncategorized"] += 1
         categories_list = [
             LibraryCategoryCount(name=cat, count=count)
             for cat, count in cat_counts.most_common(20)
@@ -272,14 +287,32 @@ class LibraryService:
         await storage.store_results(job_id, [new_result])
         return True
 
-    async def recategorize(self, job_id: str, result_id: str, category: str) -> bool:
+    async def recategorize(
+        self, job_id: str, result_id: str,
+        categories: list[str] | None = None,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> bool:
         storage = get_storage()
         try:
+            if categories is not None:
+                final = list(dict.fromkeys(c.lower() for c in categories if c))
+            else:
+                existing = await self._get_result_item(storage, job_id, result_id)
+                if not existing:
+                    return False
+                current = set(_get_categories(existing))
+                if add:
+                    current.update(c.lower() for c in add if c)
+                if remove:
+                    current -= set(c.lower() for c in remove)
+                final = sorted(current)
+
             await storage._run(
                 storage._table("results").update_item,
                 Key={"job_id": job_id, "result_id": result_id},
-                UpdateExpression="SET category = :c",
-                ExpressionAttributeValues={":c": category},
+                UpdateExpression="SET categories = :c",
+                ExpressionAttributeValues={":c": final},
             )
             return True
         except Exception:
@@ -309,8 +342,12 @@ class LibraryService:
             ch = item.get("channel_name", "")
             if ch:
                 channel_counts[ch] += 1
-            cat = item.get("category") or "uncategorized"
-            cat_counts[cat.lower()] += 1
+            item_cats = _get_categories(item)
+            if item_cats:
+                for c in item_cats:
+                    cat_counts[c.lower()] += 1
+            else:
+                cat_counts["uncategorized"] += 1
 
         transcript_count = 0
         try:

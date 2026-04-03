@@ -320,7 +320,12 @@ async def library_recategorize(
     _verify_key(x_api_key)
     from app.services.library import get_library_service
     svc = get_library_service()
-    ok = await svc.recategorize(body.job_id, body.result_id, body.category)
+    ok = await svc.recategorize(
+        body.job_id, body.result_id,
+        categories=body.categories or None,
+        add=body.add or None,
+        remove=body.remove or None,
+    )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to recategorize")
     return {"status": "ok"}

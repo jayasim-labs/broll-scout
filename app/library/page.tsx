@@ -41,6 +41,18 @@ const USED_OPTIONS = [
   { value: "unused", label: "Not used yet" },
 ] as const
 
+const FIXED_CATEGORIES = [
+  { value: "history", label: "History" },
+  { value: "mystery", label: "Mystery" },
+  { value: "current_affairs", label: "Current Affairs" },
+  { value: "science", label: "Science" },
+  { value: "finance", label: "Finance" },
+  { value: "ai_tech", label: "AI & Tech" },
+  { value: "geo_politics", label: "Geo Politics" },
+  { value: "societal_issues", label: "Societal Issues" },
+  { value: "sports", label: "Sports" },
+] as const
+
 function formatViews(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
@@ -167,9 +179,13 @@ export default function LibraryPage() {
   const groupedResults = useMemo(() => {
     const groups = new Map<string, LibraryClip[]>()
     for (const clip of results) {
-      const cat = clip.category || "uncategorized"
-      if (!groups.has(cat)) groups.set(cat, [])
-      groups.get(cat)!.push(clip)
+      const cats = clip.categories && clip.categories.length > 0
+        ? clip.categories
+        : ["uncategorized"]
+      for (const cat of cats) {
+        if (!groups.has(cat)) groups.set(cat, [])
+        groups.get(cat)!.push(clip)
+      }
     }
     return groups
   }, [results])
@@ -264,35 +280,37 @@ export default function LibraryPage() {
             </div>
 
             {/* Category pills */}
-            {categories.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-4">
-                <button
-                  onClick={() => setActiveCategories(new Set())}
-                  className={cn(
-                    "px-3 py-1 text-xs font-medium rounded-full border transition-colors",
-                    activeCategories.size === 0
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-muted text-muted-foreground border-border hover:text-foreground"
-                  )}
-                >
-                  All clips
-                </button>
-                {categories.map(cat => (
+            <div className="flex flex-wrap gap-2 mb-4">
+              <button
+                onClick={() => setActiveCategories(new Set())}
+                className={cn(
+                  "px-3 py-1 text-xs font-medium rounded-full border transition-colors",
+                  activeCategories.size === 0
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-muted text-muted-foreground border-border hover:text-foreground"
+                )}
+              >
+                All clips
+              </button>
+              {FIXED_CATEGORIES.map(cat => {
+                const apiCat = categories.find(c => c.name === cat.value)
+                const count = apiCat?.count ?? 0
+                return (
                   <button
-                    key={cat.name}
-                    onClick={() => toggleCategory(cat.name)}
+                    key={cat.value}
+                    onClick={() => toggleCategory(cat.value)}
                     className={cn(
                       "px-3 py-1 text-xs font-medium rounded-full border transition-colors",
-                      activeCategories.has(cat.name)
+                      activeCategories.has(cat.value)
                         ? "bg-primary text-primary-foreground border-primary"
                         : "bg-muted text-muted-foreground border-border hover:text-foreground"
                     )}
                   >
-                    {cat.name} ({cat.count})
+                    {cat.label}{count > 0 ? ` (${count})` : ""}
                   </button>
-                ))}
-              </div>
-            )}
+                )
+              })}
+            </div>
 
             {/* Advanced filters */}
             {showFilters && (
@@ -362,12 +380,12 @@ export default function LibraryPage() {
                   <div key={category}>
                     <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3 flex items-center gap-2">
                       <Database className="w-3.5 h-3.5" />
-                      {category} — {clips.length} clip{clips.length !== 1 ? "s" : ""}
+                      {FIXED_CATEGORIES.find(c => c.value === category)?.label ?? category} — {clips.length} clip{clips.length !== 1 ? "s" : ""}
                     </h3>
                     <div className="space-y-3">
-                      {clips.map(clip => (
+                      {clips.map((clip, idx) => (
                         <ClipCard
-                          key={clip.result_id}
+                          key={`${clip.result_id}_${clip.job_id ?? idx}`}
                           clip={clip}
                           onCopy={() => copyUrl(clip)}
                           copied={copyFeedback === clip.result_id}
@@ -500,11 +518,11 @@ function ClipCard({ clip, onCopy, copied }: {
                   Used
                 </Badge>
               )}
-              {clip.category && (
-                <Badge variant="outline" className="text-[10px] bg-muted text-muted-foreground border-border">
-                  {clip.category}
+              {clip.categories?.map(cat => (
+                <Badge key={cat} variant="outline" className="text-[10px] bg-muted text-muted-foreground border-border">
+                  {FIXED_CATEGORIES.find(c => c.value === cat)?.label ?? cat}
                 </Badge>
-              )}
+              ))}
             </div>
 
             {/* Hook */}
