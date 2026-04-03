@@ -118,7 +118,12 @@ async def run_pipeline(
             script_context=script_context.model_dump() if script_context.script_topic else None,
         )
 
-        # --- Stage 2: Search all shots (parallel) ---
+        # ══════════════════════════════════════════════════
+        # Stage 2: Streaming Search + Transcript Fetch (overlapping)
+        # As each search finds a new video, its transcript starts
+        # fetching immediately. Matching waits for everything to complete.
+        # ══════════════════════════════════════════════════
+
         active_segments = [seg for seg in segments if seg.broll_count > 0]
         skipped_segments = [seg for seg in segments if seg.broll_count == 0]
         total_active_shots = sum(seg.broll_count for seg in active_segments)
@@ -144,16 +149,29 @@ async def run_pipeline(
         sources = "preferred channels → yt-dlp"
         if enable_gemini_expansion:
             sources += " → Gemini AI creative expansion"
-        _log_activity(job_id, "search", f"Searching for {total_active_shots} shots across {len(active_segments)} segments (estimated ~{est_str})", group="search")
-        _log_activity(job_id, "clock", f"Search pipeline: {sources}", depth=1, group="search")
+        _log_activity(job_id, "search", f"Streaming pipeline: searching {total_active_shots} shots + fetching transcripts in parallel (estimated ~{est_str})", group="search")
+        _log_activity(job_id, "clock", f"Search pipeline: {sources} → transcript fetch streams as videos are discovered", depth=1, group="search")
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
+        transcriber = TranscriberService()
         search_start = time.time()
 
-        search_semaphore = asyncio.Semaphore(5)
+        # Shared state for streaming dedup
+        video_pool: Dict[str, CandidateVideo] = {}
+        video_to_shots: Dict[str, List[str]] = {}
         shot_candidates: Dict[str, List[CandidateVideo]] = {}
+        transcript_cache: Dict[str, Optional[str]] = {}
+        transcript_sources: Dict[str, str] = {}
+        failed_fetches: set = set()
+        video_pool_lock = asyncio.Lock()
+
+        transcript_queue: asyncio.Queue = asyncio.Queue()
+        search_semaphore = asyncio.Semaphore(5)
+        transcript_semaphore = asyncio.Semaphore(pipeline_cfg.get("max_concurrent_candidates", 3))
+
         shots_searched = 0
-        shots_search_lock = asyncio.Lock()
+        transcripts_fetched = 0
+        progress_lock = asyncio.Lock()
 
         async def _search_one_shot(seg: Segment, shot: BRollShot):
             nonlocal shots_searched
@@ -163,13 +181,28 @@ async def run_pipeline(
                         shot, seg, job_id=job_id,
                         script_context=script_context,
                     )
-                    shot_candidates[shot.shot_id] = cands or []
+                    cands = cands or []
+                    shot_candidates[shot.shot_id] = cands
                 except Exception:
                     logger.warning("Search failed for shot %s", shot.shot_id)
                     shot_candidates[shot.shot_id] = []
-                async with shots_search_lock:
+                    cands = []
+
+                # Locked pool update: queue new videos for transcript fetch
+                async with video_pool_lock:
+                    for c in cands:
+                        vid = c.video_id
+                        is_new = vid not in video_pool
+                        if is_new:
+                            video_pool[vid] = c
+                            video_to_shots[vid] = []
+                            await transcript_queue.put(vid)
+                        if shot.shot_id not in video_to_shots[vid]:
+                            video_to_shots[vid].append(shot.shot_id)
+
+                async with progress_lock:
                     shots_searched += 1
-                    pct = 20 + int(25 * shots_searched / max(len(all_shots), 1))
+                    pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
                     elapsed_s = time.time() - search_start
                     if shots_searched > 0:
                         per_shot = elapsed_s / shots_searched
@@ -177,36 +210,117 @@ async def run_pipeline(
                         time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
                     else:
                         time_note = ""
-                    _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}{time_note}")
+                    _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
 
-        await asyncio.gather(*[_search_one_shot(seg, shot) for seg, shot in all_shots])
+        async def _transcript_fetch_worker(worker_id: int):
+            nonlocal transcripts_fetched
+            while True:
+                vid = await transcript_queue.get()
+                if vid is None:
+                    transcript_queue.task_done()
+                    break
+
+                async with transcript_semaphore:
+                    cand = video_pool.get(vid)
+                    if not cand:
+                        transcript_queue.task_done()
+                        continue
+                    try:
+                        t = await transcriber.get_transcript(
+                            vid,
+                            video_duration_seconds=cand.video_duration_seconds,
+                            job_id=job_id,
+                        )
+                        transcript_cache[vid] = t.transcript_text
+                        source_label = _TRANSCRIPT_SOURCE_LABELS.get(
+                            t.transcript_source.value, t.transcript_source.value,
+                        )
+                        transcript_sources[vid] = source_label
+                        short_title = cand.video_title[:45]
+                        if t.transcript_text:
+                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}", depth=2, group="search")
+                        else:
+                            failed_fetches.add(vid)
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" — no transcript available", depth=2, group="search")
+                    except Exception:
+                        logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
+                        transcript_cache[vid] = None
+                        transcript_sources[vid] = "error"
+                        failed_fetches.add(vid)
+
+                async with progress_lock:
+                    transcripts_fetched += 1
+                    _set_progress(job_id, "searching", 20 + int(25 * min(shots_searched / max(len(all_shots), 1), 1)),
+                                  f"Shot {shots_searched}/{len(all_shots)}, {transcripts_fetched} transcripts fetched")
+
+                transcript_queue.task_done()
+
+        # Start transcript fetch workers BEFORE searches begin
+        NUM_FETCH_WORKERS = 3
+        fetch_worker_tasks = [
+            asyncio.create_task(_transcript_fetch_worker(i))
+            for i in range(NUM_FETCH_WORKERS)
+        ]
+
+        # Run all searches concurrently — new videos are queued for fetching immediately
+        await asyncio.gather(
+            *[_search_one_shot(seg, shot) for seg, shot in all_shots],
+            return_exceptions=True,
+        )
+
+        # All searches complete — no more new videos will be queued.
+        # Wait for all queued transcript fetches to finish (with timeout).
+        TRANSCRIPT_FETCH_TIMEOUT = pipeline_cfg.get("segment_timeout_sec", 300)
+        try:
+            await asyncio.wait_for(
+                transcript_queue.join(),
+                timeout=TRANSCRIPT_FETCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Job %s: transcript fetch timed out after %ds — proceeding with %d/%d transcripts",
+                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), len(video_pool),
+            )
+            _log_activity(job_id, "alert", f"Transcript fetch timed out — proceeding with {len(transcript_cache)} of {len(video_pool)} transcripts", depth=1, group="search")
+
+        # Shut down workers cleanly
+        for _ in range(NUM_FETCH_WORKERS):
+            await transcript_queue.put(None)
+        await asyncio.gather(*fetch_worker_tasks)
 
         search_elapsed = round(time.time() - search_start, 1)
 
-        # --- Build global video pool + shot mapping (dedup) ---
-        video_pool: Dict[str, CandidateVideo] = {}
-        video_to_shots: Dict[str, List[str]] = {}
-
-        for shot_id, cands in shot_candidates.items():
-            for c in cands:
-                vid = c.video_id
-                if vid not in video_pool:
-                    video_pool[vid] = c
-                    video_to_shots[vid] = []
-                if shot_id not in video_to_shots[vid]:
-                    video_to_shots[vid].append(shot_id)
+        # Integrity check: every video should be accounted for
+        accounted_for = set(transcript_cache.keys()) | failed_fetches
+        missed_videos = set(video_pool.keys()) - accounted_for
+        if missed_videos:
+            logger.error(
+                "Job %s: INTEGRITY CHECK — %d videos queued but never fetched: %s",
+                job_id, len(missed_videos), list(missed_videos)[:10],
+            )
 
         total_pairs = sum(len(c) for c in shot_candidates.values())
         unique_videos = len(video_pool)
+        videos_with_transcript = sum(1 for v in transcript_cache.values() if v)
         empty_shots = sum(1 for c in shot_candidates.values() if not c)
+        saved_fetches = total_pairs - unique_videos
 
-        _log_activity(job_id, "check", f"Search done in {search_elapsed}s! {total_pairs} candidate-shot pairs → {unique_videos} unique videos (deduped)", group="search")
+        _log_activity(job_id, "check",
+            f"Search + fetch done in {search_elapsed}s! "
+            f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved) → "
+            f"{videos_with_transcript} transcripts ready",
+            group="search")
         if empty_shots:
             _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
-        logger.info("Job %s search: %d pairs, %d unique videos, %d empty shots", job_id, total_pairs, unique_videos, empty_shots)
+        logger.info(
+            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed, %d missed in %.1fs",
+            job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), len(missed_videos), search_elapsed,
+        )
 
-        # --- Stage 3: Deduped transcript fetch + per-shot matching ---
-        _set_progress(job_id, "matching", 50, "Fetching transcripts and matching timestamps...")
+        # ══════════════════════════════════════════════════
+        # Stage 3: Matching (waits for search + fetch to fully complete)
+        # ══════════════════════════════════════════════════
+
         matcher_backend = pipeline_cfg.get("matcher_backend", "auto")
         matcher_model = pipeline_cfg.get("matcher_model", "qwen3:8b")
         if matcher_backend == "api":
@@ -216,51 +330,16 @@ async def run_pipeline(
         else:
             match_label = f"Ollama/{matcher_model} (API fallback)"
 
-        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots using {unique_videos} unique videos ({total_pairs - unique_videos} duplicate fetches saved)", group="match")
-        _log_activity(job_id, "clock", f"For each video: fetch transcript once → {match_label} match per shot it's a candidate for", depth=1, group="match")
+        _set_progress(job_id, "matching", 50, "Matching timestamps with local AI...")
+        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots using {videos_with_transcript} videos with transcripts", group="match")
+        _log_activity(job_id, "clock", f"Each (video, shot) pair gets a dedicated {match_label} call", depth=1, group="match")
 
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
-        transcriber = TranscriberService()
         ranker = RankerService()
 
         max_concurrent_candidates = pipeline_cfg.get("max_concurrent_candidates", 3)
         segment_timeout = pipeline_cfg.get("segment_timeout_sec", 300)
 
-        # Phase 3a: Fetch all unique transcripts in parallel
-        _set_progress(job_id, "matching", 52, f"Fetching transcripts for {unique_videos} unique videos...")
-        transcript_cache: Dict[str, Optional[str]] = {}
-        transcript_sources: Dict[str, str] = {}
-        transcript_semaphore = asyncio.Semaphore(max_concurrent_candidates)
-
-        async def _fetch_transcript(vid: str, cand: CandidateVideo):
-            async with transcript_semaphore:
-                try:
-                    t = await transcriber.get_transcript(
-                        vid,
-                        video_duration_seconds=cand.video_duration_seconds,
-                        job_id=job_id,
-                    )
-                    transcript_cache[vid] = t.transcript_text
-                    source_label = _TRANSCRIPT_SOURCE_LABELS.get(
-                        t.transcript_source.value, t.transcript_source.value,
-                    )
-                    transcript_sources[vid] = source_label
-                    short_title = cand.video_title[:45]
-                    if t.transcript_text:
-                        _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}", depth=2, group="match")
-                    else:
-                        _log_activity(job_id, "alert", f"✗ \"{short_title}\" — no transcript available", depth=2, group="match")
-                except Exception:
-                    logger.exception("Transcript fetch failed for %s", vid)
-                    transcript_cache[vid] = None
-                    transcript_sources[vid] = "error"
-
-        await asyncio.gather(*[_fetch_transcript(vid, cand) for vid, cand in video_pool.items()])
-
-        videos_with_transcript = sum(1 for t in transcript_cache.values() if t)
-        _log_activity(job_id, "check", f"Transcripts ready: {videos_with_transcript}/{unique_videos} videos have usable transcripts", depth=1, group="match")
-
-        # Phase 3b: Match each (video, shot) pair — one Qwen3 call per pair, but transcript already fetched
         shot_id_to_info: Dict[str, Tuple[Segment, BRollShot]] = {}
         for seg, shot in all_shots:
             shot_id_to_info[shot.shot_id] = (seg, shot)
@@ -271,11 +350,14 @@ async def run_pipeline(
 
         match_start = time.time()
         match_semaphore = asyncio.Semaphore(max_concurrent_candidates)
-        total_match_pairs = sum(
-            len(shot_candidates.get(shot.shot_id, []))
-            for _, shot in all_shots
-            if shot_candidates.get(shot.shot_id)
-        )
+
+        match_tasks = []
+        for shot_id, cands in shot_candidates.items():
+            for cand in cands:
+                if transcript_cache.get(cand.video_id) is not None:
+                    match_tasks.append((cand.video_id, shot_id))
+
+        total_match_pairs = len(match_tasks)
         matches_done = 0
         matches_lock = asyncio.Lock()
 
@@ -329,21 +411,18 @@ async def run_pipeline(
                         time_note = ""
                     _set_progress(job_id, "matching", pct, f"Matching {matches_done}/{total_match_pairs} video-shot pairs{time_note}")
 
-        match_tasks = []
-        for shot_id, cands in shot_candidates.items():
-            for cand in cands:
-                if transcript_cache.get(cand.video_id) is not None:
-                    match_tasks.append(_match_one(cand.video_id, shot_id))
+        _set_progress(job_id, "matching", 55, f"Matching {total_match_pairs} video-shot pairs...")
+        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches", depth=1, group="match")
 
-        _set_progress(job_id, "matching", 55, f"Matching {len(match_tasks)} video-shot pairs...")
-        _log_activity(job_id, "zap", f"Running {len(match_tasks)} matches ({total_match_pairs} pairs, {total_match_pairs - len(match_tasks)} skipped — no transcript)", depth=1, group="match")
-
-        await asyncio.gather(*match_tasks)
+        await asyncio.gather(
+            *[_match_one(vid, shot_id) for vid, shot_id in match_tasks],
+            return_exceptions=True,
+        )
 
         match_elapsed = round(time.time() - match_start, 1)
         _log_activity(job_id, "check", f"Matching done in {match_elapsed}s", depth=1, group="match")
 
-        # Phase 3c: Rank per shot, pick best clip, assemble segment results
+        # Rank per shot, pick best clip, assemble segment results
         all_segment_results: Dict[str, List[RankedResult]] = {}
 
         for seg in active_segments:

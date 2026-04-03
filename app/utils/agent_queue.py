@@ -82,7 +82,8 @@ async def poll_tasks(agent_id: str, max_tasks: int = 3) -> list[dict]:
 async def submit_result(task_id: str, status: str, result: list) -> bool:
     async with _lock:
         if task_id not in _pending and task_id not in _events:
-            return False
+            logger.debug("Late result for task %s (already timed out or completed) — discarding", task_id)
+            return True
         _completed[task_id] = {"status": status, "result": result}
         _pending.pop(task_id, None)
         event = _events.get(task_id)
