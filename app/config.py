@@ -31,9 +31,16 @@ DEFAULTS = {
     "search_queries_per_segment": 3,
     "youtube_results_per_query": 5,
     "max_candidates_per_segment": 12,
+    "max_candidates_per_shot": 8,
     "top_results_per_segment": 3,
     "total_results_target": 30,
     "gemini_expanded_queries": 5,
+
+    "min_broll_per_minute": 1,
+    "max_broll_per_minute": 2,
+    "min_segment_duration_sec": 20,
+    "max_segment_duration_sec": 180,
+    "allow_zero_broll_segments": True,
 
     "timestamp_model": "gpt-4o-mini",
     "translation_model": "gpt-4o",

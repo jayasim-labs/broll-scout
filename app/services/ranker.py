@@ -4,7 +4,7 @@ from typing import Optional
 
 from app.config import DEFAULTS
 from app.models.schemas import (
-    ScriptContext, Segment, CandidateVideo, MatchResult, RankedResult, TranscriptSource,
+    BRollShot, ScriptContext, Segment, CandidateVideo, MatchResult, RankedResult, TranscriptSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ class RankerService:
         segment: Segment,
         settings: dict | None = None,
         script_context: ScriptContext | None = None,
+        shot: BRollShot | None = None,
     ) -> list[RankedResult]:
         cfg = settings or DEFAULTS
 
@@ -40,10 +41,11 @@ class RankerService:
             w_cx /= total_w
 
         threshold = float(cfg.get("confidence_threshold", 0.4))
-        top_n = int(cfg.get("top_results_per_segment", 1))
+        top_n = 1 if shot else int(cfg.get("top_results_per_segment", 1))
 
         min_subs = int(cfg.get("prefer_min_subscribers", 0))
         negative_kw = segment.negative_keywords or []
+        ranking_key_terms = (shot.key_terms if shot and shot.key_terms else segment.key_terms)
 
         scored: list[tuple[CandidateVideo, MatchResult, float]] = []
         for cand, match in candidates:
@@ -65,7 +67,7 @@ class RankerService:
                 relevance = 0.3
             else:
                 ai_score = match.confidence_score
-                kw_score = self._keyword_density(segment.key_terms, match.transcript_excerpt)
+                kw_score = self._keyword_density(ranking_key_terms, match.transcript_excerpt)
                 vs_score = self._viral_score(cand.view_count)
                 ca_score = self._channel_authority(cand, min_subs)
                 cq_score = self._caption_quality(match.source_flag)
@@ -97,9 +99,12 @@ class RankerService:
             if match.start_time_seconds is not None:
                 clip_url = f"{cand.video_url}&t={match.start_time_seconds}"
 
+            result_id_suffix = f"{shot.shot_id}_{idx + 1:03d}" if shot else f"{segment.segment_id}_{idx + 1:03d}"
             results.append(RankedResult(
-                result_id=f"res_{segment.segment_id}_{idx + 1:03d}",
+                result_id=f"res_{result_id_suffix}",
                 segment_id=segment.segment_id,
+                shot_id=shot.shot_id if shot else None,
+                shot_visual_need=shot.visual_need if shot else None,
                 video_id=cand.video_id,
                 video_url=cand.video_url,
                 video_title=cand.video_title,

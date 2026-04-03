@@ -41,9 +41,18 @@ export interface APICosts {
   quota_exhausted?: boolean
 }
 
+export interface BRollShot {
+  shot_id: string
+  visual_need: string
+  search_queries: string[]
+  key_terms: string[]
+}
+
 export interface RankedResult {
   result_id: string
   segment_id: string
+  shot_id: string | null
+  shot_visual_need: string | null
   video_id: string
   video_url: string
   video_title: string
@@ -88,6 +97,9 @@ export interface Segment {
   estimated_duration_seconds: number
   context_anchor?: string
   negative_keywords?: string[]
+  broll_count: number
+  broll_shots: BRollShot[]
+  broll_note?: string | null
   results: RankedResult[]
 }
 
@@ -99,7 +111,9 @@ export interface JobResponse {
   processing_time_seconds: number | null
   script_duration_minutes: number
   total_segments: number
+  total_shots: number
   total_results: number
+  segments_with_no_broll: number
   minimum_results_met: boolean
   api_costs: APICosts
   segments: Segment[]

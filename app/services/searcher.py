@@ -6,7 +6,7 @@ import re
 import httpx
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import ScriptContext, Segment, CandidateVideo
+from app.models.schemas import BRollShot, ScriptContext, Segment, CandidateVideo
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils import agent_queue
 
@@ -279,6 +279,113 @@ class SearcherService:
         filter_text = f" (removed {', '.join(filter_notes)})" if filter_notes else ""
         await _emit("check", f"{len(candidates)} usable videos ready for transcript analysis{filter_text}")
 
+        return candidates[:max_candidates]
+
+    async def search_for_shot(
+        self, shot: BRollShot, segment: Segment,
+        job_id: str | None = None, on_progress=None,
+        script_context: ScriptContext | None = None,
+    ) -> list[CandidateVideo]:
+        """Search for a single B-roll shot using the shot's own queries and key_terms."""
+        async def _emit(icon: str, text: str, depth: int = 2):
+            if on_progress:
+                try:
+                    await on_progress(icon, text, depth)
+                except Exception:
+                    pass
+
+        results_per_query: int = self._get("youtube_results_per_query") or 5
+        max_candidates: int = self._get("max_candidates_per_shot") or 8
+        min_duration: int = self._get("min_video_duration_sec") or 180
+        max_duration: int = self._get("max_video_duration_sec") or 5400
+
+        all_video_ids: list[str] = []
+        search_metadata: dict[str, dict] = {}
+
+        def _collect(results: list[dict]) -> list[str]:
+            ids = []
+            for r in results:
+                vid = r.get("video_id", "")
+                if vid:
+                    ids.append(vid)
+                    if vid not in search_metadata:
+                        search_metadata[vid] = r
+            return ids
+
+        queries = [
+            contextualize_query(q, script_context) if script_context else q
+            for q in shot.search_queries
+        ]
+        if not queries:
+            queries = [
+                contextualize_query(q, script_context) if script_context else q
+                for q in segment.search_queries[:2]
+            ]
+
+        short_need = shot.visual_need[:50]
+        await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries", depth=3)
+
+        yt_results = await self._search_youtube_primary_full(
+            queries, results_per_query, job_id, "ytdlp_only", None,
+        )
+        all_video_ids.extend(_collect(yt_results))
+
+        unique_ids = list(dict.fromkeys(all_video_ids))
+        if not unique_ids:
+            await _emit("alert", f"    No videos found for shot: \"{short_need}\"", depth=3)
+            return []
+
+        video_details = [search_metadata[vid] for vid in unique_ids if vid in search_metadata]
+        ids_missing = [vid for vid in unique_ids if vid not in search_metadata]
+        if ids_missing:
+            extra = await _dispatch_video_details(ids_missing, job_id=job_id)
+            video_details.extend(extra)
+
+        blocked_set = self._build_blocked_set()
+        tier1_set = set(self._get("preferred_channels_tier1") or [])
+        tier2_lower = {name.lower() for name in (self._get("preferred_channels_tier2") or [])}
+
+        candidates: list[CandidateVideo] = []
+        seen_ids: set[str] = set()
+
+        for v in video_details:
+            vid = v.get("video_id", "")
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+
+            duration = v.get("duration_seconds") or v.get("video_duration_seconds") or 0
+            if duration < min_duration or duration > max_duration:
+                continue
+
+            w = v.get("width") or 0
+            h = v.get("height") or 0
+            if w > 0 and h > 0 and h > w:
+                continue
+
+            ch_id = v.get("channel_id", "")
+            ch_name = v.get("channel_name", "")
+            video_title = v.get("title") or v.get("video_title", "")
+            if self._is_blocked(ch_name, video_title, blocked_set):
+                continue
+
+            candidates.append(CandidateVideo(
+                video_id=vid,
+                video_url=f"https://www.youtube.com/watch?v={vid}",
+                video_title=video_title,
+                channel_name=ch_name,
+                channel_id=ch_id,
+                channel_subscribers=v.get("channel_subscribers") or 0,
+                thumbnail_url=v.get("thumbnail_url", ""),
+                video_duration_seconds=duration,
+                published_at=v.get("published_at", ""),
+                view_count=v.get("view_count") or 0,
+                is_preferred_tier1=ch_id in tier1_set,
+                is_preferred_tier2=ch_name.lower() in tier2_lower,
+                is_blocked=False,
+            ))
+
+        await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"", depth=3)
         return candidates[:max_candidates]
 
     async def search_batch(

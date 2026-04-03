@@ -158,6 +158,8 @@ class StorageService:
                     RankedResult(
                         result_id=r.get("result_id", ""),
                         segment_id=r.get("segment_id", ""),
+                        shot_id=r.get("shot_id"),
+                        shot_visual_need=r.get("shot_visual_need"),
                         video_id=r.get("video_id", ""),
                         video_url=r.get("video_url", ""),
                         video_title=r.get("video_title", ""),
@@ -184,6 +186,10 @@ class StorageService:
                     )
                     for r in seg_results
                 ]
+                from app.models.schemas import BRollShot
+                broll_shots_raw = seg.get("broll_shots", [])
+                broll_shots = [BRollShot(**s) for s in broll_shots_raw] if broll_shots_raw else []
+
                 segments_with_results.append(SegmentWithResults(
                     segment_id=seg.get("segment_id", "seg_001"),
                     title=seg.get("title", ""),
@@ -195,6 +201,9 @@ class StorageService:
                     estimated_duration_seconds=int(seg.get("estimated_duration_seconds", 60)),
                     context_anchor=seg.get("context_anchor", ""),
                     negative_keywords=seg.get("negative_keywords", []),
+                    broll_count=int(seg.get("broll_count", 1)),
+                    broll_shots=broll_shots,
+                    broll_note=seg.get("broll_note"),
                     results=ranked,
                 ))
 
@@ -274,11 +283,16 @@ class StorageService:
                             "key_terms": seg.key_terms,
                             "search_queries": seg.search_queries,
                             "estimated_duration_seconds": seg.estimated_duration_seconds,
+                            "broll_count": seg.broll_count,
                         }
                         if seg.context_anchor:
                             item["context_anchor"] = seg.context_anchor
                         if seg.negative_keywords:
                             item["negative_keywords"] = seg.negative_keywords
+                        if seg.broll_shots:
+                            item["broll_shots"] = [s.model_dump() for s in seg.broll_shots]
+                        if seg.broll_note:
+                            item["broll_note"] = seg.broll_note
                         writer.put_item(Item=item)
         except ClientError:
             logger.exception("Failed to store segments for %s", job_id)
@@ -299,6 +313,8 @@ class StorageService:
                             "job_id": job_id,
                             "result_id": r.result_id,
                             "segment_id": r.segment_id,
+                            "shot_id": r.shot_id,
+                            "shot_visual_need": r.shot_visual_need,
                             "video_id": r.video_id,
                             "video_url": r.video_url,
                             "video_title": r.video_title,

@@ -103,6 +103,16 @@ class ScriptContext(BaseModel):
     exclusion_context: str = ""
 
 
+class BRollShot(BaseModel):
+    """A single B-roll shot within a segment. Each shot has its own visual need and search queries."""
+    model_config = ConfigDict(from_attributes=True)
+
+    shot_id: str
+    visual_need: str
+    search_queries: List[str] = Field(default_factory=list)
+    key_terms: List[str] = Field(default_factory=list)
+
+
 class Segment(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -116,6 +126,9 @@ class Segment(BaseModel):
     estimated_duration_seconds: int = Field(default=60, ge=10)
     context_anchor: str = Field(default="")
     negative_keywords: List[str] = Field(default_factory=list)
+    broll_count: int = Field(default=1, ge=0)
+    broll_shots: List[BRollShot] = Field(default_factory=list)
+    broll_note: Optional[str] = None
 
     @field_validator("segment_id")
     @classmethod
@@ -165,6 +178,8 @@ class RankedResult(BaseModel):
 
     result_id: str
     segment_id: str
+    shot_id: Optional[str] = None
+    shot_visual_need: Optional[str] = None
     video_id: str
     video_url: str
     video_title: str
@@ -230,7 +245,9 @@ class JobResponse(BaseModel):
     processing_time_seconds: Optional[float] = None
     script_duration_minutes: int = 0
     total_segments: int = 0
+    total_shots: int = 0
     total_results: int = 0
+    segments_with_no_broll: int = 0
     minimum_results_met: bool = True
     api_costs: APICosts = Field(default_factory=APICosts)
     segments: List[SegmentWithResults] = Field(default_factory=list)

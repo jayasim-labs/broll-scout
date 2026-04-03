@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from app.config import DEFAULTS, get_settings
-from app.models.schemas import ScriptContext, Segment
+from app.models.schemas import BRollShot, ScriptContext, Segment
 from app.utils.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
@@ -22,21 +22,67 @@ Do the following in one response:
    - temporal_scope: Time period covered (e.g., "prehistoric to present day, with focus on 2018 incident")
    - exclusion_context: What this video is NOT about — topics that share keywords but are unrelated (e.g., "NOT about mainland Indian forests, NOT about wildlife reserves, NOT about tourism destinations")
 
-3. Break the English translation into segments — one segment for approximately every 1–2 minutes of script. A 30-minute script must yield at least 30 segments. Segment by visual need, not just topic change.
+3. Break the English translation into segments based on NATURAL narrative shifts.
+   Do NOT force one segment per minute. Some sections naturally run 2-3 minutes
+   on the same theme — keep them as one segment. Other sections may shift
+   topics every 30 seconds — split those.
+   Typical range: 15-25 segments for a 30-minute script.
+   Let the script's own rhythm dictate the splits.
 
 4. For each segment, return:
    - segment_id (format: seg_001, seg_002, ...)
    - title (short, descriptive)
    - summary (2–3 sentences describing what this section covers)
-   - visual_need (what the editor needs to SEE on screen)
+   - visual_need (what the editor needs to SEE on screen — overall for this segment)
    - emotional_tone (the mood)
    - key_terms (5–7 keywords a video editor would use to find relevant footage)
-   - search_queries: 3 distinct YouTube search queries. CRITICAL: Every query MUST include the script's specific context to avoid generic results. BAD: "tropical forest documentary" (matches ANY tropical forest). GOOD: "Sentinel Island aerial forest footage" (specific to this island). Every query should contain at least one term from the geographic_scope or script_topic.
-   - estimated_duration_seconds (rough estimate based on script length)
-   - context_anchor: A one-sentence statement connecting this segment to the overall script topic (e.g., "Dense tropical forest specifically on North Sentinel Island in the Andaman archipelago — NOT generic tropical forest footage")
-   - negative_keywords: 3–5 terms that would indicate a WRONG match for this segment (e.g., ["Telangana", "safari", "zoo", "wildlife reserve", "national park"])
+   - search_queries: 3 distinct YouTube search queries for this segment overall. CRITICAL: Every query MUST include the script's specific context. BAD: "tropical forest documentary". GOOD: "Sentinel Island aerial forest footage".
+   - estimated_duration_seconds (rough estimate of how long this section of the script runs)
+   - context_anchor: A one-sentence statement connecting this segment to the overall script topic
+   - negative_keywords: 3–5 terms that would indicate a WRONG match for this segment
+   - broll_count: how many DIFFERENT B-roll clips this segment needs. Guidelines:
+       * 0 clips: segment is host-on-camera, personal narration, or intro/outro that doesn't need B-roll
+       * 1 clip: segment is under 45 seconds, or is a simple single-concept explanation
+       * 2 clips: segment is 45-90 seconds, or covers two distinct visual ideas
+       * 3 clips: segment is 90-150 seconds, or has multiple visual beats
+       * 4+ clips: segment is over 150 seconds with several distinct visual moments
+   - broll_note: if broll_count is 0, explain why (e.g., "Host on camera — no B-roll needed"). Otherwise null.
+   - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
+       * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
+       * visual_need: what the editor needs to see for THIS SPECIFIC shot (not the segment's general topic)
+       * search_queries: 2-3 YouTube search queries for THIS specific shot, each containing at least one term from geographic_scope or script_topic
+       * key_terms: 3-5 keywords for THIS shot
 
-Return as valid JSON with three keys: "english_translation" (full translated text), "script_context" (object), and "segments" (JSON array). No prose, no markdown fences."""
+     Example for a 2-minute segment about "Sentinel Island's geography":
+     broll_shots: [
+       {
+         "shot_id": "seg_005_shot_1",
+         "visual_need": "Aerial/satellite view of North Sentinel Island showing its isolation",
+         "search_queries": ["Sentinel Island satellite aerial view", "North Sentinel Island drone"],
+         "key_terms": ["satellite", "aerial", "island", "isolation"]
+       },
+       {
+         "shot_id": "seg_005_shot_2",
+         "visual_need": "Dense tropical rainforest canopy from above — the impenetrable jungle",
+         "search_queries": ["Andaman island rainforest canopy aerial", "dense jungle island drone footage"],
+         "key_terms": ["rainforest", "canopy", "dense", "tropical"]
+       },
+       {
+         "shot_id": "seg_005_shot_3",
+         "visual_need": "Coral reef and shallow waters surrounding the island",
+         "search_queries": ["coral reef island barrier aerial", "Andaman Islands coral reef footage"],
+         "key_terms": ["coral", "reef", "shallow", "barrier"]
+       }
+     ]
+
+5. At the end, include a summary object "segment_summary":
+   - total_segments: count
+   - total_broll_shots: sum of all broll_count values
+   - segments_needing_no_broll: count of segments with broll_count = 0
+   The total_broll_shots MUST be >= script duration in minutes.
+   If it's too low, add more shots to the longer segments.
+
+Return as valid JSON with four keys: "english_translation" (string), "script_context" (object), "segments" (JSON array), and "segment_summary" (object). No prose, no markdown fences."""
 
 
 class TranslatorService:
@@ -86,10 +132,16 @@ class TranslatorService:
         await _emit("check", f"GPT-4o finished translating your script")
 
         segments_raw = data.get("segments", [])
-        await _emit("brain", f"Identified {len(segments_raw)} scenes (your {estimated_minutes}-min script needs at least {estimated_minutes} scenes for good B-roll coverage)")
+        summary = data.get("segment_summary", {})
+        total_shots = summary.get("total_broll_shots", 0)
+        if not total_shots:
+            total_shots = sum(s.get("broll_count", 1) for s in segments_raw)
+        no_broll_count = summary.get("segments_needing_no_broll", 0)
 
-        if len(segments_raw) < estimated_minutes:
-            await _emit("alert", f"Only {len(segments_raw)} scenes — not enough for a {estimated_minutes}-min video. Asking GPT-4o to break it into more fine-grained visual moments...")
+        await _emit("brain", f"Identified {len(segments_raw)} natural segments with {total_shots} total B-roll shots ({no_broll_count} segments need no B-roll)")
+
+        if total_shots < estimated_minutes:
+            await _emit("alert", f"Only {total_shots} B-roll shots — your {estimated_minutes}-min script needs at least {estimated_minutes}. Asking GPT-4o to add more shots to longer segments...")
             messages.append(
                 {"role": "assistant", "content": json.dumps(data)}
             )
@@ -97,19 +149,16 @@ class TranslatorService:
                 "role": "user",
                 "content": (
                     f"The script is approximately {estimated_minutes} minutes. "
-                    f"You returned only {len(segments_raw)} segments. "
-                    f"I need at least {estimated_minutes} segments — one per minute. "
-                    "Split the larger segments into more specific visual moments."
+                    f"You returned {len(segments_raw)} segments with only {total_shots} total B-roll shots. "
+                    f"I need at least {estimated_minutes} B-roll shots total. "
+                    "Add more broll_shots to the longer segments — they need more visual variety. "
+                    "Do NOT split segments artificially. Instead increase broll_count and add more broll_shots entries."
                 ),
             })
             data = await self._call_openai(messages, translation_model)
             segments_raw = data.get("segments", [])
-            await _emit("check", f"Better! Now {len(segments_raw)} scenes — each focused on a specific visual moment")
-
-        max_segments = max(estimated_minutes * 2, 10)
-        if len(segments_raw) > max_segments:
-            await _emit("alert", f"GPT-4o generated {len(segments_raw)} scenes but your ~{estimated_minutes}-min script only needs ~{estimated_minutes}–{max_segments}. Trimming to the top {max_segments} to keep the search efficient.")
-            segments_raw = segments_raw[:max_segments]
+            total_shots = sum(s.get("broll_count", 1) for s in segments_raw)
+            await _emit("check", f"Now {len(segments_raw)} segments with {total_shots} B-roll shots")
 
         cost_tracker = get_cost_tracker()
         if job_id:

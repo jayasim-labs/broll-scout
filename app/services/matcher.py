@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import ScriptContext, Segment, MatchResult, TranscriptSource
+from app.models.schemas import BRollShot, ScriptContext, Segment, MatchResult, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils import agent_queue
 
@@ -22,9 +22,12 @@ This documentary is NOT about: {exclusion_context}
 === THIS SEGMENT ===
 Segment summary: {summary}
 Context anchor: {context_anchor}
-Visual need: {visual_need}
 Emotional tone: {emotional_tone}
+
+=== SPECIFIC SHOT NEEDED ===
+Visual need: {visual_need}
 Key terms: {key_terms}
+Shot context: {shot_context}
 
 === TERMS THAT INDICATE A WRONG MATCH ===
 If the transcript contains these terms prominently, this video is likely NOT relevant: {negative_keywords}
@@ -95,6 +98,7 @@ class MatcherService:
         video_metadata: dict,
         job_id: str | None = None,
         script_context: ScriptContext | None = None,
+        shot: BRollShot | None = None,
     ) -> MatchResult:
         if not transcript_text:
             return MatchResult(
@@ -110,6 +114,16 @@ class MatcherService:
 
         ctx = script_context or ScriptContext()
         video_duration = video_metadata.get("video_duration_seconds", 0) or 0
+
+        if shot:
+            visual_need = shot.visual_need
+            key_terms = ", ".join(shot.key_terms) if shot.key_terms else ", ".join(segment.key_terms)
+            shot_context = f"This is shot {shot.shot_id} — find footage matching THIS specific visual need, not the segment's general topic."
+        else:
+            visual_need = segment.visual_need
+            key_terms = ", ".join(segment.key_terms)
+            shot_context = "Match the segment's overall visual need."
+
         prompt = TIMESTAMP_PROMPT_TEMPLATE.format(
             script_topic=ctx.script_topic or "general documentary",
             script_domain=ctx.script_domain or "general",
@@ -118,9 +132,10 @@ class MatcherService:
             exclusion_context=ctx.exclusion_context or "none specified",
             summary=segment.summary,
             context_anchor=segment.context_anchor or segment.summary,
-            visual_need=segment.visual_need,
+            visual_need=visual_need,
             emotional_tone=segment.emotional_tone,
-            key_terms=", ".join(segment.key_terms),
+            key_terms=key_terms,
+            shot_context=shot_context,
             negative_keywords=", ".join(segment.negative_keywords) if segment.negative_keywords else "none",
             transcript=transcript_text,
             video_duration=video_duration,

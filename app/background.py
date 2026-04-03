@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from app.models.schemas import (
-    CandidateVideo, JobStatus, MatchResult, RankedResult, ScriptContext, Segment,
+    BRollShot, CandidateVideo, JobStatus, MatchResult, RankedResult, ScriptContext, Segment,
 )
 from app.services.matcher import MatcherService
 from app.services.ranker import RankerService
@@ -100,11 +100,14 @@ async def run_pipeline(
         )
 
         translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
-        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} scenes, each needing different B-roll footage", group="translate")
+        total_shots = sum(seg.broll_count for seg in segments)
+        no_broll_segs = sum(1 for seg in segments if seg.broll_count == 0)
+        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} natural segments, {total_shots} B-roll shots needed ({no_broll_segs} host-on-camera segments)", group="translate")
         if script_context.script_topic:
             _log_activity(job_id, "shield", f"Context anchoring: \"{script_context.script_topic}\" — will reject clips about unrelated topics", depth=1, group="translate")
         for i, seg in enumerate(segments, 1):
-            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\" — looking for: {seg.visual_need}", depth=1, group="translate")
+            shot_note = f" ({seg.broll_count} shots)" if seg.broll_count > 1 else (" (no B-roll)" if seg.broll_count == 0 else "")
+            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\"{shot_note} — {seg.visual_need}", depth=1, group="translate")
 
         await storage.store_segments(job_id, segments)
         await storage.update_job_status(
@@ -196,12 +199,8 @@ async def run_pipeline(
             logger.info("Job %s retry %d: %d total candidates", job_id, retry_round, total_candidates)
 
 
-        # --- Stage 3: Matching ---
+        # --- Stage 3: Matching (shot-level) ---
         _set_progress(job_id, "matching", 55, "Watching videos and finding the exact moments you need...")
-        est_match_sec = total_candidates * 4
-        est_m_min = est_match_sec // 60
-        est_m_sec = est_match_sec % 60
-        est_m_str = f"{est_m_min}m {est_m_sec}s" if est_m_min else f"{est_m_sec}s"
         matcher_backend = pipeline_cfg.get("matcher_backend", "auto")
         matcher_model = pipeline_cfg.get("matcher_model", "qwen3:8b")
         if matcher_backend == "api":
@@ -210,21 +209,27 @@ async def run_pipeline(
             match_label = f"Ollama/{matcher_model}"
         else:
             match_label = f"Ollama/{matcher_model} (API fallback)"
-        _log_activity(job_id, "eye", f"Now analyzing {total_candidates} videos to pinpoint the exact seconds that match your script (estimated ~{est_m_str})", group="match")
-        _log_activity(job_id, "clock", f"For each video: fetch transcript (cache → YouTube captions → companion → Whisper base) → {match_label} finds peak visual moment → validate timestamp", depth=1, group="match")
+
+        active_segments = [seg for seg in segments if seg.broll_count > 0]
+        skipped_segments = [seg for seg in segments if seg.broll_count == 0]
+        total_active_shots = sum(seg.broll_count for seg in active_segments)
+
+        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots across {len(active_segments)} segments ({len(skipped_segments)} host-on-camera segments skipped)", group="match")
+        _log_activity(job_id, "clock", f"For each shot: search → fetch transcript → {match_label} context check + timestamp → rank", depth=1, group="match")
 
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService()
         ranker = RankerService()
 
         max_concurrent_candidates = pipeline_cfg.get("max_concurrent_candidates", 3)
-        segment_timeout = pipeline_cfg.get("segment_timeout_sec", 60)
+        segment_timeout = pipeline_cfg.get("segment_timeout_sec", 300)
 
         all_segment_results: Dict[str, List[RankedResult]] = {}
-        total_segments = len(segments)
+        total_segments = len(active_segments)
         match_start = time.time()
+        shots_processed = 0
 
-        for seg_idx, segment in enumerate(segments):
+        for seg_idx, segment in enumerate(active_segments):
             pct = 55 + int(35 * seg_idx / max(total_segments, 1))
             if seg_idx > 0:
                 per_seg = (time.time() - match_start) / seg_idx
@@ -234,64 +239,85 @@ async def run_pipeline(
                 time_note = ""
             _set_progress(
                 job_id, "matching", pct,
-                f"Analyzing scene {seg_idx + 1} of {total_segments}: \"{segment.title}\"{time_note}",
+                f"Segment {seg_idx + 1}/{total_segments}: \"{segment.title}\" ({segment.broll_count} shots){time_note}",
             )
             seg_group = f"match-{segment.segment_id}"
-            _log_activity(job_id, "zap", f"Scene {seg_idx + 1}/{total_segments}: \"{segment.title}\" — scanning videos for the perfect clip", depth=1, group="match")
+            _log_activity(job_id, "zap", f"Segment {seg_idx + 1}/{total_segments}: \"{segment.title}\" — {segment.broll_count} B-roll shots needed", depth=1, group="match")
 
-            cands = candidates_by_segment.get(segment.segment_id, [])
-            if not cands:
-                _log_activity(job_id, "alert", f"No matching videos were found for \"{segment.title}\" — skipping this scene", depth=2, group=seg_group)
-                all_segment_results[segment.segment_id] = []
-                continue
+            seg_ranked: List[RankedResult] = []
+            shots_to_process = segment.broll_shots if segment.broll_shots else []
 
-            _log_activity(job_id, "mic", f"Fetching transcripts for {len(cands)} videos (cache → YouTube captions → companion → Whisper base)", depth=2, group=seg_group)
-
-            async def _match_activity(icon: str, text: str):
-                _log_activity(job_id, icon, text, depth=2, group=seg_group)
-
-            try:
-                    matched = await asyncio.wait_for(
-                    _match_candidates(
-                        cands, segment, matcher, transcriber, job_id,
-                        max_concurrent_candidates,
-                        on_activity=_match_activity,
-                        script_context=script_context,
-                    ),
-                    timeout=segment_timeout,
+            if not shots_to_process:
+                fallback_shot = BRollShot(
+                    shot_id=f"{segment.segment_id}_shot_1",
+                    visual_need=segment.visual_need,
+                    search_queries=segment.search_queries,
+                    key_terms=segment.key_terms,
                 )
-            except asyncio.TimeoutError:
-                logger.warning("Segment %s timed out", segment.segment_id)
-                _log_activity(job_id, "alert", f"\"{segment.title}\" took too long ({segment_timeout}s) — moving to next scene", depth=2, group=seg_group)
-                matched = []
+                shots_to_process = [fallback_shot]
 
-            if matched:
-                context_rejected = sum(1 for _, m in matched if not m.context_match)
-                good_matches = [(c, m) for c, m in matched if m.confidence_score > 0 and m.start_time_seconds is not None]
-                no_transcript = len(matched) - len(good_matches) - context_rejected
-                notes = []
-                if no_transcript > 0:
-                    notes.append(f"{no_transcript} had no usable transcript")
-                if context_rejected > 0:
-                    notes.append(f"{context_rejected} rejected as wrong context")
-                note = f" ({', '.join(notes)})" if notes else ""
-                _log_activity(job_id, "eye", f"Found relevant moments in {len(good_matches)} out of {len(cands)} videos for \"{segment.title}\"{note}", depth=2, group=seg_group)
-                for cand, match in sorted(good_matches, key=lambda x: x[1].confidence_score, reverse=True)[:3]:
-                    ts_min = (match.start_time_seconds or 0) // 60
-                    ts_sec = (match.start_time_seconds or 0) % 60
-                    hook_text = f" — \"{match.the_hook}\"" if match.the_hook else ""
-                    _log_activity(job_id, "sparkles", f"▶ \"{cand.video_title[:55]}\" at {ts_min}:{ts_sec:02d} ({match.confidence_score:.0%} match){hook_text}", depth=3, group=seg_group)
+            for shot_idx, shot in enumerate(shots_to_process):
+                short_need = shot.visual_need[:55]
+                _log_activity(job_id, "search", f"  Shot {shot_idx + 1}/{len(shots_to_process)}: \"{short_need}\"", depth=2, group=seg_group)
 
-            ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg, script_context=script_context)
-            if ranked:
-                _log_activity(job_id, "check", f"Top {len(ranked)} clips selected for \"{segment.title}\" (ranked by AI confidence + relevance)", depth=2, group=seg_group)
-            else:
-                _log_activity(job_id, "alert", f"No clips found for \"{segment.title}\"", depth=2, group=seg_group)
-            all_segment_results[segment.segment_id] = ranked
-    
+                cands = candidates_by_segment.get(segment.segment_id, [])
+                shot_cands = cands
+
+                if shot.search_queries:
+                    try:
+                        shot_cands_new = await searcher.search_for_shot(
+                            shot, segment, job_id=job_id,
+                            on_progress=lambda icon, text, depth=2: _log_activity(job_id, icon, text, depth=depth, group=seg_group),
+                            script_context=script_context,
+                        )
+                        if shot_cands_new:
+                            existing_ids = {c.video_id for c in cands}
+                            for c in shot_cands_new:
+                                if c.video_id not in existing_ids:
+                                    cands.append(c)
+                                    existing_ids.add(c.video_id)
+                            shot_cands = shot_cands_new + [c for c in cands if c.video_id not in {sc.video_id for sc in shot_cands_new}]
+                    except Exception:
+                        logger.warning("Shot-specific search failed for %s, using segment candidates", shot.shot_id)
+
+                if not shot_cands:
+                    _log_activity(job_id, "alert", f"  No candidates for shot: \"{short_need}\"", depth=2, group=seg_group)
+                    continue
+
+                async def _match_activity(icon: str, text: str):
+                    _log_activity(job_id, icon, text, depth=3, group=seg_group)
+
+                try:
+                    matched = await asyncio.wait_for(
+                        _match_candidates(
+                            shot_cands, segment, matcher, transcriber, job_id,
+                            max_concurrent_candidates,
+                            on_activity=_match_activity,
+                            script_context=script_context,
+                            shot=shot,
+                        ),
+                        timeout=segment_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Shot %s timed out", shot.shot_id)
+                    matched = []
+
+                ranked = ranker.rank_and_filter(matched, segment, settings=pipeline_cfg, script_context=script_context, shot=shot)
+                if ranked:
+                    _log_activity(job_id, "check", f"  ✓ Found clip for \"{short_need}\": \"{ranked[0].video_title[:50]}\" ({ranked[0].confidence_score:.0%})", depth=2, group=seg_group)
+                    seg_ranked.extend(ranked[:1])
+                else:
+                    _log_activity(job_id, "alert", f"  ✗ No clip found for \"{short_need}\"", depth=2, group=seg_group)
+
+                shots_processed += 1
+
+            all_segment_results[segment.segment_id] = seg_ranked
+
+        for seg in skipped_segments:
+            all_segment_results[seg.segment_id] = []
 
         # --- Cross-segment dedup ---
-        _log_activity(job_id, "shield", "Removing duplicate clips — making sure the same video isn't suggested for multiple scenes", group="rank")
+        _log_activity(job_id, "shield", "Removing duplicate clips across segments", group="rank")
         all_segment_results = ranker.deduplicate_across_segments(all_segment_results)
 
         all_results: List[RankedResult] = []
@@ -358,7 +384,7 @@ async def run_pipeline(
             status_note = ""
             if not minimum_results_met:
                 status_note = f" (target was {script_duration}+ clips for a ~{script_duration}-min script)"
-            _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips with exact timestamps found across {total_segments} scenes{status_note}", group="rank")
+            _log_activity(job_id, "check", f"All done! {len(all_results)} B-roll clips found for {total_active_shots} shots across {len(active_segments)} segments{status_note}", group="rank")
         else:
             _log_activity(job_id, "alert", "No clips found. Ensure the companion app is running so yt-dlp can search and Whisper can transcribe audio locally.", group="rank")
         await storage.store_results(job_id, all_results, category=category)
@@ -453,6 +479,7 @@ async def _match_candidates(
     max_concurrent: int,
     on_activity=None,
     script_context: ScriptContext | None = None,
+    shot: BRollShot | None = None,
 ) -> List[Tuple[CandidateVideo, MatchResult]]:
     semaphore = asyncio.Semaphore(max_concurrent)
     results: List[Tuple[CandidateVideo, MatchResult]] = []
@@ -500,6 +527,7 @@ async def _match_candidates(
                 match = await matcher.find_timestamp(
                     transcript.transcript_text, segment, video_meta, job_id,
                     script_context=script_context,
+                    shot=shot,
                 )
                 if matcher.context_matching_enabled:
                     match = matcher.validate_context_match(

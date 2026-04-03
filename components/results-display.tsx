@@ -50,17 +50,17 @@ const SEGMENTS_PER_PAGE = 15
 
 export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayProps) {
   const activityLog = job.activity_log || []
-  const segmentsWithClips = useMemo(
-    () => job.segments.filter(s => s.results.length > 0),
+  const displaySegments = useMemo(
+    () => job.segments.filter(s => s.results.length > 0 || s.broll_count === 0),
     [job.segments],
   )
-  const totalPages = Math.max(1, Math.ceil(segmentsWithClips.length / SEGMENTS_PER_PAGE))
+  const hiddenCount = job.segments.length - displaySegments.length
+  const totalPages = Math.max(1, Math.ceil(displaySegments.length / SEGMENTS_PER_PAGE))
   const [currentPage, setCurrentPage] = useState(1)
   const pageSegments = useMemo(
-    () => segmentsWithClips.slice((currentPage - 1) * SEGMENTS_PER_PAGE, currentPage * SEGMENTS_PER_PAGE),
-    [segmentsWithClips, currentPage],
+    () => displaySegments.slice((currentPage - 1) * SEGMENTS_PER_PAGE, currentPage * SEGMENTS_PER_PAGE),
+    [displaySegments, currentPage],
   )
-  const emptySegmentCount = job.segments.length - segmentsWithClips.length
 
   return (
     <div className="space-y-6">
@@ -75,8 +75,9 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Segments" value={job.total_segments} />
+        <StatCard label="B-Roll Shots" value={job.total_shots || job.total_results} />
         <StatCard label="Clips Found" value={job.total_results} />
         <StatCard
           label="Min Met"
@@ -128,9 +129,9 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
             ))}
           </div>
 
-          {emptySegmentCount > 0 && (
+          {hiddenCount > 0 && (
             <p className="text-xs text-muted-foreground mt-3">
-              {emptySegmentCount} segment{emptySegmentCount !== 1 ? "s" : ""} with no clips hidden
+              {hiddenCount} segment{hiddenCount !== 1 ? "s" : ""} with no clips hidden
             </p>
           )}
 
@@ -262,12 +263,33 @@ function Pagination({ currentPage, totalPages, onPageChange }: {
   )
 }
 
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  if (m === 0) return `${s}s`
+  return s > 0 ? `${m}m ${s}s` : `${m}m`
+}
+
 function SegmentCard({ segment, index, jobId }: { segment: Segment; index: number; jobId: string }) {
   const [isOpen, setIsOpen] = useState(index < 3)
+  const isNoBroll = segment.broll_count === 0
+  const hasShots = segment.broll_shots && segment.broll_shots.length > 0
+  const resultsByShot = useMemo(() => {
+    if (!hasShots) return null
+    const map: Record<string, typeof segment.results> = {}
+    for (const shot of segment.broll_shots) {
+      map[shot.shot_id] = segment.results.filter(r => r.shot_id === shot.shot_id)
+    }
+    const unassigned = segment.results.filter(r => !r.shot_id)
+    if (unassigned.length > 0) {
+      map["_unassigned"] = unassigned
+    }
+    return map
+  }, [segment, hasShots])
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <Card>
+      <Card className={cn(isNoBroll && "opacity-60")}>
         <CollapsibleTrigger asChild>
           <CardHeader className="cursor-pointer hover:bg-secondary/30 transition-colors py-3">
             <div className="flex items-center justify-between">
@@ -277,13 +299,25 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
                 </span>
                 <div>
                   <h3 className="font-medium text-sm">{segment.title}</h3>
-                  <p className="text-xs text-muted-foreground">{segment.emotional_tone}</p>
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>{segment.emotional_tone}</span>
+                    <span>·</span>
+                    <span>{formatDuration(segment.estimated_duration_seconds)}</span>
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-xs">
-                  {segment.results.length} clip{segment.results.length !== 1 ? 's' : ''}
-                </Badge>
+                {isNoBroll ? (
+                  <Badge variant="secondary" className="text-xs text-muted-foreground">
+                    No B-roll
+                  </Badge>
+                ) : (
+                  <>
+                    <Badge variant="outline" className="text-xs">
+                      {segment.results.length}/{segment.broll_count} shot{segment.broll_count !== 1 ? 's' : ''}
+                    </Badge>
+                  </>
+                )}
                 {isOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </div>
             </div>
@@ -291,23 +325,59 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
         </CollapsibleTrigger>
         <CollapsibleContent>
           <CardContent className="pt-0 space-y-4">
-            <div className="space-y-1">
-              <p className="text-sm text-muted-foreground">{segment.summary}</p>
-              <p className="text-sm"><span className="font-medium">Visual need:</span> {segment.visual_need}</p>
-            </div>
-            <div className="flex flex-wrap gap-1">
-              {segment.key_terms.map((term, i) => (
-                <Badge key={i} variant="secondary" className="text-xs">{term}</Badge>
-              ))}
-            </div>
-            {segment.results.length > 0 ? (
-              <div className="space-y-3">
-                {segment.results.map((result) => (
-                  <ResultCard key={result.result_id} result={result} jobId={jobId} />
-                ))}
-              </div>
+            {isNoBroll ? (
+              <p className="text-sm text-muted-foreground italic">
+                {segment.broll_note || "Host on camera — no B-roll needed for this segment."}
+              </p>
             ) : (
-              <p className="text-sm text-muted-foreground italic">No clips found for this segment</p>
+              <>
+                <div className="space-y-1">
+                  <p className="text-sm text-muted-foreground">{segment.summary}</p>
+                </div>
+                {hasShots && resultsByShot ? (
+                  <div className="space-y-4">
+                    {segment.broll_shots.map((shot, shotIdx) => {
+                      const shotResults = resultsByShot[shot.shot_id] || []
+                      return (
+                        <div key={shot.shot_id} className="space-y-2">
+                          <div className="flex items-start gap-2">
+                            <span className="text-xs font-mono text-muted-foreground/70 pt-0.5 shrink-0">
+                              Shot {shotIdx + 1}
+                            </span>
+                            <p className="text-sm font-medium">{shot.visual_need}</p>
+                          </div>
+                          {shotResults.length > 0 ? (
+                            <div className="space-y-2 ml-12">
+                              {shotResults.map((result) => (
+                                <ResultCard key={result.result_id} result={result} jobId={jobId} />
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted-foreground italic ml-12">No clip found for this shot</p>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-1">
+                      {segment.key_terms.map((term, i) => (
+                        <Badge key={i} variant="secondary" className="text-xs">{term}</Badge>
+                      ))}
+                    </div>
+                    {segment.results.length > 0 ? (
+                      <div className="space-y-3">
+                        {segment.results.map((result) => (
+                          <ResultCard key={result.result_id} result={result} jobId={jobId} />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground italic">No clips found for this segment</p>
+                    )}
+                  </>
+                )}
+              </>
             )}
           </CardContent>
         </CollapsibleContent>
