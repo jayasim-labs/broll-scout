@@ -214,6 +214,63 @@ export interface UsageData {
   pricing: Record<string, number>
 }
 
+// Library types
+
+export interface LibraryClip {
+  result_id: string
+  segment_id: string
+  shot_id: string | null
+  shot_visual_need: string | null
+  video_id: string
+  video_url: string
+  video_title: string
+  channel_name: string
+  channel_subscribers: number
+  thumbnail_url: string
+  video_duration_seconds: number
+  published_at: string
+  view_count: number
+  start_time_seconds: number | null
+  end_time_seconds: number | null
+  clip_url: string | null
+  transcript_excerpt: string | null
+  the_hook: string | null
+  relevance_note: string | null
+  relevance_score: number
+  confidence_score: number
+  source_flag: TranscriptSource
+  context_match: boolean
+  editor_rating: number | null
+  clip_used: boolean
+  editor_notes: string | null
+  category: string | null
+  job_id: string | null
+  job_title: string | null
+}
+
+export interface LibraryCategoryCount {
+  name: string
+  count: number
+}
+
+export interface LibraryStats {
+  videos_indexed: number
+  clips_found: number
+  transcripts_cached: number
+  editor_rated: number
+  usage_rate: number
+  top_channels: Array<{ name: string; count: number }>
+  top_categories: LibraryCategoryCount[]
+}
+
+export interface LibrarySearchResponse {
+  total: number
+  page: number
+  results: LibraryClip[]
+  stats: LibraryStats
+  categories: LibraryCategoryCount[]
+}
+
 export interface PipelineSettings {
   search_queries_per_segment: number
   youtube_results_per_query: number

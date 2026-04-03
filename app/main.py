@@ -14,6 +14,7 @@ from app.models.schemas import (
     ChannelResolveRequest, SettingsResponse, HealthResponse,
     LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
     ProjectCreateRequest, ProjectListResponse, ProjectResponse, ProjectSummary,
+    DeepSearchRequest, AddToJobRequest, FindSimilarRequest, RecategorizeRequest,
 )
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
@@ -241,15 +242,99 @@ async def submit_feedback(
 
 @app.get("/api/v1/library/search")
 async def search_library(
-    topic: str | None = Query(default=None),
-    date_from: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    mode: str = Query(default="metadata"),
+    categories: str | None = Query(default=None),
     min_rating: int | None = Query(default=None, ge=1, le=5),
+    min_views: int | None = Query(default=None),
+    used: str | None = Query(default=None),
+    sort: str = Query(default="relevance"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, ge=1, le=200),
     x_api_key: str | None = Header(default=None),
 ):
     _verify_key(x_api_key)
-    storage = get_storage()
-    results = await storage.search_library(topic, date_from, min_rating)
-    return LibrarySearchResponse(results=results, total_count=len(results))
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    return await svc.search(
+        q=q, categories=categories, min_rating=min_rating,
+        min_views=min_views, used=used, sort=sort,
+        page=page, per_page=per_page,
+    )
+
+
+@app.get("/api/v1/library/stats")
+async def library_stats(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    return await svc.get_stats()
+
+
+@app.post("/api/v1/library/deep-search")
+async def library_deep_search(
+    body: DeepSearchRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    clips = await svc.deep_search(body.query, body.max_results)
+    stats = await svc.get_stats()
+    return LibrarySearchResponse(total=len(clips), results=clips, stats=stats)
+
+
+@app.post("/api/v1/library/add-to-job")
+async def library_add_to_job(
+    body: AddToJobRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    ok = await svc.add_to_job(body.job_id, body.result_id, body.job_id, body.segment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Source clip not found")
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/library/find-similar")
+async def library_find_similar(
+    body: FindSimilarRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    clips = await svc.find_similar(body.job_id, body.result_id)
+    return {"results": [c.model_dump() for c in clips]}
+
+
+@app.post("/api/v1/library/re-categorize")
+async def library_recategorize(
+    body: RecategorizeRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    ok = await svc.recategorize(body.job_id, body.result_id, body.category)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to recategorize")
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/library/categories")
+async def library_categories(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    from app.services.library import get_library_service
+    svc = get_library_service()
+    stats = await svc.get_stats()
+    return {"categories": [c.model_dump() for c in stats.top_categories]}
 
 
 @app.get("/api/v1/settings")

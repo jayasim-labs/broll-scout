@@ -377,12 +377,88 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
                     )}
                   </>
                 )}
+                <LibrarySuggestions segment={segment} />
               </>
             )}
           </CardContent>
         </CollapsibleContent>
       </Card>
     </Collapsible>
+  )
+}
+
+function LibrarySuggestions({ segment }: { segment: Segment }) {
+  const [suggestions, setSuggestions] = useState<any[]>([])
+  const [expanded, setExpanded] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  const loadSuggestions = useCallback(async () => {
+    if (loaded) { setExpanded(!expanded); return }
+    try {
+      const params = new URLSearchParams({
+        q: segment.key_terms.slice(0, 5).join(" "),
+        per_page: "3",
+      })
+      const resp = await fetch(`/api/v1/library/search?${params.toString()}`)
+      if (resp.ok) {
+        const data = await resp.json()
+        const existingIds = new Set(segment.results.map(r => r.video_id))
+        const filtered = (data.results || []).filter(
+          (c: any) => !existingIds.has(c.video_id)
+        )
+        setSuggestions(filtered.slice(0, 3))
+      }
+    } catch { /* silent */ }
+    setLoaded(true)
+    setExpanded(true)
+  }, [segment, loaded, expanded])
+
+  if (segment.broll_count === 0) return null
+
+  return (
+    <div className="mt-3 pt-3 border-t border-border/50">
+      <button
+        onClick={loadSuggestions}
+        className="text-xs text-primary hover:underline flex items-center gap-1"
+      >
+        <Sparkles className="w-3 h-3" />
+        {expanded ? "Hide library suggestions" : "Show clips from your library"}
+        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+      </button>
+      {expanded && suggestions.length > 0 && (
+        <div className="mt-2 space-y-2 pl-4 border-l-2 border-primary/20">
+          {suggestions.map((clip: any) => (
+            <div key={clip.result_id} className="flex items-start gap-2 text-xs">
+              <a
+                href={clip.clip_url || clip.video_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-16 h-9 rounded overflow-hidden flex-shrink-0 bg-muted"
+              >
+                <img
+                  src={clip.thumbnail_url || `https://img.youtube.com/vi/${clip.video_id}/mqdefault.jpg`}
+                  alt="" className="w-full h-full object-cover"
+                />
+              </a>
+              <div className="min-w-0">
+                <a
+                  href={clip.clip_url || clip.video_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium hover:text-primary line-clamp-1"
+                >
+                  {clip.video_title}
+                </a>
+                <p className="text-muted-foreground">{clip.channel_name}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {expanded && loaded && suggestions.length === 0 && (
+        <p className="text-xs text-muted-foreground italic mt-1">No additional clips in your library for this segment</p>
+      )}
+    </div>
   )
 }
 

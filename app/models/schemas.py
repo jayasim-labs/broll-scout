@@ -300,15 +300,82 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
 
 
-class LibrarySearchParams(BaseModel):
-    topic: Optional[str] = None
-    date_from: Optional[str] = None
-    min_rating: Optional[int] = Field(default=None, ge=1, le=5)
+class LibraryClip(BaseModel):
+    """A clip from the library with usage context."""
+    result_id: str
+    segment_id: str
+    shot_id: Optional[str] = None
+    shot_visual_need: Optional[str] = None
+    video_id: str
+    video_url: str
+    video_title: str
+    channel_name: str
+    channel_subscribers: int = 0
+    thumbnail_url: str
+    video_duration_seconds: int = 0
+    published_at: str = ""
+    view_count: int = 0
+    start_time_seconds: Optional[int] = None
+    end_time_seconds: Optional[int] = None
+    clip_url: Optional[str] = None
+    transcript_excerpt: Optional[str] = None
+    the_hook: Optional[str] = None
+    relevance_note: Optional[str] = None
+    relevance_score: float = 0.0
+    confidence_score: float = 0.0
+    source_flag: TranscriptSource = TranscriptSource.NONE
+    context_match: bool = True
+    editor_rating: Optional[int] = None
+    clip_used: bool = False
+    editor_notes: Optional[str] = None
+    category: Optional[str] = None
+    job_id: Optional[str] = None
+    job_title: Optional[str] = None
+
+
+class LibraryCategoryCount(BaseModel):
+    name: str
+    count: int
+
+
+class LibraryStats(BaseModel):
+    videos_indexed: int = 0
+    clips_found: int = 0
+    transcripts_cached: int = 0
+    editor_rated: int = 0
+    usage_rate: float = 0.0
+    top_channels: List[Dict[str, Any]] = Field(default_factory=list)
+    top_categories: List[LibraryCategoryCount] = Field(default_factory=list)
 
 
 class LibrarySearchResponse(BaseModel):
-    results: List[RankedResult] = Field(default_factory=list)
-    total_count: int = 0
+    total: int = 0
+    page: int = 1
+    results: List[LibraryClip] = Field(default_factory=list)
+    stats: LibraryStats = Field(default_factory=LibraryStats)
+    categories: List[LibraryCategoryCount] = Field(default_factory=list)
+
+
+class DeepSearchRequest(BaseModel):
+    query: str = Field(..., min_length=2)
+    max_results: int = Field(default=20, ge=1, le=50)
+
+
+class AddToJobRequest(BaseModel):
+    job_id: str
+    result_id: str
+    segment_id: str
+
+
+class FindSimilarRequest(BaseModel):
+    result_id: str
+    job_id: str
+
+
+class RecategorizeRequest(BaseModel):
+    result_id: str
+    job_id: str
+    category: str
 
 
 class AgentPollRequest(BaseModel):
