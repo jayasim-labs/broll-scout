@@ -749,14 +749,26 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
               <Select value={settings.matcher_backend || "auto"} onValueChange={(v) => onChange("matcher_backend", v)}>
                 <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">Auto — local Ollama first, fall back to API</SelectItem>
+                  <SelectItem value="auto">Auto — local Ollama first</SelectItem>
                   <SelectItem value="local">Local only — Ollama via companion ($0 cost)</SelectItem>
                   <SelectItem value="api">API only — OpenAI GPT-4o-mini</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground/70 mt-1">
-                Auto tries the local Qwen3 model via Ollama (free), and falls back to GPT-4o-mini if the companion isn&apos;t running or the model isn&apos;t available.
+                Auto uses the local Qwen3 model via Ollama (free). If the local model fails, the clip is skipped unless API fallback is enabled below.
               </p>
+              <div className="flex items-center justify-between mt-3 p-2.5 rounded-md border border-border bg-secondary/30">
+                <div>
+                  <Label className="text-sm">API fallback (GPT-4o-mini)</Label>
+                  <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+                    When enabled, uses GPT-4o-mini as fallback if local Ollama fails or is unavailable. Costs ~$0.001/video. When disabled, clips are skipped if the local model can&apos;t match — zero API cost for matching.
+                  </p>
+                </div>
+                <Switch
+                  checked={!!settings.api_fallback_enabled}
+                  onCheckedChange={(v) => onChange("api_fallback_enabled", v)}
+                />
+              </div>
             </div>
             <div>
               <Label className="text-sm">Local LLM model</Label>
@@ -784,7 +796,7 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground/70 mt-1">
-                Used when backend is &quot;api&quot; or as fallback in &quot;auto&quot; mode. Called once per candidate video (30–80 per job).
+                Used when backend is &quot;api&quot; or as fallback in &quot;auto&quot; mode (only if API fallback is enabled). Called once per candidate video.
               </p>
             </div>
             <div>

@@ -253,7 +253,7 @@ class MatcherService:
                 result["_matcher_source"] = model
             return result
 
-        # "auto" — try local first, fall back to API
+        # "auto" — try local first, optionally fall back to API
         if agent_queue.is_agent_available():
             try:
                 result = await self._call_local(prompt, job_id)
@@ -264,13 +264,19 @@ class MatcherService:
                     result["_matcher_source"] = f"Ollama/{matcher_model}"
                     return result
                 if result and result.get("matcher_source") == "local_unavailable":
-                    logger.info("Local model unavailable, falling back to API")
+                    logger.info("Local model unavailable")
                 else:
-                    logger.info("Local model returned zero confidence, falling back to API")
+                    logger.info("Local model returned zero confidence")
             except Exception:
-                logger.warning("Local matcher failed, falling back to API")
+                logger.warning("Local matcher failed")
+
+        api_fallback = self._get("api_fallback_enabled", False)
+        if not api_fallback:
+            logger.info("API fallback disabled — returning no match (enable api_fallback_enabled in settings to use GPT-4o-mini)")
+            return None
 
         model = self._get("timestamp_model", "gpt-4o-mini")
+        logger.info("Falling back to API model %s", model)
         result = await self._call_api(prompt, model, job_id)
         if result:
             result["_matcher_source"] = model

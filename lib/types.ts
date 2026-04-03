@@ -282,6 +282,7 @@ export interface PipelineSettings {
   translation_model: string
   matcher_backend: string
   matcher_model: string
+  api_fallback_enabled: boolean
   confidence_threshold: number
   whisper_max_video_duration_min: number
   whisper_audio_trim_min: number
