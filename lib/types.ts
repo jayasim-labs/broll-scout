@@ -305,12 +305,11 @@ export interface LibrarySearchResponse {
 }
 
 export interface PipelineSettings {
-  search_queries_per_segment: number
+  // Search
   youtube_results_per_query: number
   max_candidates_per_segment: number
-  top_results_per_segment: number
-  total_results_target: number
-  gemini_expanded_queries: number
+
+  // Models & matching
   timestamp_model: string
   translation_model: string
   matcher_backend: string
@@ -318,7 +317,8 @@ export interface PipelineSettings {
   api_fallback_enabled: boolean
   confidence_threshold: number
   whisper_max_video_duration_min: number
-  whisper_audio_trim_min: number
+
+  // Video filtering & ranking
   min_video_duration_sec: number
   max_video_duration_sec: number
   prefer_min_subscribers: number
@@ -329,10 +329,11 @@ export interface PipelineSettings {
   weight_channel_authority: number
   weight_caption_quality: number
   weight_recency: number
-  max_concurrent_segments: number
+
+  // Performance
   segment_timeout_sec: number
-  low_result_threshold: number
-  search_backend: string
+
+  // Channel management
   preferred_channels_tier1: string[]
   preferred_channels_tier2: string[]
   blocked_networks: string[]
@@ -340,12 +341,13 @@ export interface PipelineSettings {
   blocked_sports: string[]
   custom_block_rules: string
   channel_sources: ChannelEntry[]
+
+  // Instructions & validation
   special_instructions: string
   enable_context_matching: boolean
   discard_clips_shorter_than_10s: boolean
   verify_timestamp_not_end_screen: boolean
   cap_end_timestamp: boolean
-  public_domain_archives: Array<{ name: string; url: string }>
-  stock_platforms: Record<string, boolean>
+
   [key: string]: unknown
 }

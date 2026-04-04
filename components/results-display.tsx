@@ -22,7 +22,7 @@ import { categoryLabel } from "@/lib/types"
 
 interface ResultsDisplayProps {
   job: JobResponse
-  onExport: () => void
+  onExport?: () => void
   onNewSearch: () => void
 }
 
@@ -79,15 +79,15 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
         <p className="text-sm text-muted-foreground">
           {job.script_duration_minutes}-minute script &middot;{" "}
           {job.total_segments} segments &middot;{" "}
-          {job.total_shots || job.total_results} B-roll shots &middot;{" "}
+          {job.total_shots || 0} B-roll shots &middot;{" "}
+          {job.total_results} clips found &middot;{" "}
           {job.segments_with_no_broll} host-on-camera segments
         </p>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard label="Duration" value={`${job.script_duration_minutes} min`} />
           <StatCard label="Segments" value={job.total_segments} />
-          <StatCard label="B-Roll Shots" value={job.total_shots || job.total_results} />
+          <StatCard label="B-Roll Shots" value={job.total_shots || 0} />
           <StatCard label="Clips Found" value={job.total_results} />
-          <StatCard label="API Cost" value={`$${job.api_costs.estimated_cost_usd.toFixed(2)}`} />
         </div>
         {job.coverage_assessment?.note && (
           <p className="text-xs text-muted-foreground italic">
@@ -124,10 +124,6 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
             </TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={onExport} className="gap-2">
-              <Download className="w-4 h-4" />
-              Export JSON
-            </Button>
             <Button variant="secondary" size="sm" onClick={onNewSearch} className="gap-2">
               <RefreshCw className="w-4 h-4" />
               New Search
@@ -289,7 +285,7 @@ function formatDuration(seconds: number): string {
 }
 
 function SegmentCard({ segment, index, jobId }: { segment: Segment; index: number; jobId: string }) {
-  const [isOpen, setIsOpen] = useState(index < 3)
+  const [isOpen, setIsOpen] = useState(true)
   const isNoBroll = segment.broll_count === 0
   const hasShots = segment.broll_shots && segment.broll_shots.length > 0
   const resultsByShot = useMemo(() => {
@@ -312,9 +308,9 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
           <CardHeader className="cursor-pointer hover:bg-secondary/30 transition-colors py-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <span className="text-xs font-mono text-muted-foreground w-12">
-                  {segment.segment_id.replace("seg_", "#")}
-                </span>
+                <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary/10 text-primary font-bold text-sm shrink-0">
+                  {index + 1}
+                </div>
                 <div>
                   <h3 className="font-medium text-sm">{segment.title}</h3>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">

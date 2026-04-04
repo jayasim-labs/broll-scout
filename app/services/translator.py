@@ -88,10 +88,16 @@ Return as valid JSON with four keys: "english_translation" (string), "script_con
 class TranslatorService:
     """Translates Tamil scripts to English and segments them via GPT-4o."""
 
-    def __init__(self):
+    def __init__(self, pipeline_settings: dict | None = None):
         settings = get_settings()
         self.api_key = settings.openai_api_key
         self.api_url = "https://api.openai.com/v1/chat/completions"
+        self._pipeline = pipeline_settings or {}
+
+    def _get(self, key: str, fallback=None):
+        if key in self._pipeline:
+            return self._pipeline[key]
+        return DEFAULTS.get(key, fallback)
 
     async def translate_and_segment(
         self,
@@ -109,8 +115,8 @@ class TranslatorService:
                 except Exception:
                     pass
 
-        translation_model = DEFAULTS.get("translation_model", "gpt-4o")
-        special_instructions = DEFAULTS.get("special_instructions", "")
+        translation_model = self._get("translation_model", "gpt-4o")
+        special_instructions = self._get("special_instructions", "")
 
         word_count = len(script.split())
         estimated_minutes = max(1, round(word_count / 100))

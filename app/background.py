@@ -146,7 +146,7 @@ async def run_pipeline(
             _log_activity(job_id, icon, text, depth=1, group="translate")
     
 
-        translator = TranslatorService()
+        translator = TranslatorService(pipeline_settings=pipeline_cfg)
         segments, english_translation, script_context = await translator.translate_and_segment(
             script, job_id, on_progress=_translator_progress,
         )
@@ -205,7 +205,7 @@ async def run_pipeline(
         _log_activity(job_id, "clock", f"Search pipeline: {sources} → transcript fetch streams as videos are discovered", depth=1, group="search")
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
-        transcriber = TranscriberService()
+        transcriber = TranscriberService(pipeline_settings=pipeline_cfg)
         search_start = time.time()
 
         # Shared state for streaming dedup

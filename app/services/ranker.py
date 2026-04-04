@@ -87,6 +87,11 @@ class RankerService:
 
         scored.sort(key=lambda x: x[2], reverse=True)
 
+        if threshold > 0:
+            above = [s for s in scored if s[2] >= threshold]
+            if above:
+                scored = above
+
         if not scored and candidates:
             for cand, match in candidates:
                 if match.start_time_seconds is not None and match.confidence_score > 0:

@@ -729,34 +729,14 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             </p>
           </div>
           <SliderSetting
-            label="Search queries per segment" value={settings.search_queries_per_segment} min={1} max={5}
-            onChange={(v) => onChange("search_queries_per_segment", v)}
-            help="Number of search queries generated per script scene. GPT-4o creates broad, specific, and creative queries. Higher = more variety but slower since each query goes through yt-dlp."
-          />
-          <SliderSetting
             label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10}
             onChange={(v) => onChange("youtube_results_per_query", v)}
-            help="How many YouTube results to fetch per search query. With 3 queries × 5 results = 15 raw candidates per scene before filtering."
+            help="How many YouTube results to fetch per search query. GPT-4o generates ~3 search queries per shot, so 3 queries × 5 results = 15 raw candidates per shot before filtering."
           />
           <SliderSetting
             label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20}
             onChange={(v) => onChange("max_candidates_per_segment", v)}
-            help="After deduplication and duration filtering, keep at most this many videos per scene for transcript analysis. Higher = more thorough but slower (each candidate needs a transcript fetch + GPT-4o-mini call)."
-          />
-          <SliderSetting
-            label="Clips per scene" value={settings.top_results_per_segment} min={1} max={5}
-            onChange={(v) => onChange("top_results_per_segment", v)}
-            help="How many clip options to show per scene. Higher = more choices for the editor. 3 is recommended — gives variety without overwhelming."
-          />
-          <SliderSetting
-            label="Target total results" value={settings.total_results_target} min={15} max={60}
-            onChange={(v) => onChange("total_results_target", v)}
-            help="Desired total number of clips across all scenes. The pipeline stops early if this target is reached, or retries sparse scenes if below."
-          />
-          <SliderSetting
-            label="Gemini expanded queries" value={settings.gemini_expanded_queries} min={0} max={10}
-            onChange={(v) => onChange("gemini_expanded_queries", v)}
-            help="When Gemini AI Expansion is toggled on during job submission, this controls how many creative lateral search queries Gemini 1.5 Flash suggests per scene. Set to 0 to disable even when toggled on."
+            help="After deduplication and duration filtering, keep at most this many videos per scene for transcript analysis. Higher = more thorough but slower (each candidate needs a transcript fetch + AI match call)."
           />
         </CardContent>
       </Card>
@@ -846,11 +826,6 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120}
             onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min"
             help="Videos longer than this are skipped for Whisper transcription (too slow/large to download audio locally). Only applies when no YouTube captions exist."
-          />
-          <SliderSetting
-            label="Audio trim length for Whisper" value={settings.whisper_audio_trim_min} min={5} max={30}
-            onChange={(v) => onChange("whisper_audio_trim_min", v)} unit=" min"
-            help="When Whisper transcribes a video, only the first N minutes of audio are downloaded and transcribed. Saves time on long videos while still finding relevant clips in the opening portion."
           />
         </CardContent>
       </Card>
@@ -947,19 +922,9 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
         </CardHeader>
         <CardContent className="space-y-4">
           <SliderSetting
-            label="Max concurrent segments" value={settings.max_concurrent_segments} min={1} max={10}
-            onChange={(v) => onChange("max_concurrent_segments", v)}
-            help="How many scenes to search in parallel. Higher = faster overall search, but more concurrent YouTube/yt-dlp requests. Limited to 2 when using yt-dlp companion (serial subprocess calls)."
-          />
-          <SliderSetting
-            label="Segment timeout" value={settings.segment_timeout_sec} min={30} max={180}
+            label="Segment timeout" value={settings.segment_timeout_sec} min={60} max={600}
             onChange={(v) => onChange("segment_timeout_sec", v)} unit="s"
-            help="Max time allowed for transcript fetching + timestamp matching per scene. If a scene takes longer (e.g., slow Whisper transcription), it's skipped and the pipeline moves on."
-          />
-          <SliderSetting
-            label="Low result threshold" value={settings.low_result_threshold} min={10} max={30}
-            onChange={(v) => onChange("low_result_threshold", v)}
-            help="If total results across all scenes fall below this number, the pipeline runs a broader recovery search on empty scenes. Prevents jobs from returning too few clips."
+            help="Max time allowed for recovery search per scene. If a scene takes longer (e.g., slow Whisper transcription), it's skipped and the pipeline moves on."
           />
         </CardContent>
       </Card>

@@ -214,7 +214,8 @@ class MatcherService:
                 match.end_time_seconds = max(0, video_duration_seconds - 5)
             end = match.end_time_seconds
 
-        if start is not None and end is not None and (end - start) < 10:
+        discard_short = self._get("discard_clips_shorter_than_10s", True)
+        if discard_short and start is not None and end is not None and (end - start) < 10:
             match.confidence_score = max(0.0, match.confidence_score - 0.1)
 
         if verify_end_screen and start is not None and video_duration_seconds > 0:

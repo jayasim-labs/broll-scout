@@ -46,7 +46,7 @@ async def expand_shots_for_segment(
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
-        transcriber = TranscriberService()
+        transcriber = TranscriberService(pipeline_settings=pipeline_cfg)
         ranker = RankerService()
         timeout = pipeline_cfg.get("segment_timeout_sec", 300)
         max_concurrent = pipeline_cfg.get("max_concurrent_candidates", 3)

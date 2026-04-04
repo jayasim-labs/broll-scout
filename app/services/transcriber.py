@@ -16,8 +16,14 @@ _ytt_api = YouTubeTranscriptApi()
 class TranscriberService:
     """Fetches transcripts via cache -> YouTube captions -> agent -> Whisper flag cascade."""
 
-    def __init__(self):
+    def __init__(self, pipeline_settings: dict | None = None):
         self.settings = get_settings()
+        self._pipeline = pipeline_settings or {}
+
+    def _get(self, key: str, fallback=None):
+        if key in self._pipeline:
+            return self._pipeline[key]
+        return DEFAULTS.get(key, fallback)
 
     async def get_transcript(
         self,
@@ -92,7 +98,7 @@ class TranscriberService:
             logger.warning("[transcript] Agent captions failed for %s", video_id)
 
         # Last resort: Whisper transcription via local companion
-        max_whisper_duration = DEFAULTS.get("whisper_max_video_duration_min", 60) * 60
+        max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60
         effective_duration = video_duration_seconds or 300
         agent_up = agent_queue.is_agent_available()
         whisper_queue_depth = agent_queue.pending_task_count("whisper")
@@ -165,7 +171,7 @@ class TranscriberService:
             logger.warning("[whisper] No agent available for %s", video_id)
             return None
 
-        max_dur_min = DEFAULTS.get("whisper_max_video_duration_min", 60)
+        max_dur_min = self._get("whisper_max_video_duration_min", 60)
         task_id = await agent_queue.create_task("whisper", {
             "video_id": video_id,
             "max_duration_min": max_dur_min,

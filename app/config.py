@@ -28,21 +28,16 @@ def get_settings() -> Settings:
 
 
 DEFAULTS = {
-    "search_queries_per_segment": 3,
+    # Search
     "youtube_results_per_query": 5,
     "max_candidates_per_segment": 12,
     "max_candidates_per_shot": 8,
-    "top_results_per_segment": 3,
-    "total_results_target": 30,
-    "gemini_expanded_queries": 5,
 
-    "min_broll_per_segment": 0,
+    # Segmentation quality checks (internal, not exposed in UI)
     "warn_long_no_broll_sec": 180,
     "max_no_broll_gap_sec": 300,
-    "min_segment_duration_sec": 20,
-    "max_segment_duration_sec": 180,
-    "allow_zero_broll_segments": True,
 
+    # Models & matching
     "timestamp_model": "gpt-4o-mini",
     "translation_model": "gpt-4o",
     "matcher_backend": "auto",
@@ -51,9 +46,9 @@ DEFAULTS = {
     "confidence_threshold": 0.15,
     "whisper_max_video_duration_min": 60,
     "avg_whisper_processing_sec": 45,
-    "whisper_audio_trim_min": 20,
     "transcript_excerpt_max_words": 200,
 
+    # Video filtering & ranking
     "min_video_duration_sec": 180,
     "max_video_duration_sec": 5400,
     "prefer_min_subscribers": 10000,
@@ -67,16 +62,10 @@ DEFAULTS = {
     "weight_caption_quality": 0.05,
     "weight_recency": 0.15,
 
-    "max_concurrent_segments": 5,
+    # Performance
     "max_concurrent_candidates": 3,
     "segment_timeout_sec": 300,
-    "retry_attempts": 3,
-    "retry_backoff_base_sec": 1,
-    "youtube_api_batch_size": 50,
-    "low_result_threshold": 20,
-    "search_backend": "ytdlp_only",
     "enable_gemini_expansion": False,
-    "min_total_results_for_long_scripts": 30,
 
     "preferred_channels_tier1": [
         "UC_5jTJ1XNWcq9FOWX6Q7hCg",
