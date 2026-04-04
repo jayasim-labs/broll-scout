@@ -70,17 +70,20 @@ def ensure_ollama_running() -> bool:
     try:
         ollama_client.list()
         _ollama_server_ready = True
-        log.info("Ollama server already running")
+        log.info("Ollama server already running (for parallel matching, restart with OLLAMA_NUM_PARALLEL=3)")
         return True
     except Exception:
         pass
 
     try:
-        log.info("Starting Ollama server...")
+        log.info("Starting Ollama server (OLLAMA_NUM_PARALLEL=3)...")
+        env = os.environ.copy()
+        env["OLLAMA_NUM_PARALLEL"] = "3"
         _ollama_process = subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         for _ in range(30):
             time.sleep(1)
@@ -102,7 +105,7 @@ def ensure_ollama_running() -> bool:
 
 
 def ensure_model_loaded() -> bool:
-    """Check if the matcher model is pulled locally."""
+    """Check if the matcher model is pulled locally, then warm it up."""
     global _ollama_model_ready
     if not _ollama_available or not _ollama_server_ready:
         return False
@@ -112,7 +115,16 @@ def ensure_model_loaded() -> bool:
         base_name = MATCHER_MODEL.split(":")[0]
         if any(base_name in m for m in model_names):
             _ollama_model_ready = True
-            log.info("Model %s ready", MATCHER_MODEL)
+            log.info("Model %s found — warming up (loading into GPU memory)...", MATCHER_MODEL)
+            try:
+                ollama_client.chat(
+                    model=MATCHER_MODEL,
+                    messages=[{"role": "user", "content": "hello"}],
+                    keep_alive=-1,
+                )
+                log.info("Model %s warm — loaded in GPU memory (keep_alive=-1)", MATCHER_MODEL)
+            except Exception as e:
+                log.warning("Model warm-up failed: %s — first match call will be slower", e)
             return True
         log.warning("Model %s not found. Run: ollama pull %s", MATCHER_MODEL, MATCHER_MODEL)
         return False
@@ -501,14 +513,16 @@ def ollama_match_timestamp(payload: dict) -> dict:
                 "num_ctx": 32768,
                 "num_predict": 512,
             },
+            keep_alive=-1,
         )
         elapsed_ms = int((time.time() - start_t) * 1000)
         result = json.loads(response["message"]["content"])
         result["matcher_source"] = "local"
         result["matcher_model"] = model
         result["matcher_latency_ms"] = elapsed_ms
-        log.info("Local match done in %dms (model=%s, confidence=%.2f)",
-                 elapsed_ms, model, result.get("confidence_score", 0))
+        prompt_words = len(prompt.split())
+        log.info("Local match done in %dms (model=%s, confidence=%.2f, prompt=%d words)",
+                 elapsed_ms, model, result.get("confidence_score", 0), prompt_words)
         return result
     except Exception as e:
         elapsed_ms = int((time.time() - start_t) * 1000)

@@ -434,10 +434,6 @@ async def run_pipeline(
         else:
             match_label = f"Ollama/{matcher_model} (API fallback)"
 
-        _set_progress(job_id, "matching", 50, "Matching timestamps with local AI...")
-        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots using {videos_with_transcript} videos with transcripts", group="match")
-        _log_activity(job_id, "clock", f"Each (video, shot) pair gets a dedicated {match_label} call", depth=1, group="match")
-
         matcher = MatcherService(pipeline_settings=pipeline_cfg)
         ranker = RankerService()
 
@@ -465,13 +461,20 @@ async def run_pipeline(
         matches_done = 0
         matches_lock = asyncio.Lock()
 
+        _set_progress(job_id, "matching", 50, f"Matching {total_match_pairs} video-shot pairs with local AI...")
+        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots against {videos_with_transcript} videos with transcripts ({total_match_pairs} video-shot pairs to process)", group="match")
+        _log_activity(job_id, "clock", f"Each (video, shot) pair gets a dedicated {match_label} call", depth=1, group="match")
+
         async def _match_one(vid: str, shot_id: str):
             nonlocal matches_done
             seg, shot = shot_id_to_info[shot_id]
             cand = video_pool[vid]
             transcript_text = transcript_cache.get(vid)
+            yt_link = f"🔗 {vid}"
+            word_count = len(transcript_text.split()) if transcript_text else 0
 
             async with match_semaphore:
+                match_t0 = time.time()
                 try:
                     video_meta = {
                         "video_duration_seconds": cand.video_duration_seconds,
@@ -489,14 +492,16 @@ async def run_pipeline(
                             match, cand.video_duration_seconds,
                         )
 
+                    match_dur = round(time.time() - match_t0, 1)
+                    short_title = cand.video_title[:40]
+                    short_need = shot.visual_need[:30]
+
                     if transcript_text and match.confidence_score > 0:
                         s_start = match.start_time_seconds or 0
                         s_end = match.end_time_seconds or 0
                         ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
                         model_label = match.matcher_source or "LLM"
-                        short_title = cand.video_title[:40]
-                        short_need = shot.visual_need[:30]
-                        _log_activity(job_id, "brain", f"🤖 {model_label} → \"{short_title}\" → {match.confidence_score:.0%} at {ts_label} (for \"{short_need}\")", depth=3, group="match")
+                        _log_activity(job_id, "brain", f"🤖 {model_label} → \"{short_title}\" → {match.confidence_score:.0%} at {ts_label} (for \"{short_need}\") [{match_dur}s, {word_count} words] — {yt_link}", depth=3, group="match")
 
                     shot_match_results[shot_id].append((cand, match))
                 except Exception:
@@ -504,19 +509,27 @@ async def run_pipeline(
 
             async with matches_lock:
                 matches_done += 1
-                if matches_done % 10 == 0 or matches_done == total_match_pairs:
+                pending = total_match_pairs - matches_done
+                if matches_done % 5 == 0 or matches_done == total_match_pairs:
                     pct = 55 + int(35 * matches_done / max(total_match_pairs, 1))
                     elapsed_s = time.time() - match_start
                     if matches_done > 0:
                         per_match = elapsed_s / matches_done
-                        remaining = int(per_match * (total_match_pairs - matches_done))
-                        time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
+                        remaining = int(per_match * pending)
+                        remaining_min = remaining // 60
+                        remaining_sec = remaining % 60
+                        if remaining_min > 0:
+                            time_note = f" (~{remaining_min}m {remaining_sec}s remaining)"
+                        elif remaining > 0:
+                            time_note = f" (~{remaining_sec}s remaining)"
+                        else:
+                            time_note = ""
                     else:
                         time_note = ""
-                    _set_progress(job_id, "matching", pct, f"Matching {matches_done}/{total_match_pairs} video-shot pairs{time_note}")
+                    _set_progress(job_id, "matching", pct, f"Matched {matches_done}/{total_match_pairs} pairs — {pending} pending{time_note}")
 
         _set_progress(job_id, "matching", 55, f"Matching {total_match_pairs} video-shot pairs...")
-        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches", depth=1, group="match")
+        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches ({max_concurrent_candidates} at a time)", depth=1, group="match")
 
         await asyncio.gather(
             *[_match_one(vid, shot_id) for vid, shot_id in match_tasks],

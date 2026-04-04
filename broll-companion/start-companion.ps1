@@ -68,6 +68,28 @@ Write-Host "  Updating yt-dlp..." -ForegroundColor Gray
 pip install --upgrade yt-dlp --quiet 2>$null
 Write-Host "  OK" -ForegroundColor Green
 
+# --- Restart Ollama with OLLAMA_NUM_PARALLEL=3 ---
+$ollamaPath = Get-Command ollama -ErrorAction SilentlyContinue
+if ($ollamaPath) {
+    Write-Host "  Stopping Ollama (to apply OLLAMA_NUM_PARALLEL=3)..." -ForegroundColor Gray
+    Get-Process -Name "ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    Write-Host "  Starting Ollama server (OLLAMA_NUM_PARALLEL=3)..." -ForegroundColor Gray
+    $env:OLLAMA_NUM_PARALLEL = "3"
+    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 1
+        try {
+            $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+            Write-Host "  OK - Ollama running (parallel=3)" -ForegroundColor Green
+            break
+        } catch {}
+    }
+} else {
+    Write-Host "  WARNING: Ollama not found — install from https://ollama.com" -ForegroundColor Yellow
+}
+
 # --- Check companion.py ---
 if (-not (Test-Path $CompanionPy)) {
     Write-Host ""
