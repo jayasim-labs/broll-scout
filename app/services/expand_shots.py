@@ -78,12 +78,16 @@ async def expand_shots_for_segment(
                            f"New idea: \"{shot.visual_need}\"",
                            f"Queries: {', '.join(shot.search_queries[:3])}")
 
-        searcher = SearcherService(pipeline_settings=pipeline_cfg)
-        matcher = MatcherService(pipeline_settings=pipeline_cfg)
-        transcriber = TranscriberService(pipeline_settings=pipeline_cfg)
+        expand_cfg = dict(pipeline_cfg)
+        expand_cfg["max_candidates_per_shot"] = 5
+        expand_cfg["youtube_results_per_query"] = 5
+
+        searcher = SearcherService(pipeline_settings=expand_cfg)
+        matcher = MatcherService(pipeline_settings=expand_cfg)
+        transcriber = TranscriberService(pipeline_settings=expand_cfg)
         ranker = RankerService()
-        timeout = pipeline_cfg.get("segment_timeout_sec", 300)
-        max_concurrent = pipeline_cfg.get("max_concurrent_candidates", 3)
+        match_timeout = 90
+        good_enough_confidence = 0.5
 
         new_results: list[RankedResult] = []
         for shot in new_shots:
@@ -103,69 +107,80 @@ async def expand_shots_for_segment(
                 continue
 
             _emit_progress(job_id, seg_id, "transcripts",
-                           f"Found {len(cands)} candidate videos — fetching transcripts...")
+                           f"Found {len(cands)} candidates — fetching transcripts (cached first)...")
 
-            semaphore = asyncio.Semaphore(max_concurrent)
-            matched: list = []
-            match_done = 0
+            # Fetch all transcripts first, prioritizing cached ones
+            cand_transcripts: list[tuple] = []
+            for cand in cands:
+                try:
+                    _emit_progress(job_id, seg_id, "transcripts",
+                                   f"Fetching transcript for \"{cand.video_title[:50]}\"",
+                                   f"https://youtube.com/watch?v={cand.video_id}")
+                    transcript = await transcriber.get_transcript(
+                        cand.video_id,
+                        video_duration_seconds=cand.video_duration_seconds,
+                        job_id=job_id,
+                    )
+                    if transcript and transcript.transcript_text:
+                        cand_transcripts.append((cand, transcript))
+                except Exception:
+                    logger.debug("Transcript failed for %s", cand.video_id)
 
-            async def _process(cand):
-                nonlocal match_done
-                async with semaphore:
-                    try:
-                        _emit_progress(job_id, seg_id, "transcripts",
-                                       f"Fetching transcript for \"{cand.video_title[:50]}\"",
-                                       f"https://youtube.com/watch?v={cand.video_id}")
-                        transcript = await transcriber.get_transcript(
-                            cand.video_id,
-                            video_duration_seconds=cand.video_duration_seconds,
-                            job_id=job_id,
-                        )
-                        _emit_progress(job_id, seg_id, "matching",
-                                       f"Matching \"{cand.video_title[:50]}\" with Qwen3...",
-                                       f"https://youtube.com/watch?v={cand.video_id}")
-                        meta = {
-                            "video_duration_seconds": cand.video_duration_seconds,
-                            "video_title": cand.video_title,
-                            "view_count": cand.view_count,
-                            "transcript_source": transcript.transcript_source.value,
-                        }
-                        match_start = time.time()
-                        match = await matcher.find_timestamp(
-                            transcript.transcript_text, segment, meta, job_id,
-                            script_context=script_context, shot=shot,
-                        )
-                        match_elapsed = time.time() - match_start
-                        if matcher.context_matching_enabled:
-                            match = matcher.validate_context_match(
-                                match, cand.video_duration_seconds,
-                            )
-                        match_done += 1
-                        conf = match.confidence_score
-                        if conf > 0:
-                            matched.append((cand, match))
-                            _emit_progress(job_id, seg_id, "matching",
-                                           f"Match found: \"{cand.video_title[:40]}\" — {conf:.0%} confidence ({match_elapsed:.1f}s)")
-                        else:
-                            _emit_progress(job_id, seg_id, "matching",
-                                           f"No match in \"{cand.video_title[:40]}\" ({match_elapsed:.1f}s)")
-                    except Exception:
-                        match_done += 1
-                        logger.exception("Match failed for %s", cand.video_id)
-                        _emit_progress(job_id, seg_id, "matching",
-                                       f"Error matching {cand.video_id}")
+            if not cand_transcripts:
+                _emit_progress(job_id, seg_id, "transcripts", "No transcripts available for any candidate")
+                continue
 
             _emit_progress(job_id, seg_id, "matching",
-                           f"Running timestamp analysis on {len(cands)} videos...")
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*[_process(c) for c in cands]),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Timeout matching expanded shot %s", shot.shot_id)
+                           f"Matching {len(cand_transcripts)} videos sequentially (early exit on good match)...")
+
+            # Sequential matching with early exit — stop when we find a strong match
+            matched: list = []
+            best_so_far = 0.0
+            for i, (cand, transcript) in enumerate(cand_transcripts):
                 _emit_progress(job_id, seg_id, "matching",
-                               f"Timeout after {timeout}s — proceeding with {len(matched)} matches")
+                               f"[{i+1}/{len(cand_transcripts)}] Matching \"{cand.video_title[:45]}\"...",
+                               f"https://youtube.com/watch?v={cand.video_id}")
+                try:
+                    meta = {
+                        "video_duration_seconds": cand.video_duration_seconds,
+                        "video_title": cand.video_title,
+                        "view_count": cand.view_count,
+                        "transcript_source": transcript.transcript_source.value,
+                    }
+                    match_start = time.time()
+                    match = await asyncio.wait_for(
+                        matcher.find_timestamp(
+                            transcript.transcript_text, segment, meta, job_id,
+                            script_context=script_context, shot=shot,
+                        ),
+                        timeout=match_timeout,
+                    )
+                    match_elapsed = time.time() - match_start
+                    if matcher.context_matching_enabled:
+                        match = matcher.validate_context_match(
+                            match, cand.video_duration_seconds,
+                        )
+                    conf = match.confidence_score
+                    if conf > 0:
+                        matched.append((cand, match))
+                        if conf > best_so_far:
+                            best_so_far = conf
+                        _emit_progress(job_id, seg_id, "matching",
+                                       f"Match: \"{cand.video_title[:40]}\" — {conf:.0%} ({match_elapsed:.1f}s)")
+                        if conf >= good_enough_confidence:
+                            _emit_progress(job_id, seg_id, "matching",
+                                           f"Strong match found ({conf:.0%}) — skipping remaining candidates")
+                            break
+                    else:
+                        _emit_progress(job_id, seg_id, "matching",
+                                       f"No match in \"{cand.video_title[:40]}\" ({match_elapsed:.1f}s)")
+                except asyncio.TimeoutError:
+                    _emit_progress(job_id, seg_id, "matching",
+                                   f"Timeout on \"{cand.video_title[:40]}\" (>{match_timeout}s) — skipping")
+                except Exception:
+                    logger.exception("Match failed for %s", cand.video_id)
+                    _emit_progress(job_id, seg_id, "matching",
+                                   f"Error matching {cand.video_id}")
 
             _emit_progress(job_id, seg_id, "ranking",
                            f"Ranking {len(matched)} matched candidates...")
@@ -202,14 +217,79 @@ async def expand_shots_for_segment(
         _emit_progress(job_id, seg_id, "error", "Pipeline error — check server logs")
 
 
+async def _lightweight_llm_call(prompt: str, system_prompt: str = "Return valid JSON only.") -> dict | None:
+    """Route a lightweight JSON-returning LLM call based on the `lightweight_model` setting.
+    Returns parsed JSON dict, or None on failure."""
+    settings_svc = await get_settings_service()
+    pipeline_settings = await settings_svc.get_pipeline_settings()
+    lightweight_model = pipeline_settings.get("lightweight_model", "gpt-4o-mini")
+
+    if lightweight_model == "ollama":
+        return await _lightweight_via_ollama(prompt, system_prompt, pipeline_settings)
+    else:
+        return await _lightweight_via_openai(prompt, system_prompt)
+
+
+async def _lightweight_via_openai(prompt: str, system_prompt: str) -> dict | None:
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            resp.raise_for_status()
+        return json.loads(resp.json()["choices"][0]["message"]["content"])
+    except Exception:
+        logger.exception("OpenAI lightweight call failed")
+        return None
+
+
+async def _lightweight_via_ollama(prompt: str, system_prompt: str, pipeline_settings: dict) -> dict | None:
+    from app.utils import agent_queue
+
+    if not agent_queue.is_agent_available():
+        logger.warning("Companion not available for lightweight LLM — falling back to OpenAI")
+        return await _lightweight_via_openai(prompt, system_prompt)
+
+    matcher_model = pipeline_settings.get("matcher_model", "qwen3:8b")
+    task_id = await agent_queue.create_task("lightweight_llm", {
+        "prompt": prompt,
+        "system_prompt": system_prompt + " /nothink",
+        "model": matcher_model,
+    })
+    results = await agent_queue.wait_for_result(task_id, timeout=60)
+    if not results:
+        logger.warning("Ollama lightweight call timed out — falling back to OpenAI")
+        return await _lightweight_via_openai(prompt, system_prompt)
+
+    result = results[0]
+    if result.get("error"):
+        logger.warning("Ollama lightweight call failed: %s — falling back to OpenAI", result["error"])
+        return await _lightweight_via_openai(prompt, system_prompt)
+
+    return result.get("result")
+
+
 async def _generate_shots(
     segment: Segment,
     existing_needs: list[str],
     count: int,
     script_context: Optional[ScriptContext],
 ) -> list[BRollShot]:
-    """Ask GPT-4o-mini for additional visual moments distinct from existing shots."""
-    settings = get_settings()
+    """Ask LLM for additional visual moments distinct from existing shots."""
     existing_list = "\n".join(f"- {n}" for n in existing_needs) if existing_needs else "(none)"
     topic = script_context.script_topic if script_context else "unknown"
     geo = script_context.geographic_scope if script_context else ""
@@ -232,28 +312,11 @@ async def _generate_shots(
     existing_count = len(segment.broll_shots or [])
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": "You are a documentary B-roll planner. Return valid JSON only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.7,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            resp.raise_for_status()
+        data = await _lightweight_llm_call(prompt, "You are a documentary B-roll planner. Return valid JSON only.")
+        if not data:
+            return []
 
-        data = json.loads(resp.json()["choices"][0]["message"]["content"])
         raw_shots = data.get("shots", [])
-
         shots = []
         for i, s in enumerate(raw_shots[:count]):
             shot_num = existing_count + i + 1
@@ -267,4 +330,44 @@ async def _generate_shots(
 
     except Exception:
         logger.exception("Failed to generate expanded shots via LLM")
+        return []
+
+
+async def _generate_alternative_queries(
+    shot: BRollShot,
+    script_context: Optional[ScriptContext],
+) -> list[str]:
+    """Generate 5 alternative search queries for a shot that got low-confidence results."""
+    topic = script_context.script_topic if script_context else "unknown"
+    geo = script_context.geographic_scope if script_context else ""
+    existing_queries = "\n".join(f"- {q}" for q in shot.search_queries)
+
+    prompt = (
+        f"A YouTube search for documentary B-roll footage returned poor results.\n\n"
+        f"Documentary topic: {topic}\n"
+        f"Geographic scope: {geo}\n"
+        f"Visual need: {shot.visual_need}\n\n"
+        f"Original search queries that FAILED to find good results:\n{existing_queries}\n\n"
+        f"Generate 5 ALTERNATIVE YouTube search queries that might find this footage.\n"
+        f"Each query must be substantially different from the originals — different phrasing, "
+        f"different angles, synonyms, related concepts. Think about what a human would try "
+        f"after the first search didn't work.\n\n"
+        f"Rules:\n"
+        f"- Each query must include at least one term related to \"{topic}\"\n"
+        f"- Try: synonyms, broader categories, related events, different languages of the location name\n"
+        f"- Try: adding \"footage\", \"documentary\", \"drone\", \"4K\", \"stock footage\"\n"
+        f"- Try: the concept without the specific location, or the location without the specific concept\n\n"
+        f"Return JSON only: {{\"queries\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}}"
+    )
+
+    try:
+        data = await _lightweight_llm_call(prompt)
+        if not data:
+            return []
+
+        queries = data.get("queries", [])
+        return [q for q in queries if isinstance(q, str) and q.strip()][:5]
+
+    except Exception:
+        logger.exception("Failed to generate alternative queries via LLM")
         return []

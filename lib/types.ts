@@ -315,6 +315,7 @@ export interface PipelineSettings {
   matcher_backend: string
   matcher_model: string
   api_fallback_enabled: boolean
+  lightweight_model: string
   confidence_threshold: number
   whisper_max_video_duration_min: number
 

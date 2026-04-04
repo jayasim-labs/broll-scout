@@ -308,8 +308,8 @@ class SearcherService:
                 except Exception:
                     pass
 
-        results_per_query: int = self._get("youtube_results_per_query") or 8
-        max_candidates: int = self._get("max_candidates_per_shot") or 10
+        configured_per_query: int = self._get("youtube_results_per_query") or 8
+        max_candidates: int = self._get("max_candidates_per_shot") or 12
         min_duration: int = self._get("min_video_duration_sec") or 30
         max_duration: int = self._get("max_video_duration_sec") or 5400
 
@@ -336,8 +336,12 @@ class SearcherService:
                 for q in segment.search_queries[:2]
             ]
 
+        # Scale results per query inversely with number of queries to keep total pool reasonable
+        # 2-3 queries × 8 results = 16-24; 5 queries × 4 results = 20 — similar total, more diversity
+        results_per_query = min(configured_per_query, max(3, 20 // max(len(queries), 1)))
+
         short_need = shot.visual_need[:50]
-        await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries", depth=3)
+        await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries ({results_per_query} results each)", depth=3)
 
         yt_results = await self._search_youtube_primary_full(
             queries, results_per_query, job_id, "ytdlp_only", None,

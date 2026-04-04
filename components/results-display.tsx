@@ -292,13 +292,15 @@ function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment
   const hasShots = segment.broll_shots && segment.broll_shots.length > 0
   const resultsByShot = useMemo(() => {
     if (!hasShots) return null
+    const knownShotIds = new Set(segment.broll_shots.map(s => s.shot_id))
     const map: Record<string, typeof segment.results> = {}
     for (const shot of segment.broll_shots) {
       map[shot.shot_id] = segment.results.filter(r => r.shot_id === shot.shot_id)
     }
+    const extra = segment.results.filter(r => r.shot_id && !knownShotIds.has(r.shot_id))
     const unassigned = segment.results.filter(r => !r.shot_id)
-    if (unassigned.length > 0) {
-      map["_unassigned"] = unassigned
+    if (extra.length > 0 || unassigned.length > 0) {
+      map["_extra"] = [...extra, ...unassigned]
     }
     return map
   }, [segment, hasShots])
@@ -330,7 +332,7 @@ function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment
                 ) : (
                   <>
                     <Badge variant="outline" className="text-xs">
-                      {segment.results.length}/{segment.broll_count} shot{segment.broll_count !== 1 ? 's' : ''}
+                      {segment.results.length}/{Math.max(segment.broll_count, segment.results.length)} shot{Math.max(segment.broll_count, segment.results.length) !== 1 ? 's' : ''}
                     </Badge>
                   </>
                 )}
@@ -374,6 +376,26 @@ function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment
                         </div>
                       )
                     })}
+                    {resultsByShot["_extra"] && resultsByShot["_extra"].length > 0 && (
+                      <div className="space-y-2 pt-2 border-t border-border/40">
+                        {resultsByShot["_extra"].map((result, i) => (
+                          <div key={result.result_id} className="space-y-2">
+                            <div className="flex items-start gap-2">
+                              <span className="text-xs font-mono text-muted-foreground/70 pt-0.5 shrink-0">
+                                Shot {segment.broll_shots.length + i + 1}
+                              </span>
+                              <p className="text-sm font-medium">
+                                {result.shot_visual_need || "Editor-added shot"}
+                                <Badge variant="secondary" className="ml-2 text-[9px] px-1.5 py-0">expanded</Badge>
+                              </p>
+                            </div>
+                            <div className="space-y-2 ml-12">
+                              <ResultCard result={result} jobId={jobId} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <>
@@ -482,12 +504,22 @@ function ExpandShotButton({ jobId, segment, onRefreshJob }: { jobId: string; seg
             if (data.phase === "error") {
               setErrorMsg(data.log?.slice(-1)[0]?.message || "Pipeline error")
             }
-            const jobResp = await fetch(`/api/v1/jobs/${jobId}`)
-            if (jobResp.ok) {
-              const jobData = await jobResp.json()
-              const seg = jobData.segments?.find((s: Segment) => s.segment_id === segment.segment_id)
-              if (seg && seg.results.length > initialResultCount.current) {
-                setNewResults(seg.results.slice(initialResultCount.current))
+            const lastMsg = (data.log?.slice(-1)[0]?.message || "") as string
+            const didAddClip = lastMsg.toLowerCase().includes("added")
+            if (didAddClip) {
+              const jobResp = await fetch(`/api/v1/jobs/${jobId}`)
+              if (jobResp.ok) {
+                const jobData = await jobResp.json()
+                const seg = jobData.segments?.find((s: Segment) => s.segment_id === segment.segment_id)
+                if (seg) {
+                  const knownIds = new Set(segment.results.map(r => r.result_id))
+                  const added = seg.results.filter((r: RankedResult) => !knownIds.has(r.result_id))
+                  if (added.length > 0) {
+                    setNewResults(added)
+                  } else {
+                    setNewResults(seg.results.slice(-1))
+                  }
+                }
               }
             }
             onRefreshJob?.()
@@ -522,8 +554,18 @@ function ExpandShotButton({ jobId, segment, onRefreshJob }: { jobId: string; seg
         setShowLog(true)
 
         if (data.phase === "done") {
-          const lastMsg = data.log?.slice(-1)[0]?.message || ""
-          if (!lastMsg.toLowerCase().includes("no matching")) {
+          const lastMsg = (data.log?.slice(-1)[0]?.message || "") as string
+          if (lastMsg.toLowerCase().includes("added")) {
+            const jobResp = await fetch(`/api/v1/jobs/${jobId}`)
+            if (jobResp.ok && !cancelled) {
+              const jobData = await jobResp.json()
+              const seg = jobData.segments?.find((s: Segment) => s.segment_id === segment.segment_id)
+              if (seg) {
+                const knownIds = new Set(segment.results.map(r => r.result_id))
+                const added = seg.results.filter((r: RankedResult) => !knownIds.has(r.result_id))
+                if (added.length > 0) setNewResults(added)
+              }
+            }
             onRefreshJob?.()
           }
         } else if (data.phase === "error") {

@@ -51,7 +51,13 @@ Do the following in one response:
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
        * visual_need: what the editor needs to see for THIS SPECIFIC shot (not the segment's general topic)
-       * search_queries: 2-3 YouTube search queries for THIS specific shot, each containing at least one term from geographic_scope or script_topic
+       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. Each must contain at least one term from geographic_scope or script_topic. The 5 queries MUST be diverse in style:
+           1. SPECIFIC: exact location/event/subject name (e.g., "North Sentinel Island satellite view")
+           2. DESCRIPTIVE: what it looks like visually (e.g., "isolated tropical island aerial drone footage")
+           3. DOCUMENTARY: topic + "documentary" or "footage" (e.g., "Sentinel Island documentary aerial")
+           4. BROADER CONTEXT: category + geographic context (e.g., "Andaman Islands forbidden island drone")
+           5. ALTERNATIVE ANGLE: different phrasing or related concept (e.g., "uncontacted tribe island aerial view")
+         This diversity is CRITICAL — different phrasings find different videos. A narrow set of similar queries misses relevant content.
        * key_terms: 3-5 keywords for THIS shot
 
      Example for a 2-minute segment about "Sentinel Island's geography":
@@ -59,19 +65,37 @@ Do the following in one response:
        {
          "shot_id": "seg_005_shot_1",
          "visual_need": "Aerial/satellite view of North Sentinel Island showing its isolation",
-         "search_queries": ["Sentinel Island satellite aerial view", "North Sentinel Island drone"],
+         "search_queries": [
+           "North Sentinel Island satellite view",
+           "isolated tropical island aerial drone footage",
+           "Sentinel Island documentary aerial",
+           "Andaman Islands forbidden island drone",
+           "uncontacted tribe island aerial overview"
+         ],
          "key_terms": ["satellite", "aerial", "island", "isolation"]
        },
        {
          "shot_id": "seg_005_shot_2",
          "visual_need": "Dense tropical rainforest canopy from above — the impenetrable jungle",
-         "search_queries": ["Andaman island rainforest canopy aerial", "dense jungle island drone footage"],
+         "search_queries": [
+           "North Sentinel Island jungle canopy aerial",
+           "dense tropical rainforest island drone footage",
+           "Andaman island rainforest documentary",
+           "impenetrable jungle island overhead view",
+           "tropical island forest canopy drone"
+         ],
          "key_terms": ["rainforest", "canopy", "dense", "tropical"]
        },
        {
          "shot_id": "seg_005_shot_3",
          "visual_need": "Coral reef and shallow waters surrounding the island",
-         "search_queries": ["coral reef island barrier aerial", "Andaman Islands coral reef footage"],
+         "search_queries": [
+           "North Sentinel Island coral reef aerial",
+           "coral reef shallow waters island footage",
+           "Andaman Islands coral reef documentary",
+           "isolated island reef barrier drone view",
+           "tropical island coastline underwater reef"
+         ],
          "key_terms": ["coral", "reef", "shallow", "barrier"]
        }
      ]

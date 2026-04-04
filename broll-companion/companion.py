@@ -283,6 +283,9 @@ def execute():
     elif task_type == "match_timestamp":
         result = ollama_match_timestamp(payload)
         return jsonify({"results": [result]})
+    elif task_type == "lightweight_llm":
+        result = ollama_lightweight_llm(payload)
+        return jsonify({"results": [result]})
     elif task_type == "clip":
         result = clip_download(
             payload["video_id"],
@@ -533,6 +536,43 @@ def ollama_match_timestamp(payload: dict) -> dict:
             "relevance_note": f"Local model error: {str(e)[:100]}",
             "the_hook": "", "matcher_source": "local_error",
         }
+
+
+def ollama_lightweight_llm(payload: dict) -> dict:
+    """Run a lightweight JSON-returning prompt through Ollama (for query generation, shot ideation, etc.)."""
+    if not _ollama_available or not _ollama_server_ready or not _ollama_model_ready:
+        return {"error": "local_unavailable", "result": None}
+
+    model = payload.get("model", MATCHER_MODEL)
+    prompt = payload.get("prompt", "")
+    system_prompt = payload.get("system_prompt", "Return valid JSON only. /nothink")
+
+    start_t = time.time()
+    try:
+        response = ollama_client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            format="json",
+            options={
+                "temperature": 0.7,
+                "num_ctx": 4096,
+                "num_predict": 1024,
+            },
+            keep_alive=-1,
+        )
+        elapsed_ms = int((time.time() - start_t) * 1000)
+        raw = response["message"]["content"]
+        parsed = json.loads(raw)
+        log.info("Lightweight LLM done in %dms (model=%s, output_keys=%s)",
+                 elapsed_ms, model, list(parsed.keys()) if isinstance(parsed, dict) else "non-dict")
+        return {"error": None, "result": parsed, "elapsed_ms": elapsed_ms}
+    except Exception as e:
+        elapsed_ms = int((time.time() - start_t) * 1000)
+        log.error("Lightweight LLM failed after %dms: %s", elapsed_ms, e)
+        return {"error": str(e)[:200], "result": None, "elapsed_ms": elapsed_ms}
 
 
 def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_dir: str | None = None) -> dict:

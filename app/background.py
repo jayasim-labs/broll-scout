@@ -575,6 +575,88 @@ async def run_pipeline(
         for results in all_segment_results.values():
             all_results.extend(results)
 
+        # --- Re-search pass: retry low-confidence shots with alternative queries ---
+        RESEARCH_THRESHOLD = 0.5
+        low_conf_shots: list[tuple[Segment, BRollShot, Optional[RankedResult]]] = []
+        for seg in active_segments:
+            seg_results = all_segment_results.get(seg.segment_id, [])
+            shots_for_seg = [shot for s, shot in all_shots if s.segment_id == seg.segment_id]
+            for shot in shots_for_seg:
+                matching_result = next((r for r in seg_results if r.shot_id == shot.shot_id), None)
+                if matching_result is None or matching_result.relevance_score < RESEARCH_THRESHOLD:
+                    low_conf_shots.append((seg, shot, matching_result))
+
+        if low_conf_shots:
+            _set_progress(job_id, "matching", 90, f"Re-searching {len(low_conf_shots)} low-confidence shots with alternative queries...")
+            _log_activity(job_id, "search", f"Found {len(low_conf_shots)} shots below {RESEARCH_THRESHOLD:.0%} relevance — generating alternative search queries", group="research")
+
+            from app.services.expand_shots import _generate_alternative_queries
+            research_improved = 0
+            for seg, shot, existing_result in low_conf_shots:
+                old_score = existing_result.relevance_score if existing_result else 0
+                short_need = shot.visual_need[:50]
+                try:
+                    alt_queries = await _generate_alternative_queries(shot, script_context)
+                    if not alt_queries:
+                        continue
+
+                    _log_activity(job_id, "search", f"Re-searching \"{short_need}\" with {len(alt_queries)} alternative queries", depth=1, group="research")
+
+                    alt_shot = BRollShot(
+                        shot_id=shot.shot_id,
+                        visual_need=shot.visual_need,
+                        search_queries=alt_queries,
+                        key_terms=shot.key_terms,
+                    )
+                    new_cands = await searcher.search_for_shot(alt_shot, seg, job_id=job_id, script_context=script_context)
+                    if not new_cands:
+                        continue
+
+                    existing_video_ids = {r.video_id for r in all_results}
+                    new_cands = [c for c in new_cands if c.video_id not in existing_video_ids]
+                    if not new_cands:
+                        _log_activity(job_id, "alert", f"Re-search for \"{short_need}\" found only duplicate videos", depth=2, group="research")
+                        continue
+
+                    _log_activity(job_id, "search", f"Found {len(new_cands)} new candidates for \"{short_need}\"", depth=2, group="research")
+
+                    matched_new = await _match_candidates(
+                        new_cands[:5], seg, matcher, transcriber, job_id,
+                        max_concurrent_candidates,
+                        script_context=script_context,
+                        shot=alt_shot,
+                    )
+                    if not matched_new:
+                        continue
+
+                    ranked_new = ranker.rank_and_filter(matched_new, seg, settings=pipeline_cfg, script_context=script_context, shot=alt_shot)
+                    if ranked_new and ranked_new[0].relevance_score > old_score:
+                        best_new = ranked_new[0]
+                        _log_activity(job_id, "check",
+                                      f"Upgrade: \"{short_need}\" — {old_score:.0%} → {best_new.relevance_score:.0%} (\"{best_new.video_title[:40]}\")",
+                                      depth=1, group="research")
+                        seg_results = all_segment_results.get(seg.segment_id, [])
+                        if existing_result:
+                            all_segment_results[seg.segment_id] = [
+                                best_new if r.result_id == existing_result.result_id else r
+                                for r in seg_results
+                            ]
+                        else:
+                            all_segment_results.setdefault(seg.segment_id, []).append(best_new)
+                        research_improved += 1
+                    else:
+                        _log_activity(job_id, "alert", f"Re-search for \"{short_need}\" didn't improve ({old_score:.0%})", depth=2, group="research")
+                except Exception:
+                    logger.exception("Re-search failed for shot %s", shot.shot_id)
+
+            if research_improved:
+                _log_activity(job_id, "check", f"Re-search improved {research_improved} of {len(low_conf_shots)} low-confidence shots", group="research")
+                all_results = []
+                for results in all_segment_results.values():
+                    all_results.extend(results)
+            else:
+                _log_activity(job_id, "alert", f"Re-search could not improve any of the {len(low_conf_shots)} low-confidence shots", group="research")
+
         # --- Context audit: single LLM call to flag outlier clips ---
         if script_context.script_topic and all_results:
             try:

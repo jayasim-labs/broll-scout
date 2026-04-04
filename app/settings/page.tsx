@@ -817,6 +817,21 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
               </p>
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="text-sm">Lightweight model (query generation & re-search)</Label>
+              <Select value={settings.lightweight_model || "gpt-4o-mini"} onValueChange={(v) => onChange("lightweight_model", v)}>
+                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o-mini">GPT-4o-mini (~$0.0001/call, fast)</SelectItem>
+                  <SelectItem value="ollama">Ollama / Local LLM ($0, uses companion)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground/70 mt-1">
+                Used for generating alternative search queries (re-search pass for low-confidence shots) and &quot;Add another shot&quot; ideation. GPT-4o-mini is faster and more creative; Ollama is free but shares GPU with matching.
+              </p>
+            </div>
+          </div>
           <SliderSetting
             label="Confidence threshold" value={settings.confidence_threshold} min={0.1} max={0.9} step={0.1}
             onChange={(v) => onChange("confidence_threshold", v)}

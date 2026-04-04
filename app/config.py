@@ -31,7 +31,7 @@ DEFAULTS = {
     # Search
     "youtube_results_per_query": 8,
     "max_candidates_per_segment": 15,
-    "max_candidates_per_shot": 10,
+    "max_candidates_per_shot": 12,
 
     # Segmentation quality checks (internal, not exposed in UI)
     "warn_long_no_broll_sec": 180,
@@ -43,6 +43,7 @@ DEFAULTS = {
     "matcher_backend": "auto",
     "matcher_model": "qwen3:8b",
     "api_fallback_enabled": False,
+    "lightweight_model": "gpt-4o-mini",
     "confidence_threshold": 0.15,
     "whisper_max_video_duration_min": 60,
     "avg_whisper_processing_sec": 45,
