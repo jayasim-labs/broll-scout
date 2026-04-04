@@ -211,6 +211,7 @@ class TranslatorService:
                             "model": model,
                             "messages": messages,
                             "temperature": 0.7,
+                            "max_tokens": 16384,
                             "response_format": {"type": "json_object"},
                         },
                     )
@@ -234,22 +235,31 @@ class TranslatorService:
         self._last_input_tokens = usage.get("prompt_tokens", 0)
         self._last_output_tokens = usage.get("completion_tokens", 0)
 
+        finish_reason = result["choices"][0].get("finish_reason", "")
         content = result["choices"][0]["message"]["content"]
+
+        if finish_reason == "length":
+            logger.warning(
+                "GPT-4o output was truncated (finish_reason=length, %d output tokens). "
+                "Script may be too long for a single call.",
+                self._last_output_tokens,
+            )
+            raise RuntimeError(
+                f"GPT-4o output was truncated at {self._last_output_tokens} tokens "
+                f"(finish_reason=length). The script is too long for the model's output "
+                f"limit. Try a shorter script or split it into parts."
+            )
+
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            logger.warning("Invalid JSON from OpenAI, retrying with strict prompt")
-            messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": "Your previous response was not valid JSON. Return valid JSON only.",
-            })
+            logger.warning("Invalid JSON from OpenAI (finish_reason=%s), retrying with strict prompt", finish_reason)
             return await self._call_openai_strict(messages, model)
 
     async def _call_openai_strict(
         self, messages: list[dict], model: str
     ) -> dict:
-        """Single retry for invalid JSON responses."""
+        """Fresh retry for invalid JSON — don't append the broken response as context."""
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(
                 self.api_url,
@@ -260,7 +270,8 @@ class TranslatorService:
                 json={
                     "model": model,
                     "messages": messages,
-                    "temperature": 0.7,
+                    "temperature": 0.3,
+                    "max_tokens": 16384,
                     "response_format": {"type": "json_object"},
                 },
             )
@@ -271,10 +282,18 @@ class TranslatorService:
         self._last_input_tokens += usage.get("prompt_tokens", 0)
         self._last_output_tokens += usage.get("completion_tokens", 0)
 
+        finish_reason = result["choices"][0].get("finish_reason", "")
         content = result["choices"][0]["message"]["content"]
+
+        if finish_reason == "length":
+            raise RuntimeError(
+                f"GPT-4o output truncated on retry ({self._last_output_tokens} tokens). "
+                f"Script is too long for a single translation call."
+            )
+
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                f"OpenAI returned invalid JSON after retry: {content[:200]}"
+                f"OpenAI returned invalid JSON after retry (finish_reason={finish_reason}): {content[:200]}"
             ) from exc
