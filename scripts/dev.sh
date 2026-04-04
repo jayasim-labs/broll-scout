@@ -31,19 +31,17 @@ fi
 echo "Checking companion dependencies..."
 "$VENV/bin/pip" install -q -r "$COMPANION_DIR/requirements.txt" 2>/dev/null
 
-# ---- Ensure Ollama is running (with parallel matching) ----
-if command -v ollama &>/dev/null; then
-  # Always restart Ollama to guarantee OLLAMA_NUM_PARALLEL=3
-  echo "Stopping Ollama (if running) to apply OLLAMA_NUM_PARALLEL=3..."
-  pkill -f "ollama serve" 2>/dev/null || true
-  if [[ "$(uname)" == "Darwin" ]]; then
-    brew services stop ollama 2>/dev/null || true
-  fi
-  sleep 1
+# ---- Cookie extraction (reduces YouTube rate-limiting) ----
+export BROLL_COOKIE_BROWSER="${BROLL_COOKIE_BROWSER:-chrome}"
 
-  if ! curl -s http://127.0.0.1:11434/api/tags &>/dev/null; then
+# ---- Ensure Ollama is running (with parallel matching) ----
+export OLLAMA_NUM_PARALLEL=3
+if command -v ollama &>/dev/null; then
+  if curl -s http://127.0.0.1:11434/api/tags &>/dev/null; then
+    echo "Ollama already running — setting OLLAMA_NUM_PARALLEL=3 for this session"
+    echo "(If matching is slow, quit the Ollama app from menu bar and re-run npm run dev)"
+  else
     echo "Starting Ollama server (OLLAMA_NUM_PARALLEL=3)..."
-    export OLLAMA_NUM_PARALLEL=3
     ollama serve &>/dev/null &
     for i in $(seq 1 15); do
       curl -s http://127.0.0.1:11434/api/tags &>/dev/null && break

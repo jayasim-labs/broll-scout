@@ -68,6 +68,11 @@ Write-Host "  Updating yt-dlp..." -ForegroundColor Gray
 pip install --upgrade yt-dlp --quiet 2>$null
 Write-Host "  OK" -ForegroundColor Green
 
+# --- Cookie extraction (reduces YouTube rate-limiting) ---
+if (-not $env:BROLL_COOKIE_BROWSER) {
+    $env:BROLL_COOKIE_BROWSER = "chrome"
+}
+
 # --- Restart Ollama with OLLAMA_NUM_PARALLEL=3 ---
 $ollamaPath = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaPath) {
