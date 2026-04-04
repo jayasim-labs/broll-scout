@@ -124,10 +124,8 @@ if (-not (Test-Path $nextBin)) {
     return
 }
 
-$npmJob = Start-Process -FilePath "cmd.exe" `
-    -ArgumentList "/c cd /d `"$ProjectRoot`" && npx next dev" `
-    -WindowStyle Minimized `
-    -PassThru
+$cmdArgs = '/c cd /d "' + $ProjectRoot + '" & npx next dev'
+$npmJob = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Minimized -PassThru
 
 # Wait for port 3000 to be ready (up to 30 seconds)
 Write-Host "  Waiting for web app to start..." -ForegroundColor Gray
