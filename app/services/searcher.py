@@ -138,9 +138,9 @@ class SearcherService:
         tier1_channel_ids, tier2_channel_ids = self._build_preferred_channel_ids()
         old_tier1_ids: list[str] = self._get("preferred_channels_tier1") or []
         tier1_ids = list(tier1_channel_ids | set(old_tier1_ids))
-        results_per_query: int = self._get("youtube_results_per_query") or 5
-        max_candidates: int = self._get("max_candidates_per_segment") or 12
-        min_duration: int = self._get("min_video_duration_sec") or 120
+        results_per_query: int = self._get("youtube_results_per_query") or 8
+        max_candidates: int = self._get("max_candidates_per_segment") or 15
+        min_duration: int = self._get("min_video_duration_sec") or 30
         max_duration: int = self._get("max_video_duration_sec") or 5400
 
         all_video_ids: list[str] = []
@@ -308,9 +308,9 @@ class SearcherService:
                 except Exception:
                     pass
 
-        results_per_query: int = self._get("youtube_results_per_query") or 5
-        max_candidates: int = self._get("max_candidates_per_shot") or 8
-        min_duration: int = self._get("min_video_duration_sec") or 180
+        results_per_query: int = self._get("youtube_results_per_query") or 8
+        max_candidates: int = self._get("max_candidates_per_shot") or 10
+        min_duration: int = self._get("min_video_duration_sec") or 30
         max_duration: int = self._get("max_video_duration_sec") or 5400
 
         all_video_ids: list[str] = []

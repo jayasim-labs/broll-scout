@@ -29,9 +29,9 @@ def get_settings() -> Settings:
 
 DEFAULTS = {
     # Search
-    "youtube_results_per_query": 5,
-    "max_candidates_per_segment": 12,
-    "max_candidates_per_shot": 8,
+    "youtube_results_per_query": 8,
+    "max_candidates_per_segment": 15,
+    "max_candidates_per_shot": 10,
 
     # Segmentation quality checks (internal, not exposed in UI)
     "warn_long_no_broll_sec": 180,
@@ -49,7 +49,7 @@ DEFAULTS = {
     "transcript_excerpt_max_words": 200,
 
     # Video filtering & ranking
-    "min_video_duration_sec": 180,
+    "min_video_duration_sec": 30,
     "max_video_duration_sec": 5400,
     "prefer_min_subscribers": 10000,
     "recency_full_score_years": 2,
