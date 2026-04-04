@@ -245,10 +245,22 @@ class TestSearcherBlocking:
             "blocked_sports": ["FIFA"],
             "custom_block_rules": "MyBlockedChannel\nAnotherOne",
         })
-        blocked = svc._build_blocked_set()
+        blocked = svc._build_blocked_name_set()
         assert "cnn" in blocked
         assert "disney" in blocked
         assert "myblockedchannel" in blocked
+
+    def test_blocked_channel_ids_from_sources(self):
+        from app.services.searcher import SearcherService
+        svc = SearcherService(pipeline_settings={
+            "channel_sources": [
+                {"channel_id": "UC_blocked_1", "tier": "blocked", "category": "news"},
+                {"channel_id": "UC_pref_1", "tier": "tier1", "category": "archive"},
+            ],
+        })
+        blocked_ids = svc._build_blocked_channel_ids()
+        assert "UC_blocked_1" in blocked_ids
+        assert "UC_pref_1" not in blocked_ids
 
 
 # ---------------------------------------------------------------------------

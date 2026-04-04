@@ -11,7 +11,8 @@ from app.config import get_settings
 from app.models.schemas import (
     JobCreateRequest, JobListResponse, JobStatus,
     FeedbackRequest, SettingsUpdateRequest, BulkSettingsUpdateRequest,
-    ChannelResolveRequest, SettingsResponse, HealthResponse,
+    ChannelResolveRequest, ChannelAddRequest, ChannelRemoveRequest,
+    SettingsResponse, HealthResponse,
     LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
     ProjectCreateRequest, ProjectListResponse, ProjectResponse, ProjectSummary,
     DeepSearchRequest, AddToJobRequest, FindSimilarRequest, RecategorizeRequest,
@@ -420,14 +421,63 @@ async def reset_settings(
     return {"status": "ok" if ok else "error"}
 
 
-@app.post("/api/v1/settings/channels/resolve")
+@app.post("/api/v1/settings/resolve-channel")
 async def resolve_channel(
     body: ChannelResolveRequest,
     x_api_key: str | None = Header(default=None),
 ):
     _verify_key(x_api_key)
     service = get_settings_service()
-    result = await service.resolve_channel(body.channel_url)
+    channels = await service.resolve_channel_input(body.input)
+    return {"resolved": len(channels) > 0, "channels": channels}
+
+
+@app.post("/api/v1/settings/channels/add")
+async def add_channel_source(
+    body: ChannelAddRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    service = get_settings_service()
+    ok = await service.add_channel_source(body.model_dump())
+    if not ok:
+        raise HTTPException(status_code=409, detail="Channel already exists in this tier")
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/settings/channels/remove")
+async def remove_channel_source(
+    body: ChannelRemoveRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    service = get_settings_service()
+    ok = await service.remove_channel_source(body.channel_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/settings/channels")
+async def get_channel_sources(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    service = get_settings_service()
+    groups = await service.get_channel_sources_grouped()
+    return {"groups": groups}
+
+
+@app.post("/api/v1/settings/channels/resolve")
+async def resolve_channel_legacy(
+    body: dict,
+    x_api_key: str | None = Header(default=None),
+):
+    """Legacy endpoint for backward compatibility."""
+    _verify_key(x_api_key)
+    channel_url = body.get("channel_url", "")
+    service = get_settings_service()
+    result = await service.resolve_channel(channel_url)
     if not result:
         raise HTTPException(status_code=404, detail="Channel not found")
     return result
@@ -477,6 +527,16 @@ async def resolve_channels_by_name(
             for name, r in results.items()
         }
     }
+
+
+@app.post("/api/v1/settings/migrate-channels")
+async def migrate_channels(
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    service = get_settings_service()
+    count = await service.migrate_channel_settings_if_needed()
+    return {"status": "ok", "migrated": count}
 
 
 # --- Project Endpoints ---

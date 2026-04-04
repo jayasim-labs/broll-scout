@@ -90,8 +90,43 @@ class BulkSettingsUpdateRequest(BaseModel):
     settings: Dict[str, Any]
 
 
+class ChannelEntry(BaseModel):
+    """A resolved YouTube channel entry for blocked/preferred lists."""
+    channel_id: str
+    channel_name: str
+    channel_url: str = ""
+    channel_handle: str = ""
+    thumbnail_url: str = ""
+    subscriber_count: int = 0
+    subscriber_display: str = ""
+    video_count: Optional[int] = None
+    description: str = ""
+    category: str = ""
+    tier: str = ""
+    added_at: str = ""
+    added_by: str = ""
+
+
 class ChannelResolveRequest(BaseModel):
-    channel_url: str
+    input: str = Field(..., min_length=1)
+
+
+class ChannelAddRequest(BaseModel):
+    channel_id: str
+    channel_name: str
+    channel_url: str = ""
+    channel_handle: str = ""
+    thumbnail_url: str = ""
+    subscriber_count: int = 0
+    subscriber_display: str = ""
+    video_count: Optional[int] = None
+    description: str = ""
+    category: str = ""
+    tier: str = ""
+
+
+class ChannelRemoveRequest(BaseModel):
+    channel_id: str
 
 
 class ScriptContext(BaseModel):

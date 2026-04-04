@@ -203,6 +203,22 @@ export interface ChannelResolution {
   thumbnail_url: string
 }
 
+export interface ChannelEntry {
+  channel_id: string
+  channel_name: string
+  channel_url: string
+  channel_handle: string
+  thumbnail_url: string
+  subscriber_count: number
+  subscriber_display: string
+  video_count: number | null
+  description: string
+  category: string
+  tier: string
+  added_at: string
+  added_by: string
+}
+
 export interface UsagePeriod {
   openai_calls: number
   openai_mini_calls: number
@@ -323,6 +339,7 @@ export interface PipelineSettings {
   blocked_studios: string[]
   blocked_sports: string[]
   custom_block_rules: string
+  channel_sources: ChannelEntry[]
   special_instructions: string
   enable_context_matching: boolean
   discard_clips_shorter_than_10s: boolean

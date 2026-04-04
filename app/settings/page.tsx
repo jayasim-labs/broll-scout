@@ -6,6 +6,7 @@ import { Navbar } from "@/components/navbar"
 import {
   Save, RotateCcw, Plus, X, Loader2, Users, Eye, Shield, Tv,
   Film, Zap, Globe, Ban, BookOpen, Settings2, MessageSquare,
+  Search, ExternalLink,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -19,19 +20,24 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
-import type { PipelineSettings, ChannelResolution } from "@/lib/types"
+import type { PipelineSettings, ChannelEntry } from "@/lib/types"
 
 const API = "/api/v1"
 
-interface ChannelInfo {
+interface ResolvedChannel {
   channel_id: string
   channel_name: string
-  subscribers: number
+  channel_url: string
+  channel_handle: string
   thumbnail_url: string
+  subscriber_count: number
+  subscriber_display: string
+  video_count: number | null
+  description: string
 }
 
 const TABS = [
-  { id: "sources", label: "Source Management", icon: Tv },
+  { id: "sources", label: "Preferred Channels", icon: Tv },
   { id: "blocked", label: "Blocked Sources", icon: Shield },
   { id: "pipeline", label: "Pipeline Parameters", icon: Settings2 },
   { id: "instructions", label: "Special Instructions", icon: MessageSquare },
@@ -39,12 +45,23 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"]
 
+const SECTION_CONFIG = {
+  "blocked-news": { label: "Blocked News Channels", desc: "Videos from these specific YouTube channels will be excluded from results.", icon: Ban, color: "red", tier: "blocked", category: "news" },
+  "blocked-studio": { label: "Blocked Studio Channels", desc: "Copyright-protected content from these studio channels is excluded.", icon: Film, color: "red", tier: "blocked", category: "studio" },
+  "blocked-sports": { label: "Blocked Sports Channels", desc: "Sports league content is excluded to avoid copyright issues.", icon: Shield, color: "red", tier: "blocked", category: "sports" },
+  "preferred-tier1": { label: "Priority Channels — Tier 1 (Archives & History)", desc: "Searched first with highest ranking boost. Archive, history, and documentary channels.", icon: Zap, color: "amber", tier: "tier1", category: "archive" },
+  "preferred-tier2": { label: "Documentary & Explainer — Tier 2", desc: "Ranking boost applied when these channels appear in results.", icon: Film, color: "blue", tier: "tier2", category: "documentary" },
+} as const
+
+type SectionKey = keyof typeof SECTION_CONFIG
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("sources")
   const [settings, setSettings] = useState<PipelineSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
+  const [channelSources, setChannelSources] = useState<ChannelEntry[]>([])
 
   useEffect(() => {
     loadSettings()
@@ -53,10 +70,22 @@ export default function SettingsPage() {
   const loadSettings = async () => {
     setLoading(true)
     try {
-      const resp = await fetch(`${API}/settings`)
-      if (resp.ok) {
-        const data = await resp.json()
+      const [settingsResp, channelsResp] = await Promise.all([
+        fetch(`${API}/settings`),
+        fetch(`${API}/settings/channels`),
+      ])
+      if (settingsResp.ok) {
+        const data = await settingsResp.json()
         setSettings(data.settings as PipelineSettings)
+      }
+      if (channelsResp.ok) {
+        const data = await channelsResp.json()
+        const groups = data.groups || {}
+        const all: ChannelEntry[] = []
+        for (const entries of Object.values(groups)) {
+          if (Array.isArray(entries)) all.push(...(entries as ChannelEntry[]))
+        }
+        setChannelSources(all)
       }
     } catch {
       toast.error("Failed to load settings")
@@ -74,10 +103,11 @@ export default function SettingsPage() {
     if (!settings || !dirty) return
     setSaving(true)
     try {
+      const { channel_sources: _, ...settingsWithoutChannels } = settings as PipelineSettings & { channel_sources?: unknown }
       const resp = await fetch(`${API}/settings/bulk`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settings }),
+        body: JSON.stringify({ settings: settingsWithoutChannels }),
       })
       if (resp.ok) {
         toast.success("Settings saved")
@@ -103,6 +133,53 @@ export default function SettingsPage() {
     } catch {
       toast.error("Failed to reset settings")
     }
+  }
+
+  const addChannel = async (section: SectionKey, channel: ResolvedChannel) => {
+    const cfg = SECTION_CONFIG[section]
+    const entry: ChannelEntry = {
+      ...channel,
+      category: cfg.category,
+      tier: cfg.tier,
+      added_at: new Date().toISOString(),
+      added_by: "editor",
+    }
+    try {
+      const resp = await fetch(`${API}/settings/channels/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry),
+      })
+      if (resp.ok) {
+        setChannelSources((prev) => [...prev, entry])
+        toast.success(`Added ${channel.channel_name}`)
+      } else if (resp.status === 409) {
+        toast.error("Channel already exists in this section")
+      }
+    } catch {
+      toast.error("Failed to add channel")
+    }
+  }
+
+  const removeChannel = async (channelId: string) => {
+    try {
+      const resp = await fetch(`${API}/settings/channels/remove`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_id: channelId }),
+      })
+      if (resp.ok) {
+        setChannelSources((prev) => prev.filter((c) => c.channel_id !== channelId))
+        toast.success("Channel removed")
+      }
+    } catch {
+      toast.error("Failed to remove channel")
+    }
+  }
+
+  const getChannelsForSection = (section: SectionKey): ChannelEntry[] => {
+    const cfg = SECTION_CONFIG[section]
+    return channelSources.filter((c) => c.tier === cfg.tier && c.category === cfg.category)
   }
 
   if (loading || !settings) {
@@ -154,8 +231,24 @@ export default function SettingsPage() {
           })}
         </div>
 
-        {activeTab === "sources" && <SourcesTab settings={settings} onChange={updateLocal} />}
-        {activeTab === "blocked" && <BlockedTab settings={settings} onChange={updateLocal} />}
+        {activeTab === "sources" && (
+          <ChannelSectionsTab
+            sections={["preferred-tier1", "preferred-tier2"]}
+            getChannels={getChannelsForSection}
+            onAdd={addChannel}
+            onRemove={removeChannel}
+            settings={settings}
+          />
+        )}
+        {activeTab === "blocked" && (
+          <BlockedTab
+            settings={settings}
+            onChange={updateLocal}
+            getChannels={getChannelsForSection}
+            onAddChannel={addChannel}
+            onRemoveChannel={removeChannel}
+          />
+        )}
         {activeTab === "pipeline" && <PipelineTab settings={settings} onChange={updateLocal} />}
         {activeTab === "instructions" && <InstructionsTab settings={settings} onChange={updateLocal} />}
       </main>
@@ -163,74 +256,17 @@ export default function SettingsPage() {
   )
 }
 
-function TagList({
-  items, onAdd, onRemove, placeholder = "Add item...", variant = "default",
-}: {
-  items: string[]
-  onAdd: (item: string) => void
-  onRemove: (index: number) => void
-  placeholder?: string
-  variant?: "default" | "destructive"
-}) {
-  const [input, setInput] = useState("")
+/* ─── Channel Card ──────────────────────────────────────────────────── */
 
-  const badgeClass = variant === "destructive"
-    ? "gap-1.5 text-xs py-1.5 px-3 bg-red-500/5 border-red-500/20 text-red-300"
-    : "gap-1.5 text-xs py-1.5 px-3"
-
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap gap-1.5">
-        {items.map((item, i) => (
-          <Badge key={i} variant="secondary" className={badgeClass}>
-            {variant === "destructive" && <Ban className="w-3 h-3" />}
-            {item}
-            <button onClick={() => onRemove(i)} className="hover:text-destructive ml-0.5">
-              <X className="w-3 h-3" />
-            </button>
-          </Badge>
-        ))}
-      </div>
-      <div className="flex gap-2">
-        <Input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={placeholder}
-          className="flex-1"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && input.trim()) {
-              onAdd(input.trim())
-              setInput("")
-            }
-          }}
-        />
-        <Button
-          variant="outline" size="sm"
-          onClick={() => { if (input.trim()) { onAdd(input.trim()); setInput("") } }}
-          className="gap-1"
-        >
-          <Plus className="w-4 h-4" /> Add
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-function formatSubs(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return n.toString()
-}
-
-function ChannelCard({ info, onRemove }: { info: ChannelInfo; onRemove: () => void }) {
-  const channelUrl = `https://www.youtube.com/channel/${info.channel_id}`
+function ChannelCard({ channel, onRemove }: { channel: ChannelEntry; onRemove: () => void }) {
+  const channelUrl = channel.channel_url || `https://www.youtube.com/channel/${channel.channel_id}`
   return (
     <div className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border group hover:border-primary/30 transition-colors">
       <a href={channelUrl} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open channel on YouTube">
-        {info.thumbnail_url ? (
+        {channel.thumbnail_url ? (
           <img
-            src={info.thumbnail_url}
-            alt={info.channel_name}
+            src={channel.thumbnail_url}
+            alt={channel.channel_name}
             className="w-10 h-10 rounded-full object-cover ring-2 ring-border hover:ring-primary/50 transition-all"
           />
         ) : (
@@ -241,19 +277,22 @@ function ChannelCard({ info, onRemove }: { info: ChannelInfo; onRemove: () => vo
       </a>
       <a href={channelUrl} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-0 hover:opacity-80 transition-opacity">
         <p className="text-sm font-medium truncate">
-          {info.channel_name || info.channel_id}
+          {channel.channel_name || channel.channel_id}
         </p>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {info.subscribers > 0 && (
+          {channel.subscriber_count > 0 && (
             <span className="flex items-center gap-0.5">
               <Users className="w-3 h-3" />
-              {formatSubs(info.subscribers)} subscribers
+              {channel.subscriber_display || formatSubs(channel.subscriber_count)} subscribers
             </span>
           )}
-          {info.channel_id && (
-            <span className="font-mono text-[10px] opacity-60">{info.channel_id.slice(0, 12)}...</span>
+          {channel.channel_handle && (
+            <span className="opacity-60">{channel.channel_handle}</span>
           )}
         </div>
+        <span className="text-[10px] text-muted-foreground/50 truncate block">
+          {channelUrl}
+        </span>
       </a>
       <button
         onClick={(e) => { e.stopPropagation(); onRemove() }}
@@ -266,181 +305,231 @@ function ChannelCard({ info, onRemove }: { info: ChannelInfo; onRemove: () => vo
   )
 }
 
-function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
-  const [channelInfoMap, setChannelInfoMap] = useState<Record<string, ChannelInfo>>({})
-  const [tier2InfoMap, setTier2InfoMap] = useState<Record<string, ChannelInfo>>({})
-  const [resolving, setResolving] = useState(false)
-  const resolvedRef = useRef(false)
-  const tier2ResolvedRef = useRef(false)
+/* ─── Channel Search Input ──────────────────────────────────────────── */
 
-  const tier1Ids = settings.preferred_channels_tier1 || []
-  const tier2Names = settings.preferred_channels_tier2 || []
+function ChannelSearchInput({
+  section,
+  onAdd,
+}: {
+  section: SectionKey
+  onAdd: (section: SectionKey, channel: ResolvedChannel) => void
+}) {
+  const [query, setQuery] = useState("")
+  const [searching, setSearching] = useState(false)
+  const [results, setResults] = useState<ResolvedChannel[]>([])
+  const [showResults, setShowResults] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (resolvedRef.current || tier1Ids.length === 0) return
-    resolvedRef.current = true
-    resolveChannels(tier1Ids)
-  }, [tier1Ids.length])
+    function handleClick(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowResults(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClick)
+    return () => document.removeEventListener("mousedown", handleClick)
+  }, [])
 
-  useEffect(() => {
-    if (tier2ResolvedRef.current || tier2Names.length === 0) return
-    tier2ResolvedRef.current = true
-    resolveTier2Names(tier2Names)
-  }, [tier2Names.length])
-
-  async function resolveChannels(ids: string[]) {
-    const unresolvedIds = ids.filter(id => !channelInfoMap[id])
-    if (unresolvedIds.length === 0) return
-    setResolving(true)
+  const doSearch = async () => {
+    const q = query.trim()
+    if (!q) return
+    setSearching(true)
+    setResults([])
+    setShowResults(true)
     try {
-      const resp = await fetch(`${API}/settings/channels/resolve-bulk`, {
+      const resp = await fetch(`${API}/settings/resolve-channel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel_ids: unresolvedIds }),
+        body: JSON.stringify({ input: q }),
       })
       if (resp.ok) {
         const data = await resp.json()
-        setChannelInfoMap(prev => ({ ...prev, ...data.channels }))
+        const channels = data.channels || []
+        if (channels.length === 1 && isDirectInput(q)) {
+          onAdd(section, channels[0])
+          setQuery("")
+          setShowResults(false)
+          setResults([])
+          return
+        }
+        setResults(channels)
       }
     } catch {
-      // Fallback: show raw IDs
+      toast.error("Search failed — check companion app")
     } finally {
-      setResolving(false)
+      setSearching(false)
     }
   }
 
-  async function resolveTier2Names(names: string[]) {
-    try {
-      const resp = await fetch(`${API}/settings/channels/resolve-names`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ names }),
-      })
-      if (resp.ok) {
-        const data = await resp.json()
-        setTier2InfoMap(prev => ({ ...prev, ...data.channels }))
-      }
-    } catch {}
-  }
-
-  async function addTier1Channel(input: string) {
-    const id = input.trim()
-    if (!id) return
-    if (tier1Ids.includes(id)) {
-      toast.error("Channel already added")
-      return
-    }
-    onChange("preferred_channels_tier1", [...tier1Ids, id])
-
-    try {
-      const resp = await fetch(`${API}/settings/channels/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel_url: id }),
-      })
-      if (resp.ok) {
-        const data = await resp.json()
-        setChannelInfoMap(prev => ({ ...prev, [id]: data }))
-      }
-    } catch {}
+  const handleSelect = (ch: ResolvedChannel) => {
+    onAdd(section, ch)
+    setQuery("")
+    setShowResults(false)
+    setResults([])
   }
 
   return (
-    <div className="space-y-6">
-      {/* Tier 1 Channels */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-amber-500/10">
-              <Zap className="w-4 h-4 text-amber-400" />
-            </div>
-            <div>
-              <CardTitle className="text-base">Priority Channels (Tier 1)</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Searched first, highest ranking boost. Archive & history channels.
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {resolving && tier1Ids.length > 0 && Object.keys(channelInfoMap).length === 0 && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Loading channel info...
+    <div ref={containerRef} className="relative">
+      <div className="flex gap-2">
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Paste YouTube channel URL, handle (@CNN), or search by name"
+          className="flex-1"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") doSearch()
+          }}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={doSearch}
+          disabled={searching || !query.trim()}
+          className="gap-1 shrink-0"
+        >
+          {searching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+          Search
+        </Button>
+      </div>
+
+      {showResults && (
+        <div className="absolute z-50 mt-1 w-full bg-popover border border-border rounded-lg shadow-lg max-h-80 overflow-y-auto">
+          {searching && (
+            <div className="flex items-center gap-2 p-3 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin" /> Searching YouTube...
             </div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {tier1Ids.map((id, i) => {
-              const info = channelInfoMap[id] || { channel_id: id, channel_name: "", subscribers: 0, thumbnail_url: "" }
-              return (
-                <ChannelCard
-                  key={id}
-                  info={info}
-                  onRemove={() => {
-                    onChange("preferred_channels_tier1", tier1Ids.filter((_, j) => j !== i))
-                    setChannelInfoMap(prev => { const next = { ...prev }; delete next[id]; return next })
-                  }}
-                />
-              )
-            })}
-          </div>
-          <AddChannelInput onAdd={addTier1Channel} placeholder="Paste YouTube channel ID (UC...)" />
-        </CardContent>
-      </Card>
-
-      {/* Tier 2 Channels */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-blue-500/10">
-              <Film className="w-4 h-4 text-blue-400" />
+          {!searching && results.length === 0 && (
+            <div className="p-3 text-sm text-muted-foreground">
+              No channels found. Try a different search term.
             </div>
-            <div>
-              <CardTitle className="text-base">Documentary & Explainer (Tier 2)</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Ranking boost applied when these channels appear in results.
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {tier2Names.map((name, i) => {
-              const info = tier2InfoMap[name]
-              if (info) {
-                return (
-                  <ChannelCard
-                    key={name}
-                    info={info}
-                    onRemove={() => onChange("preferred_channels_tier2", tier2Names.filter((_, j) => j !== i))}
-                  />
-                )
-              }
-              return (
-                <div key={name} className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border group hover:border-blue-500/30 transition-colors">
-                  <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center shrink-0 ring-2 ring-border">
-                    <Film className="w-4 h-4 text-blue-400" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{name}</p>
-                  </div>
-                  <button
-                    onClick={() => onChange("preferred_channels_tier2", tier2Names.filter((_, j) => j !== i))}
-                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-destructive/10 rounded transition-opacity"
-                    title="Remove channel"
-                  >
-                    <X className="w-3.5 h-3.5 text-destructive" />
-                  </button>
+          )}
+          {results.map((ch) => (
+            <button
+              key={ch.channel_id}
+              onClick={() => handleSelect(ch)}
+              className="w-full flex items-center gap-3 p-2.5 hover:bg-accent/50 transition-colors text-left border-b border-border/50 last:border-0"
+            >
+              {ch.thumbnail_url ? (
+                <img src={ch.thumbnail_url} alt={ch.channel_name} className="w-9 h-9 rounded-full object-cover shrink-0" />
+              ) : (
+                <div className="w-9 h-9 rounded-full bg-muted flex items-center justify-center shrink-0">
+                  <Tv className="w-4 h-4 text-muted-foreground" />
                 </div>
-              )
-            })}
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{ch.channel_name}</p>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>{ch.subscriber_display || "N/A"} subscribers</span>
+                  {ch.channel_handle && <span>{ch.channel_handle}</span>}
+                </div>
+                {ch.description && (
+                  <p className="text-[10px] text-muted-foreground/70 truncate mt-0.5">{ch.description}</p>
+                )}
+              </div>
+              <Badge variant="secondary" className="text-[10px] shrink-0 gap-1">
+                <Plus className="w-3 h-3" /> Add
+              </Badge>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function isDirectInput(query: string): boolean {
+  return query.startsWith("http") || query.startsWith("@") || /^UC[\w-]{22}$/.test(query)
+}
+
+function formatSubs(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
+  return n.toString()
+}
+
+/* ─── Channel Section (reusable for any blocked/preferred group) ──── */
+
+function ChannelSection({
+  section,
+  channels,
+  onAdd,
+  onRemove,
+}: {
+  section: SectionKey
+  channels: ChannelEntry[]
+  onAdd: (section: SectionKey, channel: ResolvedChannel) => void
+  onRemove: (channelId: string) => void
+}) {
+  const cfg = SECTION_CONFIG[section]
+  const Icon = cfg.icon
+  const colorMap: Record<string, string> = {
+    red: "bg-red-500/10 text-red-400",
+    amber: "bg-amber-500/10 text-amber-400",
+    blue: "bg-blue-500/10 text-blue-400",
+  }
+  const iconColor = colorMap[cfg.color] || "bg-muted text-muted-foreground"
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <div className={cn("p-1.5 rounded-md", iconColor.split(" ")[0])}>
+            <Icon className={cn("w-4 h-4", iconColor.split(" ")[1])} />
           </div>
-          <AddChannelInput
-            onAdd={(name) => onChange("preferred_channels_tier2", [...tier2Names, name])}
-            placeholder="Channel name (e.g., Kurzgesagt)"
-          />
-        </CardContent>
-      </Card>
+          <div>
+            <CardTitle className="text-base">{cfg.label}</CardTitle>
+            <p className="text-xs text-muted-foreground mt-0.5">{cfg.desc}</p>
+          </div>
+          {channels.length > 0 && (
+            <Badge variant="secondary" className="ml-auto text-xs">{channels.length}</Badge>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {channels.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {channels.map((ch) => (
+              <ChannelCard
+                key={ch.channel_id}
+                channel={ch}
+                onRemove={() => onRemove(ch.channel_id)}
+              />
+            ))}
+          </div>
+        )}
+        <ChannelSearchInput section={section} onAdd={onAdd} />
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ─── Preferred Channels Tab (Sources tab) ──────────────────────────── */
+
+function ChannelSectionsTab({
+  sections,
+  getChannels,
+  onAdd,
+  onRemove,
+  settings,
+}: {
+  sections: SectionKey[]
+  getChannels: (section: SectionKey) => ChannelEntry[]
+  onAdd: (section: SectionKey, channel: ResolvedChannel) => void
+  onRemove: (channelId: string) => void
+  settings: PipelineSettings
+}) {
+  return (
+    <div className="space-y-6">
+      {sections.map((section) => (
+        <ChannelSection
+          key={section}
+          section={section}
+          channels={getChannels(section)}
+          onAdd={onAdd}
+          onRemove={onRemove}
+        />
+      ))}
 
       {/* Public Domain Archives */}
       <Card>
@@ -474,6 +563,7 @@ function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChan
                   <p className="text-sm font-medium">{a.name}</p>
                   <p className="text-xs text-muted-foreground truncate group-hover:text-emerald-400 transition-colors">{a.url}</p>
                 </div>
+                <ExternalLink className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
               </a>
             ))}
           </div>
@@ -502,7 +592,7 @@ function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChan
                 <Label className="text-sm capitalize font-medium">{key.replace(/_/g, " ")}</Label>
                 <Switch
                   checked={enabled as boolean}
-                  onCheckedChange={(v) => onChange("stock_platforms", { ...settings.stock_platforms, [key]: v })}
+                  onCheckedChange={() => {}}
                 />
               </div>
             ))}
@@ -513,111 +603,41 @@ function SourcesTab({ settings, onChange }: { settings: PipelineSettings; onChan
   )
 }
 
-function AddChannelInput({ onAdd, placeholder }: { onAdd: (val: string) => void; placeholder: string }) {
-  const [input, setInput] = useState("")
-  return (
-    <div className="flex gap-2">
-      <Input
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        placeholder={placeholder}
-        className="flex-1"
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && input.trim()) {
-            onAdd(input.trim())
-            setInput("")
-          }
-        }}
-      />
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => { if (input.trim()) { onAdd(input.trim()); setInput("") } }}
-        className="gap-1"
-      >
-        <Plus className="w-4 h-4" /> Add
-      </Button>
-    </div>
-  )
-}
+/* ─── Blocked Sources Tab ───────────────────────────────────────────── */
 
-function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
+function BlockedTab({
+  settings,
+  onChange,
+  getChannels,
+  onAddChannel,
+  onRemoveChannel,
+}: {
+  settings: PipelineSettings
+  onChange: (k: string, v: unknown) => void
+  getChannels: (section: SectionKey) => ChannelEntry[]
+  onAddChannel: (section: SectionKey, channel: ResolvedChannel) => void
+  onRemoveChannel: (channelId: string) => void
+}) {
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-red-500/10">
-              <Ban className="w-4 h-4 text-red-400" />
-            </div>
-            <div>
-              <CardTitle className="text-base">Blocked News Networks</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Videos from these networks will be excluded from results.
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <TagList
-            items={settings.blocked_networks || []}
-            onAdd={(n) => onChange("blocked_networks", [...(settings.blocked_networks || []), n])}
-            onRemove={(i) => onChange("blocked_networks", (settings.blocked_networks || []).filter((_, j) => j !== i))}
-            placeholder="Network name (e.g., CNN, BBC)"
-            variant="destructive"
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-red-500/10">
-              <Film className="w-4 h-4 text-red-400" />
-            </div>
-            <div>
-              <CardTitle className="text-base">Blocked Studios & Entertainment</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Copyright-protected content from these studios is excluded.
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <TagList
-            items={settings.blocked_studios || []}
-            onAdd={(s) => onChange("blocked_studios", [...(settings.blocked_studios || []), s])}
-            onRemove={(i) => onChange("blocked_studios", (settings.blocked_studios || []).filter((_, j) => j !== i))}
-            placeholder="Studio name (e.g., Disney, Netflix)"
-            variant="destructive"
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-red-500/10">
-              <Shield className="w-4 h-4 text-red-400" />
-            </div>
-            <div>
-              <CardTitle className="text-base">Blocked Sports Leagues</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Sports league content is excluded to avoid copyright issues.
-              </p>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <TagList
-            items={settings.blocked_sports || []}
-            onAdd={(s) => onChange("blocked_sports", [...(settings.blocked_sports || []), s])}
-            onRemove={(i) => onChange("blocked_sports", (settings.blocked_sports || []).filter((_, j) => j !== i))}
-            placeholder="League name (e.g., FIFA, NFL)"
-            variant="destructive"
-          />
-        </CardContent>
-      </Card>
+      <ChannelSection
+        section="blocked-news"
+        channels={getChannels("blocked-news")}
+        onAdd={onAddChannel}
+        onRemove={onRemoveChannel}
+      />
+      <ChannelSection
+        section="blocked-studio"
+        channels={getChannels("blocked-studio")}
+        onAdd={onAddChannel}
+        onRemove={onRemoveChannel}
+      />
+      <ChannelSection
+        section="blocked-sports"
+        channels={getChannels("blocked-sports")}
+        onAdd={onAddChannel}
+        onRemove={onRemoveChannel}
+      />
 
       <Card>
         <CardHeader>
@@ -647,6 +667,8 @@ function BlockedTab({ settings, onChange }: { settings: PipelineSettings; onChan
   )
 }
 
+/* ─── Helpers ───────────────────────────────────────────────────────── */
+
 function SliderSetting({
   label, value, min, max, step = 1, onChange, unit = "", help,
 }: {
@@ -670,6 +692,8 @@ function SliderSetting({
     </div>
   )
 }
+
+/* ─── Pipeline Tab ──────────────────────────────────────────────────── */
 
 function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
   const normalizeWeights = (key: string, newVal: number) => {
@@ -942,6 +966,8 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
     </div>
   )
 }
+
+/* ─── Instructions Tab ──────────────────────────────────────────────── */
 
 function InstructionsTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
   return (

@@ -93,7 +93,11 @@ class SearcherService:
         return DEFAULTS.get(key)
 
 
-    def _build_blocked_set(self) -> set[str]:
+    def _build_blocked_channel_ids(self) -> set[str]:
+        sources = self._get("channel_sources") or []
+        return {s["channel_id"] for s in sources if s.get("tier") == "blocked" and s.get("channel_id")}
+
+    def _build_blocked_name_set(self) -> set[str]:
         blocked: list[str] = []
         blocked.extend(self._get("blocked_networks") or [])
         blocked.extend(self._get("blocked_studios") or [])
@@ -103,10 +107,18 @@ class SearcherService:
             blocked.extend(line.strip() for line in custom.split("\n") if line.strip())
         return {name.lower() for name in blocked if name}
 
-    @staticmethod
-    def _is_blocked(channel_name: str, video_title: str, blocked_set: set[str]) -> bool:
+    def _build_preferred_channel_ids(self) -> tuple[set[str], set[str]]:
+        sources = self._get("channel_sources") or []
+        tier1 = {s["channel_id"] for s in sources if s.get("tier") == "tier1" and s.get("channel_id")}
+        tier2 = {s["channel_id"] for s in sources if s.get("tier") == "tier2" and s.get("channel_id")}
+        old_tier1 = set(self._get("preferred_channels_tier1") or [])
+        return tier1 | old_tier1, tier2
+
+    def _is_blocked(self, channel_id: str, channel_name: str, blocked_ids: set[str], blocked_names: set[str]) -> bool:
+        if channel_id and channel_id in blocked_ids:
+            return True
         ch = channel_name.lower()
-        for term in blocked_set:
+        for term in blocked_names:
             if term in ch:
                 return True
         return False
@@ -123,8 +135,9 @@ class SearcherService:
                 except Exception:
                     pass
 
-        tier1_ids: list[str] = self._get("preferred_channels_tier1") or []
-        tier2_names: list[str] = self._get("preferred_channels_tier2") or []
+        tier1_channel_ids, tier2_channel_ids = self._build_preferred_channel_ids()
+        old_tier1_ids: list[str] = self._get("preferred_channels_tier1") or []
+        tier1_ids = list(tier1_channel_ids | set(old_tier1_ids))
         results_per_query: int = self._get("youtube_results_per_query") or 5
         max_candidates: int = self._get("max_candidates_per_segment") or 12
         min_duration: int = self._get("min_video_duration_sec") or 120
@@ -215,9 +228,10 @@ class SearcherService:
         channel_stats: dict[str, dict] = {}
 
         # (f) Build CandidateVideo objects
-        tier1_set = set(tier1_ids)
-        tier2_lower = {name.lower() for name in tier2_names}
-        blocked_set = self._build_blocked_set()
+        blocked_ids = self._build_blocked_channel_ids()
+        blocked_names = self._build_blocked_name_set()
+        old_tier2_names = self._get("preferred_channels_tier2") or []
+        tier2_name_lower = {name.lower() for name in old_tier2_names}
 
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
@@ -248,7 +262,7 @@ class SearcherService:
             subscribers = ch_stats.get("subscriber_count") or v.get("channel_subscribers") or 0
 
             video_title = v.get("title") or v.get("video_title", "")
-            if self._is_blocked(ch_name, video_title, blocked_set):
+            if self._is_blocked(ch_id, ch_name, blocked_ids, blocked_names):
                 blocked_count += 1
                 continue
 
@@ -263,8 +277,8 @@ class SearcherService:
                 video_duration_seconds=duration,
                 published_at=v.get("published_at", ""),
                 view_count=v.get("view_count") or 0,
-                is_preferred_tier1=ch_id in tier1_set,
-                is_preferred_tier2=ch_name.lower() in tier2_lower,
+                is_preferred_tier1=ch_id in tier1_channel_ids,
+                is_preferred_tier2=ch_id in tier2_channel_ids or ch_name.lower() in tier2_name_lower,
                 is_blocked=False,
             )
             candidates.append(candidate)
@@ -341,9 +355,11 @@ class SearcherService:
             extra = await _dispatch_video_details(ids_missing, job_id=job_id)
             video_details.extend(extra)
 
-        blocked_set = self._build_blocked_set()
-        tier1_set = set(self._get("preferred_channels_tier1") or [])
-        tier2_lower = {name.lower() for name in (self._get("preferred_channels_tier2") or [])}
+        blocked_ids = self._build_blocked_channel_ids()
+        blocked_names = self._build_blocked_name_set()
+        t1_ids, t2_ids = self._build_preferred_channel_ids()
+        old_tier2_names = self._get("preferred_channels_tier2") or []
+        t2_name_lower = {name.lower() for name in old_tier2_names}
 
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
@@ -366,7 +382,7 @@ class SearcherService:
             ch_id = v.get("channel_id", "")
             ch_name = v.get("channel_name", "")
             video_title = v.get("title") or v.get("video_title", "")
-            if self._is_blocked(ch_name, video_title, blocked_set):
+            if self._is_blocked(ch_id, ch_name, blocked_ids, blocked_names):
                 continue
 
             candidates.append(CandidateVideo(
@@ -380,8 +396,8 @@ class SearcherService:
                 video_duration_seconds=duration,
                 published_at=v.get("published_at", ""),
                 view_count=v.get("view_count") or 0,
-                is_preferred_tier1=ch_id in tier1_set,
-                is_preferred_tier2=ch_name.lower() in tier2_lower,
+                is_preferred_tier1=ch_id in t1_ids,
+                is_preferred_tier2=ch_id in t2_ids or ch_name.lower() in t2_name_lower,
                 is_blocked=False,
             ))
 
@@ -396,8 +412,9 @@ class SearcherService:
         on_activity=None,
         script_context: ScriptContext | None = None,
     ) -> dict[str, list[CandidateVideo]]:
-        tier1_ids = self._get("preferred_channels_tier1") or []
-        has_preferred = len(tier1_ids) > 0
+        t1_ids, _ = self._build_preferred_channel_ids()
+        old_tier1 = self._get("preferred_channels_tier1") or []
+        has_preferred = len(t1_ids) > 0 or len(old_tier1) > 0
         if has_preferred:
             max_concurrent = 3
         else:

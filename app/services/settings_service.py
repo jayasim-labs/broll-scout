@@ -11,9 +11,18 @@ import httpx
 from botocore.exceptions import ClientError
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import ChannelResolution
+from app.models.schemas import ChannelResolution, ChannelEntry
+from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
+
+
+def _format_sub_count(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}K"
+    return str(count) if count else "N/A"
 
 
 class SettingsService:
@@ -196,6 +205,228 @@ class SettingsService:
             "sports": await self.get_setting("blocked_sports") or [],
             "custom_rules": await self.get_setting("custom_block_rules") or "",
         }
+
+    # ── Channel sources CRUD ──────────────────────────────────────────────
+
+    async def get_channel_sources(self) -> List[dict]:
+        raw = await self.get_setting("channel_sources")
+        if isinstance(raw, list):
+            return raw
+        return []
+
+    async def add_channel_source(self, entry: dict) -> bool:
+        sources = await self.get_channel_sources()
+        if any(s.get("channel_id") == entry.get("channel_id") and s.get("tier") == entry.get("tier") for s in sources):
+            return False
+        entry.setdefault("added_at", datetime.utcnow().isoformat())
+        sources.append(entry)
+        return await self.update_setting("channel_sources", sources)
+
+    async def remove_channel_source(self, channel_id: str) -> bool:
+        sources = await self.get_channel_sources()
+        filtered = [s for s in sources if s.get("channel_id") != channel_id]
+        if len(filtered) == len(sources):
+            return False
+        return await self.update_setting("channel_sources", filtered)
+
+    async def get_channel_sources_grouped(self) -> Dict[str, List[dict]]:
+        sources = await self.get_channel_sources()
+        groups: Dict[str, List[dict]] = {
+            "blocked-news": [], "blocked-studio": [], "blocked-sports": [],
+            "preferred-tier1": [], "preferred-tier2": [],
+        }
+        for s in sources:
+            tier = s.get("tier", "")
+            cat = s.get("category", "")
+            if tier == "blocked":
+                key = f"blocked-{cat}"
+            elif tier in ("tier1", "tier2"):
+                key = f"preferred-{tier}"
+            else:
+                continue
+            if key in groups:
+                groups[key].append(s)
+        return groups
+
+    # ── Channel resolution (URL/handle/ID/search → full metadata) ───────
+
+    async def resolve_channel_input(self, input_str: str) -> List[dict]:
+        input_str = input_str.strip()
+        if not input_str:
+            return []
+
+        match = re.match(r'https?://(?:www\.)?youtube\.com/channel/(UC[\w-]{22})', input_str)
+        if match:
+            return await self._resolve_by_id(match.group(1))
+
+        match = re.match(r'https?://(?:www\.)?youtube\.com/@([\w.-]+)', input_str)
+        if match:
+            return await self._resolve_by_handle(match.group(1))
+
+        match = re.match(r'https?://(?:www\.)?youtube\.com/(?:c|user)/([\w-]+)', input_str)
+        if match:
+            return await self._search_channels(match.group(1))
+
+        if re.match(r'^UC[\w-]{22}$', input_str):
+            return await self._resolve_by_id(input_str)
+
+        if input_str.startswith('@'):
+            return await self._resolve_by_handle(input_str[1:])
+
+        return await self._search_channels(input_str)
+
+    async def _resolve_by_id(self, channel_id: str) -> List[dict]:
+        if self.youtube_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/channels",
+                        params={"part": "snippet,statistics", "id": channel_id, "key": self.youtube_api_key},
+                    )
+                    resp.raise_for_status()
+                    items = resp.json().get("items", [])
+                    if items:
+                        return [self._parse_yt_channel(items[0])]
+            except Exception:
+                logger.warning("YouTube API failed for channel ID %s", channel_id)
+
+        return await self._resolve_via_companion("resolve_channel", {"channel_id": channel_id})
+
+    async def _resolve_by_handle(self, handle: str) -> List[dict]:
+        if self.youtube_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/channels",
+                        params={"part": "snippet,statistics", "forHandle": handle, "key": self.youtube_api_key},
+                    )
+                    resp.raise_for_status()
+                    items = resp.json().get("items", [])
+                    if items:
+                        return [self._parse_yt_channel(items[0])]
+            except Exception:
+                logger.warning("YouTube API failed for handle @%s", handle)
+
+        return await self._resolve_via_companion("resolve_channel", {"handle": handle})
+
+    async def _search_channels(self, query: str) -> List[dict]:
+        if self.youtube_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    search_resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/search",
+                        params={
+                            "part": "snippet", "q": query, "type": "channel",
+                            "maxResults": 10, "key": self.youtube_api_key,
+                        },
+                    )
+                    search_resp.raise_for_status()
+                    channel_ids = [
+                        item["id"]["channelId"]
+                        for item in search_resp.json().get("items", [])
+                        if "channelId" in item.get("id", {})
+                    ]
+                    if not channel_ids:
+                        return []
+
+                    details_resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/channels",
+                        params={
+                            "part": "snippet,statistics",
+                            "id": ",".join(channel_ids),
+                            "key": self.youtube_api_key,
+                        },
+                    )
+                    details_resp.raise_for_status()
+                    return [self._parse_yt_channel(item) for item in details_resp.json().get("items", [])]
+            except Exception:
+                logger.warning("YouTube API search failed for '%s'", query)
+
+        return await self._resolve_via_companion("search_channels", {"query": query, "max_results": 10})
+
+    async def _resolve_via_companion(self, task_type: str, payload: dict) -> List[dict]:
+        if not agent_queue.is_agent_available():
+            return []
+        try:
+            task_id = await agent_queue.create_task(task_type, payload)
+            result = await agent_queue.wait_for_result(task_id, timeout=30)
+            if isinstance(result, list):
+                return result
+        except Exception:
+            logger.warning("Companion channel resolution failed for %s", task_type)
+        return []
+
+    @staticmethod
+    def _parse_yt_channel(item: dict) -> dict:
+        snippet = item.get("snippet", {})
+        stats = item.get("statistics", {})
+        sub_count = int(stats.get("subscriberCount", 0))
+        return {
+            "channel_id": item.get("id", ""),
+            "channel_name": snippet.get("title", ""),
+            "channel_url": f"https://www.youtube.com/channel/{item.get('id', '')}",
+            "channel_handle": snippet.get("customUrl", ""),
+            "thumbnail_url": (
+                snippet.get("thumbnails", {}).get("medium", {}).get("url", "")
+                or snippet.get("thumbnails", {}).get("default", {}).get("url", "")
+            ),
+            "subscriber_count": sub_count,
+            "subscriber_display": _format_sub_count(sub_count),
+            "video_count": int(stats.get("videoCount", 0)),
+            "description": (snippet.get("description", ""))[:200],
+        }
+
+    # ── Migration from old format ────────────────────────────────────────
+
+    async def migrate_channel_settings_if_needed(self) -> int:
+        existing = await self.get_channel_sources()
+        if existing:
+            return 0
+
+        old_keys = [
+            ("blocked_networks", "news", "blocked"),
+            ("blocked_studios", "studio", "blocked"),
+            ("blocked_sports", "sports", "blocked"),
+            ("preferred_channels_tier1", "archive", "tier1"),
+            ("preferred_channels_tier2", "documentary", "tier2"),
+        ]
+
+        new_entries: List[dict] = []
+        for setting_key, category, tier in old_keys:
+            old_values = await self.get_setting(setting_key)
+            if not old_values or not isinstance(old_values, list):
+                continue
+            for value in old_values:
+                if not value:
+                    continue
+                resolved = await self.resolve_channel_input(str(value))
+                if resolved:
+                    best = resolved[0]
+                    best["category"] = category
+                    best["tier"] = tier
+                    best["added_at"] = datetime.utcnow().isoformat()
+                    best["added_by"] = "migration"
+                    new_entries.append(best)
+                else:
+                    new_entries.append({
+                        "channel_id": value if value.startswith("UC") else "",
+                        "channel_name": value if not value.startswith("UC") else "",
+                        "channel_url": "",
+                        "channel_handle": "",
+                        "thumbnail_url": "",
+                        "subscriber_count": 0,
+                        "subscriber_display": "N/A",
+                        "category": category,
+                        "tier": tier,
+                        "added_at": datetime.utcnow().isoformat(),
+                        "added_by": "migration",
+                    })
+
+        if new_entries:
+            await self.update_setting("channel_sources", new_entries)
+            logger.info("Migrated %d channel entries to channel_sources", len(new_entries))
+
+        return len(new_entries)
 
     def _validate_setting(self, key: str, value: Any) -> bool:
         weight_keys = {
