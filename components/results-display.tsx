@@ -384,10 +384,10 @@ function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment
                               <span className="text-xs font-mono text-muted-foreground/70 pt-0.5 shrink-0">
                                 Shot {segment.broll_shots.length + i + 1}
                               </span>
-                              <p className="text-sm font-medium">
+                              <span className="text-sm font-medium flex items-center">
                                 {result.shot_visual_need || "Editor-added shot"}
                                 <Badge variant="secondary" className="ml-2 text-[9px] px-1.5 py-0">expanded</Badge>
-                              </p>
+                              </span>
                             </div>
                             <div className="space-y-2 ml-12">
                               <ResultCard result={result} jobId={jobId} />
