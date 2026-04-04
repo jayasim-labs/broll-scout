@@ -505,6 +505,39 @@ function ExpandShotButton({ jobId, segment, onRefreshJob }: { jobId: string; seg
     }, POLL_INTERVAL)
   }, [jobId, segment.segment_id, stopPolling, onRefreshJob])
 
+  // On mount: check if there's an in-flight or completed expansion from a previous visit
+  useEffect(() => {
+    let cancelled = false
+    async function checkExistingProgress() {
+      try {
+        const resp = await fetch(
+          `/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-progress`
+        )
+        if (!resp.ok || cancelled) return
+        const data = await resp.json()
+        if (!data.phase || data.phase === "unknown" || !data.log?.length) return
+
+        setPhase(data.phase as ExpandPhase)
+        setLogEntries(data.log || [])
+        setShowLog(true)
+
+        if (data.phase === "done") {
+          const lastMsg = data.log?.slice(-1)[0]?.message || ""
+          if (!lastMsg.toLowerCase().includes("no matching")) {
+            onRefreshJob?.()
+          }
+        } else if (data.phase === "error") {
+          setErrorMsg(data.log?.slice(-1)[0]?.message || "Pipeline error")
+        } else {
+          startPolling()
+        }
+      } catch { /* silent */ }
+    }
+    checkExistingProgress()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, segment.segment_id])
+
   const handleExpand = async () => {
     setPhase("requesting")
     setLogEntries([])
