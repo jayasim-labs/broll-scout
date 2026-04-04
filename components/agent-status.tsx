@@ -316,7 +316,7 @@ export function useAgentLoop(jobActive: boolean) {
             continue
           }
 
-          for (const task of tasks) {
+          await Promise.all(tasks.map(async (task: { task_id: string; task_type: string; payload: unknown }) => {
             try {
               const execResp = await fetch(`${COMPANION_URL}/execute`, {
                 method: "POST",
@@ -340,13 +340,13 @@ export function useAgentLoop(jobActive: boolean) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                  task_id: task.task_id as string,
+                  task_id: task.task_id,
                   status: "failed",
                   result: [],
                 }),
               }).catch(() => {})
             }
-          }
+          }))
         } catch {
           await sleep(POLL_INTERVAL_IDLE)
         }

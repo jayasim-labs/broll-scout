@@ -107,9 +107,12 @@ async def get_queue_status() -> dict:
 
 
 def is_agent_available() -> bool:
-    """Check if any agent has polled within the last 30 seconds."""
+    """Check if an agent is available: polled recently OR actively processing tasks."""
     now = time.time()
-    return any(now - t < 30 for t in _active_agents.values())
+    if any(now - t < 30 for t in _active_agents.values()):
+        return True
+    has_claimed = any(t["status"] == "claimed" for t in _pending.values())
+    return has_claimed
 
 
 def pending_task_count(task_type: str | None = None) -> int:

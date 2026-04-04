@@ -458,7 +458,7 @@ async def run_pipeline(
         match_tasks = []
         for shot_id, cands in shot_candidates.items():
             for cand in cands:
-                if transcript_cache.get(cand.video_id) is not None:
+                if transcript_cache.get(cand.video_id):
                     match_tasks.append((cand.video_id, shot_id))
 
         total_match_pairs = len(match_tasks)

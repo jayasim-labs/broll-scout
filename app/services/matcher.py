@@ -306,7 +306,7 @@ class MatcherService:
             "prompt": prompt,
             "model": matcher_model,
         })
-        results = await agent_queue.wait_for_result(task_id, timeout=120)
+        results = await agent_queue.wait_for_result(task_id, timeout=300)
         if not results:
             logger.warning("Local match task timed out or returned empty")
             return None
