@@ -92,7 +92,7 @@ if ($ollamaPath) {
         } catch {}
     }
 } else {
-    Write-Host "  WARNING: Ollama not found — install from https://ollama.com" -ForegroundColor Yellow
+    Write-Host "  WARNING: Ollama not found - install from https://ollama.com" -ForegroundColor Yellow
 }
 
 # --- Check companion.py ---
@@ -112,8 +112,6 @@ if (-not (Test-Path $nodeModules)) {
 }
 
 # --- Start Next.js dev server in background ---
-# NOTE: We run "npx next dev" directly instead of "npm run dev" because
-# the npm dev script uses Unix-only commands (lsof, kill) that fail on Windows.
 Write-Host ""
 Write-Host "  Starting web app on http://localhost:3000 ..." -ForegroundColor White
 
@@ -162,7 +160,8 @@ try {
     python $CompanionPy
 } catch {
     Write-Host ""
-    Write-Host "  ERROR: companion.py crashed: $_" -ForegroundColor Red
+    $errMsg = $_.ToString()
+    Write-Host "  ERROR: companion.py crashed: $errMsg" -ForegroundColor Red
 }
 
 Write-Host ""
