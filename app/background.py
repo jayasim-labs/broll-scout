@@ -338,7 +338,7 @@ async def run_pipeline(
 
         # All searches complete — no more new videos will be queued.
         # Wait for all queued transcript fetches to finish.
-        TRANSCRIPT_FETCH_TIMEOUT = min(1800, max(300, len(video_pool) * 15))
+        TRANSCRIPT_FETCH_TIMEOUT = min(600, max(180, len(video_pool) * 3))
         total_to_fetch = len(video_pool)
         already_done = len(transcript_cache) + len(failed_fetches)
         remaining = total_to_fetch - already_done
@@ -368,18 +368,21 @@ async def run_pipeline(
 
         progress_reporter = asyncio.create_task(_transcript_progress_reporter())
 
+        timed_out = False
         try:
             await asyncio.wait_for(
                 transcript_queue.join(),
                 timeout=TRANSCRIPT_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            timed_out = True
+            fetched_count = sum(1 for v in transcript_cache.values() if v)
             pending_count = total_to_fetch - len(transcript_cache) - len(failed_fetches)
             logger.error(
                 "Job %s: transcript fetch timed out after %ds — %d/%d fetched, %d still pending",
-                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), total_to_fetch, pending_count,
+                job_id, TRANSCRIPT_FETCH_TIMEOUT, fetched_count, total_to_fetch, pending_count,
             )
-            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT}s — proceeding with {len(transcript_cache)} of {total_to_fetch} transcripts ({pending_count} still pending)", depth=1, group="search")
+            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT // 60}m — proceeding with {fetched_count} of {total_to_fetch} transcripts", depth=1, group="search")
         finally:
             progress_reporter.cancel()
             try:
@@ -387,10 +390,15 @@ async def run_pipeline(
             except asyncio.CancelledError:
                 pass
 
-        # Shut down workers cleanly
-        for _ in range(NUM_FETCH_WORKERS):
-            await transcript_queue.put(None)
-        await asyncio.gather(*fetch_worker_tasks)
+        # Shut down workers — on timeout, cancel immediately instead of waiting
+        if timed_out:
+            for task in fetch_worker_tasks:
+                task.cancel()
+            await asyncio.gather(*fetch_worker_tasks, return_exceptions=True)
+        else:
+            for _ in range(NUM_FETCH_WORKERS):
+                await transcript_queue.put(None)
+            await asyncio.gather(*fetch_worker_tasks)
 
         search_elapsed = round(time.time() - search_start, 1)
 
@@ -494,14 +502,21 @@ async def run_pipeline(
                     )
 
                 match_dur = round(time.time() - match_t0, 1)
+                model_label = match_result.matcher_source or "LLM"
 
                 if transcript_text and match_result.confidence_score > 0:
                     matches_with_result += 1
                     s_start = match_result.start_time_seconds or 0
                     s_end = match_result.end_time_seconds or 0
                     ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
-                    model_label = match_result.matcher_source or "LLM"
                     _log_activity(job_id, "brain", f"🤖 {model_label} → \"{short_title}\" → {match_result.confidence_score:.0%} at {ts_label} (for \"{short_need}\") [{match_dur}s, {word_count} words] — {yt_link}", depth=3, group="match")
+                else:
+                    reason = ""
+                    if match_result.context_match is False:
+                        reason = " (context mismatch)"
+                    elif model_label == "local_unavailable":
+                        reason = " (agent unavailable)"
+                    _log_activity(job_id, "clock", f"⏭️ No match in \"{short_title}\" for \"{short_need}\"{reason} [{match_dur}s, {word_count} words]", depth=3, group="match")
 
                 shot_match_results[shot_id].append((cand, match_result))
             except Exception:
