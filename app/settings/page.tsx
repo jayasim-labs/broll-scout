@@ -940,7 +940,7 @@ function InstructionsTab({ settings, onChange }: { settings: PipelineSettings; o
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Custom Instructions</CardTitle>
-          <p className="text-xs text-muted-foreground">These instructions are appended to every GPT-4o-mini timestamp prompt. They guide the AI on what kind of footage to prioritize or avoid when choosing the peak visual moment from a video&apos;s transcript.</p>
+          <p className="text-xs text-muted-foreground">These instructions guide two stages of the pipeline: (1) Search query generation — influences what kind of videos the system looks for, and (2) Timestamp matching — influences which moments are selected from each video. Changes apply to all new jobs. Running jobs are not affected.</p>
         </CardHeader>
         <CardContent className="space-y-3">
           <Textarea

@@ -125,8 +125,20 @@ class TranslatorService:
         await _emit("clock", f"GPT-4o will also break your script into scenes and figure out what B-roll each scene needs. This usually takes 15–30 seconds")
 
         system = SYSTEM_PROMPT
-        if special_instructions:
-            system += f"\n\nAdditional instructions:\n{special_instructions}"
+        if special_instructions and special_instructions.strip():
+            system += (
+                "\n\n=== EDITOR PREFERENCES ===\n"
+                "The editor has specified these preferences. Apply them when generating "
+                "search queries and visual needs for each segment. These should influence "
+                "WHAT kind of footage you search for.\n\n"
+                f"{special_instructions.strip()}\n\n"
+                "When these preferences affect search queries, adjust the query terms accordingly.\n"
+                "For example:\n"
+                '  - "prefer documentary over news" → use "documentary", "analysis", "explainer" '
+                'in queries, avoid "news", "update", "breaking"\n'
+                '  - "prefer aerial/drone shots" → include "aerial", "drone", "overhead" in queries\n'
+                '  - "avoid partisan news" → use "analysis", "neutral", "independent" in queries'
+            )
 
         messages = [
             {"role": "system", "content": system},

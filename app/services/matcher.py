@@ -141,8 +141,15 @@ class MatcherService:
             video_duration=video_duration,
             video_duration_min=round(video_duration / 60, 1),
         )
-        if special_instructions:
-            prompt += f"\n\nAdditional instructions:\n{special_instructions}"
+        if special_instructions and special_instructions.strip():
+            prompt += (
+                "\n\n=== EDITOR PREFERENCES ===\n"
+                f"{special_instructions.strip()}\n\n"
+                "Apply these when choosing the peak visual moment from the transcript above.\n"
+                "If a preference conflicts with the video content (e.g., editor prefers "
+                "documentary footage but this video is a news clip), lower the confidence_score "
+                "to reflect that this video is not ideal, even if the topic matches."
+            )
 
         source_str = video_metadata.get("transcript_source", "no_transcript")
         try:
