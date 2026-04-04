@@ -449,7 +449,6 @@ async def run_pipeline(
         }
 
         match_start = time.time()
-        match_semaphore = asyncio.Semaphore(max_concurrent_candidates)
 
         match_tasks = []
         for shot_id, cands in shot_candidates.items():
@@ -458,86 +457,77 @@ async def run_pipeline(
                     match_tasks.append((cand.video_id, shot_id))
 
         total_match_pairs = len(match_tasks)
-        matches_done = 0
-        matches_lock = asyncio.Lock()
 
         _set_progress(job_id, "matching", 50, f"Matching {total_match_pairs} video-shot pairs with local AI...")
         _log_activity(job_id, "eye", f"Matching {total_active_shots} shots against {videos_with_transcript} videos with transcripts ({total_match_pairs} video-shot pairs to process)", group="match")
-        _log_activity(job_id, "clock", f"Each (video, shot) pair gets a dedicated {match_label} call", depth=1, group="match")
+        _log_activity(job_id, "clock", f"Each pair gets a dedicated {match_label} call — processing sequentially (1 at a time)", depth=1, group="match")
+        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches", depth=1, group="match")
 
-        async def _match_one(vid: str, shot_id: str):
-            nonlocal matches_done
+        matches_done = 0
+        matches_with_result = 0
+
+        for vid, shot_id in match_tasks:
             seg, shot = shot_id_to_info[shot_id]
             cand = video_pool[vid]
             transcript_text = transcript_cache.get(vid)
             yt_link = f"🔗 {vid}"
             word_count = len(transcript_text.split()) if transcript_text else 0
+            short_title = cand.video_title[:40]
+            short_need = shot.visual_need[:30]
 
-            async with match_semaphore:
-                match_t0 = time.time()
-                try:
-                    video_meta = {
-                        "video_duration_seconds": cand.video_duration_seconds,
-                        "video_title": cand.video_title,
-                        "view_count": cand.view_count,
-                        "transcript_source": transcript_sources.get(vid, "unknown"),
-                    }
-                    match = await matcher.find_timestamp(
-                        transcript_text, seg, video_meta, job_id,
-                        script_context=script_context,
-                        shot=shot,
+            match_t0 = time.time()
+            try:
+                video_meta = {
+                    "video_duration_seconds": cand.video_duration_seconds,
+                    "video_title": cand.video_title,
+                    "view_count": cand.view_count,
+                    "transcript_source": transcript_sources.get(vid, "unknown"),
+                }
+                match_result = await matcher.find_timestamp(
+                    transcript_text, seg, video_meta, job_id,
+                    script_context=script_context,
+                    shot=shot,
+                )
+                if matcher.context_matching_enabled:
+                    match_result = matcher.validate_context_match(
+                        match_result, cand.video_duration_seconds,
                     )
-                    if matcher.context_matching_enabled:
-                        match = matcher.validate_context_match(
-                            match, cand.video_duration_seconds,
-                        )
 
-                    match_dur = round(time.time() - match_t0, 1)
-                    short_title = cand.video_title[:40]
-                    short_need = shot.visual_need[:30]
+                match_dur = round(time.time() - match_t0, 1)
 
-                    if transcript_text and match.confidence_score > 0:
-                        s_start = match.start_time_seconds or 0
-                        s_end = match.end_time_seconds or 0
-                        ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
-                        model_label = match.matcher_source or "LLM"
-                        _log_activity(job_id, "brain", f"🤖 {model_label} → \"{short_title}\" → {match.confidence_score:.0%} at {ts_label} (for \"{short_need}\") [{match_dur}s, {word_count} words] — {yt_link}", depth=3, group="match")
+                if transcript_text and match_result.confidence_score > 0:
+                    matches_with_result += 1
+                    s_start = match_result.start_time_seconds or 0
+                    s_end = match_result.end_time_seconds or 0
+                    ts_label = f"{s_start // 60}:{s_start % 60:02d}–{s_end // 60}:{s_end % 60:02d}"
+                    model_label = match_result.matcher_source or "LLM"
+                    _log_activity(job_id, "brain", f"🤖 {model_label} → \"{short_title}\" → {match_result.confidence_score:.0%} at {ts_label} (for \"{short_need}\") [{match_dur}s, {word_count} words] — {yt_link}", depth=3, group="match")
 
-                    shot_match_results[shot_id].append((cand, match))
-                except Exception:
-                    logger.exception("Match failed: %s for shot %s", vid, shot_id)
+                shot_match_results[shot_id].append((cand, match_result))
+            except Exception:
+                logger.exception("Match failed: %s for shot %s", vid, shot_id)
 
-            async with matches_lock:
-                matches_done += 1
-                pending = total_match_pairs - matches_done
-                if matches_done % 5 == 0 or matches_done == total_match_pairs:
-                    pct = 55 + int(35 * matches_done / max(total_match_pairs, 1))
-                    elapsed_s = time.time() - match_start
-                    if matches_done > 0:
-                        per_match = elapsed_s / matches_done
-                        remaining = int(per_match * pending)
-                        remaining_min = remaining // 60
-                        remaining_sec = remaining % 60
-                        if remaining_min > 0:
-                            time_note = f" (~{remaining_min}m {remaining_sec}s remaining)"
-                        elif remaining > 0:
-                            time_note = f" (~{remaining_sec}s remaining)"
-                        else:
-                            time_note = ""
-                    else:
-                        time_note = ""
-                    _set_progress(job_id, "matching", pct, f"Matched {matches_done}/{total_match_pairs} pairs — {pending} pending{time_note}")
-
-        _set_progress(job_id, "matching", 55, f"Matching {total_match_pairs} video-shot pairs...")
-        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches ({max_concurrent_candidates} at a time)", depth=1, group="match")
-
-        await asyncio.gather(
-            *[_match_one(vid, shot_id) for vid, shot_id in match_tasks],
-            return_exceptions=True,
-        )
+            matches_done += 1
+            pending = total_match_pairs - matches_done
+            pct = 55 + int(35 * matches_done / max(total_match_pairs, 1))
+            elapsed_s = time.time() - match_start
+            if matches_done > 0:
+                per_match = elapsed_s / matches_done
+                remaining = int(per_match * pending)
+                remaining_min = remaining // 60
+                remaining_sec = remaining % 60
+                if remaining_min > 0:
+                    time_note = f" (~{remaining_min}m {remaining_sec}s remaining)"
+                elif remaining > 0:
+                    time_note = f" (~{remaining_sec}s remaining)"
+                else:
+                    time_note = ""
+            else:
+                time_note = ""
+            _set_progress(job_id, "matching", pct, f"Matched {matches_done}/{total_match_pairs} — {matches_with_result} clips found — {pending} pending{time_note}")
 
         match_elapsed = round(time.time() - match_start, 1)
-        _log_activity(job_id, "check", f"Matching done in {match_elapsed}s", depth=1, group="match")
+        _log_activity(job_id, "check", f"Matching done in {match_elapsed}s — {matches_with_result} clips from {total_match_pairs} pairs", depth=1, group="match")
 
         # Rank per shot, pick best clip, assemble segment results
         all_segment_results: Dict[str, List[RankedResult]] = {}
