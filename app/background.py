@@ -306,8 +306,10 @@ async def run_pipeline(
 
                 async with progress_lock:
                     transcripts_fetched += 1
-                    _set_progress(job_id, "searching", 20 + int(25 * min(shots_searched / max(len(all_shots), 1), 1)),
-                                  f"Shot {shots_searched}/{len(all_shots)}, {transcripts_fetched} transcripts fetched")
+                    total_pool = max(len(video_pool), 1)
+                    pct = 40 + int(15 * transcripts_fetched / total_pool)
+                    _set_progress(job_id, "searching", min(pct, 55),
+                                  f"Transcripts: {transcripts_fetched}/{total_pool} fetched")
 
                 transcript_queue.task_done()
 
@@ -326,24 +328,54 @@ async def run_pipeline(
 
         # All searches complete — no more new videos will be queued.
         # Wait for all queued transcript fetches to finish.
-        # Whisper runs serially on companion (~45s each). Worst case all videos
-        # need Whisper; best case most have YouTube captions/cache.
-        # Budget ~15s per video (most will be fast cache/caption hits, some will be Whisper).
-        # Min 5 min, max 30 min.
         TRANSCRIPT_FETCH_TIMEOUT = min(1800, max(300, len(video_pool) * 15))
-        _log_activity(job_id, "clock", f"Waiting up to {TRANSCRIPT_FETCH_TIMEOUT // 60}m for {len(video_pool)} transcript fetches (Whisper runs serially on companion)", depth=1, group="search")
+        total_to_fetch = len(video_pool)
+        already_done = len(transcript_cache) + len(failed_fetches)
+        remaining = total_to_fetch - already_done
+        if remaining > 0:
+            _log_activity(job_id, "clock", f"All searches done! Now waiting for {remaining} remaining transcript fetches (Whisper transcribes ~20s each on your local companion)", depth=1, group="search")
+        else:
+            _log_activity(job_id, "check", f"All {total_to_fetch} transcripts already fetched during search", depth=1, group="search")
+
+        async def _transcript_progress_reporter():
+            """Periodically log transcript fetch progress so the UI doesn't appear stuck."""
+            last_count = len(transcript_cache) + len(failed_fetches)
+            while True:
+                await asyncio.sleep(15)
+                done_now = len(transcript_cache) + len(failed_fetches)
+                pending_now = total_to_fetch - done_now
+                if pending_now <= 0:
+                    break
+                if done_now != last_count:
+                    whisper_count = sum(1 for s in transcript_sources.values() if "Whisper" in s)
+                    _log_activity(job_id, "clock", f"Transcripts: {done_now}/{total_to_fetch} done ({pending_now} remaining, {whisper_count} via Whisper so far)", depth=1, group="search")
+                    _set_progress(job_id, "searching", 40 + int(15 * done_now / max(total_to_fetch, 1)),
+                                  f"Fetching transcripts: {done_now}/{total_to_fetch} ({pending_now} remaining)")
+                    last_count = done_now
+                else:
+                    _set_progress(job_id, "searching", 40 + int(15 * done_now / max(total_to_fetch, 1)),
+                                  f"Waiting for Whisper transcription... ({pending_now} videos remaining)")
+
+        progress_reporter = asyncio.create_task(_transcript_progress_reporter())
+
         try:
             await asyncio.wait_for(
                 transcript_queue.join(),
                 timeout=TRANSCRIPT_FETCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            pending_count = len(video_pool) - len(transcript_cache) - len(failed_fetches)
+            pending_count = total_to_fetch - len(transcript_cache) - len(failed_fetches)
             logger.error(
                 "Job %s: transcript fetch timed out after %ds — %d/%d fetched, %d still pending",
-                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), len(video_pool), pending_count,
+                job_id, TRANSCRIPT_FETCH_TIMEOUT, len(transcript_cache), total_to_fetch, pending_count,
             )
-            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT}s — proceeding with {len(transcript_cache)} of {len(video_pool)} transcripts ({pending_count} still pending, likely waiting for Whisper)", depth=1, group="search")
+            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT}s — proceeding with {len(transcript_cache)} of {total_to_fetch} transcripts ({pending_count} still pending)", depth=1, group="search")
+        finally:
+            progress_reporter.cancel()
+            try:
+                await progress_reporter
+            except asyncio.CancelledError:
+                pass
 
         # Shut down workers cleanly
         for _ in range(NUM_FETCH_WORKERS):
