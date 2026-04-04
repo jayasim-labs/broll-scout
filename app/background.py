@@ -278,24 +278,34 @@ async def run_pipeline(
                         transcript_queue.task_done()
                         continue
                     yt_link = f"https://youtu.be/{vid}"
+                    short_title = cand.video_title[:45]
+                    dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
+
+                    async def _on_whisper_start(v_id: str, dur_s: int):
+                        dur_m = round(dur_s / 60, 1)
+                        _log_activity(job_id, "clock", f"🎙️ Whisper starting for \"{short_title}\" ({dur_m}m video) — downloading audio + transcribing locally — {yt_link}", depth=2, group="search")
+
                     try:
+                        fetch_start = time.time()
                         t = await transcriber.get_transcript(
                             vid,
                             video_duration_seconds=cand.video_duration_seconds,
                             job_id=job_id,
+                            on_whisper_start=_on_whisper_start,
                         )
+                        fetch_elapsed = round(time.time() - fetch_start, 1)
                         transcript_cache[vid] = t.transcript_text
                         source_label = _TRANSCRIPT_SOURCE_LABELS.get(
                             t.transcript_source.value, t.transcript_source.value,
                         )
                         transcript_sources[vid] = source_label
-                        short_title = cand.video_title[:45]
                         if t.transcript_text:
-                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label} — {yt_link}", depth=2, group="search")
+                            timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
+                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}", depth=2, group="search")
                         else:
                             failed_fetches.add(vid)
                             affected = video_to_shots.get(vid, [])
-                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
                     except Exception:
                         logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
                         transcript_cache[vid] = None

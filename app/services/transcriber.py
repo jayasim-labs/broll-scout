@@ -30,6 +30,7 @@ class TranscriberService:
         video_id: str,
         video_duration_seconds: int = 0,
         job_id: str | None = None,
+        on_whisper_start=None,
     ) -> Transcript:
         """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper flag."""
         from app.services.storage import get_storage
@@ -107,6 +108,11 @@ class TranscriberService:
         if effective_duration <= max_whisper_duration:
             try:
                 logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
+                if on_whisper_start:
+                    try:
+                        await on_whisper_start(video_id, effective_duration)
+                    except Exception:
+                        pass
                 whisper_result = await self._whisper_via_agent(video_id, effective_duration)
                 if whisper_result:
                     await storage.store_transcript(
