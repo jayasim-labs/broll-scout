@@ -51,7 +51,7 @@ export function Navbar() {
               href="/"
               className={cn(
                 "text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2",
-                pathname === "/" && "text-foreground"
+                (pathname === "/" || pathname.startsWith("/jobs/")) && "text-foreground"
               )}
             >
               <Home className="w-5 h-5" />

@@ -1,22 +1,21 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { Navbar } from "@/components/navbar"
 import { ScriptInput } from "@/components/script-input"
 import { ProgressTracker } from "@/components/progress-tracker"
-import { ResultsDisplay } from "@/components/results-display"
 import { JobHistory } from "@/components/job-history"
 import { AgentOnboardingBanner, useAgentLoop } from "@/components/agent-status"
-import type { JobResponse, JobProgress, JobSummary, ProjectSummary } from "@/lib/types"
+import type { JobProgress, JobSummary, ProjectSummary } from "@/lib/types"
 
 const API_BASE = '/api/v1'
 
-type ViewState = 'input' | 'processing' | 'results'
+type ViewState = 'input' | 'processing'
 
 export default function HomePage() {
-  const searchParams = useSearchParams()
+  const router = useRouter()
   const [viewState, setViewState] = useState<ViewState>('input')
   const [isLoading, setIsLoading] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
@@ -27,7 +26,6 @@ export default function HomePage() {
     message: 'Initializing...',
     activity_log: [],
   })
-  const [job, setJob] = useState<JobResponse | null>(null)
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   useAgentLoop(viewState === 'processing')
@@ -37,13 +35,6 @@ export default function HomePage() {
     loadProjects()
   }, [])
 
-  useEffect(() => {
-    const jobParam = searchParams.get("job")
-    if (jobParam && viewState === "input") {
-      handleLoadJob(jobParam)
-    }
-  }, [searchParams])
-
   const loadJobHistory = async () => {
     try {
       const resp = await fetch(`${API_BASE}/jobs`)
@@ -51,9 +42,7 @@ export default function HomePage() {
         const data = await resp.json()
         setJobHistory(data.jobs || [])
       }
-    } catch {
-      // Backend may not be running
-    }
+    } catch { /* Backend may not be running */ }
   }
 
   const loadProjects = async () => {
@@ -63,9 +52,7 @@ export default function HomePage() {
         const data = await resp.json()
         setProjects(data.projects || [])
       }
-    } catch {
-      // Backend may not be running
-    }
+    } catch { /* Backend may not be running */ }
   }
 
   const pollJobStatus = useCallback(async (jobId: string) => {
@@ -84,15 +71,10 @@ export default function HomePage() {
       }
 
       if (status.status === 'complete') {
-        const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`)
-        if (jobResponse.ok) {
-          const jobData = await jobResponse.json()
-          setJob(jobData)
-          setViewState('results')
-          toast.success('Scouting complete!')
-          loadJobHistory()
-          loadProjects()
-        }
+        toast.success('Scouting complete!')
+        loadJobHistory()
+        loadProjects()
+        router.push(`/jobs/${jobId}`)
         return true
       } else if (status.status === 'failed') {
         toast.error('Job failed')
@@ -112,7 +94,7 @@ export default function HomePage() {
     } catch {
       return false
     }
-  }, [])
+  }, [router])
 
   useEffect(() => {
     if (viewState !== 'processing' || !currentJobId) return
@@ -179,30 +161,8 @@ export default function HomePage() {
     }
   }
 
-  const handleLoadJob = async (jobId: string) => {
-    try {
-      const statusResp = await fetch(`${API_BASE}/jobs/${jobId}/status`)
-      if (statusResp.ok) {
-        const statusData = await statusResp.json()
-        if (statusData.status === 'processing' || statusData.status === 'pending') {
-          setCurrentJobId(jobId)
-          if (statusData.progress) setProgress(statusData.progress)
-          setViewState('processing')
-          return
-        }
-      }
-
-      const resp = await fetch(`${API_BASE}/jobs/${jobId}`)
-      if (resp.ok) {
-        const data = await resp.json()
-        setJob(data)
-        setCurrentJobId(jobId)
-        if (data.project_id) setActiveProjectId(data.project_id)
-        setViewState('results')
-      }
-    } catch {
-      toast.error('Failed to load job')
-    }
+  const handleSelectJob = (jobId: string) => {
+    router.push(`/jobs/${jobId}`)
   }
 
   const handleSelectProject = (projectId: string) => {
@@ -259,22 +219,9 @@ export default function HomePage() {
     resetToInput()
   }
 
-  const handleExport = () => {
-    if (!job) return
-    const blob = new Blob([JSON.stringify(job, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `broll-scout-${job.job_id}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    toast.success('Results exported')
-  }
-
   const resetToInput = () => {
     setViewState('input')
     setCurrentJobId(null)
-    setJob(null)
     setProgress({ stage: 'queued', percent_complete: 0, message: 'Initializing...', activity_log: [] })
   }
 
@@ -289,7 +236,7 @@ export default function HomePage() {
             projects={projects}
             activeJobId={currentJobId}
             activeProjectId={activeProjectId}
-            onSelectJob={handleLoadJob}
+            onSelectJob={handleSelectJob}
             onSelectProject={handleSelectProject}
             onRenameProject={handleRenameProject}
             onDeleteProject={handleDeleteProject}
@@ -309,13 +256,6 @@ export default function HomePage() {
           )}
           {viewState === 'processing' && (
             <ProgressTracker progress={progress} onCancel={handleCancel} />
-          )}
-          {viewState === 'results' && job && (
-            <ResultsDisplay
-              job={job}
-              onExport={handleExport}
-              onNewSearch={resetToInput}
-            />
           )}
         </main>
       </div>

@@ -234,7 +234,7 @@ export default function ProjectsPage() {
                 onRenameSubmit={() => handleRename(project.project_id)}
                 onRenameCancel={() => { setRenamingId(null); setRenameValue("") }}
                 onDelete={() => handleDelete(project.project_id, project.title)}
-                onViewJob={(jobId) => router.push(`/?job=${jobId}`)}
+                onViewJob={(jobId) => router.push(`/jobs/${jobId}`)}
               />
             ))}
 
@@ -246,7 +246,7 @@ export default function ProjectsPage() {
                 </h3>
                 <div className="space-y-1">
                   {orphanJobs.map((job) => (
-                    <JobRow key={job.job_id} job={job} onView={() => router.push(`/?job=${job.job_id}`)} />
+                    <JobRow key={job.job_id} job={job} onView={() => router.push(`/jobs/${job.job_id}`)} />
                   ))}
                 </div>
               </div>

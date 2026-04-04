@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback, useMemo } from "react"
+import { useState, useRef, useCallback, useMemo, useEffect } from "react"
 import {
   Download, ChevronDown, ChevronUp, ExternalLink, RefreshCw,
   ThumbsUp, ThumbsDown, Clock, Eye, Play, Scissors,
@@ -24,6 +24,7 @@ interface ResultsDisplayProps {
   job: JobResponse
   onExport?: () => void
   onNewSearch: () => void
+  onRefreshJob?: () => void
 }
 
 function formatTime(seconds: number): string {
@@ -48,7 +49,7 @@ function scoreColor(score: number): string {
 
 const SEGMENTS_PER_PAGE = 15
 
-export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayProps) {
+export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob }: ResultsDisplayProps) {
   const activityLog = job.activity_log || []
   const displaySegments = useMemo(
     () => job.segments.filter(s => s.results.length > 0 || s.broll_count === 0),
@@ -139,6 +140,7 @@ export function ResultsDisplay({ job, onExport, onNewSearch }: ResultsDisplayPro
                 segment={segment}
                 index={(currentPage - 1) * SEGMENTS_PER_PAGE + idx}
                 jobId={job.job_id}
+                onRefreshJob={onRefreshJob}
               />
             ))}
           </div>
@@ -284,7 +286,7 @@ function formatDuration(seconds: number): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`
 }
 
-function SegmentCard({ segment, index, jobId }: { segment: Segment; index: number; jobId: string }) {
+function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment; index: number; jobId: string; onRefreshJob?: () => void }) {
   const [isOpen, setIsOpen] = useState(true)
   const isNoBroll = segment.broll_count === 0
   const hasShots = segment.broll_shots && segment.broll_shots.length > 0
@@ -392,7 +394,7 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
                   </>
                 )}
                 <LibrarySuggestions segment={segment} />
-                <ExpandShotButton jobId={jobId} segment={segment} />
+                <ExpandShotButton jobId={jobId} segment={segment} onRefreshJob={onRefreshJob} />
               </>
             )}
           </CardContent>
@@ -402,13 +404,114 @@ function SegmentCard({ segment, index, jobId }: { segment: Segment; index: numbe
   )
 }
 
-function ExpandShotButton({ jobId, segment }: { jobId: string; segment: Segment }) {
-  const [loading, setLoading] = useState(false)
-  const [status, setStatus] = useState<string | null>(null)
+type ExpandPhase = "idle" | "requesting" | "generating" | "searching" | "transcripts" | "matching" | "ranking" | "done" | "error" | "unknown"
+
+interface ExpandLogEntry {
+  time: string
+  phase: string
+  message: string
+  detail?: string
+}
+
+const PHASE_ORDER: ExpandPhase[] = ["generating", "searching", "transcripts", "matching", "ranking"]
+
+const PHASE_LABELS: Record<string, string> = {
+  generating: "Ideate",
+  searching: "Search",
+  transcripts: "Transcripts",
+  matching: "Match",
+  ranking: "Rank",
+}
+
+const PHASE_ICONS: Record<string, LucideIcon> = {
+  generating: Brain,
+  searching: Search,
+  transcripts: Globe,
+  matching: Zap,
+  ranking: Filter,
+  done: Check,
+  error: X,
+}
+
+function ExpandShotButton({ jobId, segment, onRefreshJob }: { jobId: string; segment: Segment; onRefreshJob?: () => void }) {
+  const [phase, setPhase] = useState<ExpandPhase>("idle")
+  const [logEntries, setLogEntries] = useState<ExpandLogEntry[]>([])
+  const [newResults, setNewResults] = useState<RankedResult[]>([])
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [showLog, setShowLog] = useState(true)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const initialResultCount = useRef(segment.results.length)
+  const logEndRef = useRef<HTMLDivElement>(null)
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
+  useEffect(() => () => stopPolling(), [stopPolling])
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [logEntries.length])
+
+  const startPolling = useCallback(() => {
+    let elapsed = 0
+    const POLL_INTERVAL = 3000
+    const MAX_POLL = 180000
+
+    pollRef.current = setInterval(async () => {
+      elapsed += POLL_INTERVAL
+
+      try {
+        const progressResp = await fetch(
+          `/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-progress`
+        )
+        if (progressResp.ok) {
+          const data = await progressResp.json()
+          if (data.phase && data.phase !== "unknown") {
+            setPhase(data.phase as ExpandPhase)
+          }
+          if (data.log && data.log.length > 0) {
+            setLogEntries(data.log)
+          }
+
+          if (data.phase === "done" || data.phase === "error") {
+            stopPolling()
+            if (data.phase === "error") {
+              setErrorMsg(data.log?.slice(-1)[0]?.message || "Pipeline error")
+            }
+            const jobResp = await fetch(`/api/v1/jobs/${jobId}`)
+            if (jobResp.ok) {
+              const jobData = await jobResp.json()
+              const seg = jobData.segments?.find((s: Segment) => s.segment_id === segment.segment_id)
+              if (seg && seg.results.length > initialResultCount.current) {
+                setNewResults(seg.results.slice(initialResultCount.current))
+              }
+            }
+            onRefreshJob?.()
+            return
+          }
+        }
+      } catch { /* keep polling */ }
+
+      if (elapsed >= MAX_POLL) {
+        stopPolling()
+        setPhase("done")
+        setErrorMsg("Timed out — the expansion may still be processing. Try refreshing the page.")
+        onRefreshJob?.()
+      }
+    }, POLL_INTERVAL)
+  }, [jobId, segment.segment_id, stopPolling, onRefreshJob])
 
   const handleExpand = async () => {
-    setLoading(true)
-    setStatus(null)
+    setPhase("requesting")
+    setLogEntries([])
+    setNewResults([])
+    setErrorMsg(null)
+    setShowLog(true)
+    initialResultCount.current = segment.results.length
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/segments/${segment.segment_id}/expand-shots`, {
         method: "POST",
@@ -416,36 +519,215 @@ function ExpandShotButton({ jobId, segment }: { jobId: string; segment: Segment 
         body: JSON.stringify({ job_id: jobId, segment_id: segment.segment_id, count: 1 }),
       })
       if (res.ok) {
-        const data = await res.json()
-        setStatus(data.message || "New shot queued — refresh to see results")
+        setPhase("generating")
+        startPolling()
       } else {
-        setStatus("Failed to request additional shot")
+        const err = await res.json().catch(() => null)
+        setPhase("error")
+        setErrorMsg(err?.detail || `Backend returned ${res.status}`)
       }
     } catch {
-      setStatus("Failed to connect to backend")
-    } finally {
-      setLoading(false)
+      setPhase("error")
+      setErrorMsg("Failed to connect to backend")
     }
   }
 
-  return (
-    <div className="mt-2">
-      {!status ? (
+  const handleReset = () => {
+    stopPolling()
+    setPhase("idle")
+    setLogEntries([])
+    setNewResults([])
+    setErrorMsg(null)
+  }
+
+  if (phase === "idle") {
+    return (
+      <div className="mt-2">
         <Button
           variant="ghost"
           size="sm"
           className="text-xs text-muted-foreground gap-1.5 hover:text-primary"
           onClick={handleExpand}
-          disabled={loading}
         >
-          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+          <Plus className="w-3.5 h-3.5" />
           Add another shot for this segment
         </Button>
-      ) : (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Check className="w-3.5 h-3.5 text-green-500" />
-          {status}
+      </div>
+    )
+  }
+
+  const isInProgress = !["idle", "done", "error"].includes(phase)
+  const currentPhaseIdx = PHASE_ORDER.indexOf(phase as typeof PHASE_ORDER[number])
+
+  return (
+    <div className="mt-3 rounded-lg border border-border/60 bg-secondary/30 p-3 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {isInProgress && <Loader2 className="w-4 h-4 animate-spin text-primary" />}
+          {phase === "done" && !errorMsg && newResults.length > 0 && <Check className="w-4 h-4 text-green-500" />}
+          {phase === "done" && !errorMsg && newResults.length === 0 && <AlertTriangle className="w-4 h-4 text-yellow-500" />}
+          {phase === "error" && <X className="w-4 h-4 text-red-500" />}
+          <span className="text-xs font-medium">
+            {errorMsg
+              ? errorMsg
+              : phase === "done" && newResults.length > 0
+                ? `New clip added for "${segment.title}"`
+                : phase === "done"
+                  ? "No matching clip found"
+                  : `Expanding "${segment.title}"...`}
+          </span>
+        </div>
+        {logEntries.length > 0 && (
+          <button
+            onClick={() => setShowLog(!showLog)}
+            className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+          >
+            <Terminal className="w-3 h-3" />
+            {showLog ? "Hide" : "Show"} log ({logEntries.length})
+          </button>
+        )}
+      </div>
+
+      {/* Progress steps */}
+      {isInProgress && (
+        <div className="flex gap-0.5">
+          {PHASE_ORDER.map((step, stepIdx) => {
+            const isDone = stepIdx < currentPhaseIdx
+            const isCurrent = stepIdx === currentPhaseIdx
+            const StepIcon = PHASE_ICONS[step] || Zap
+            return (
+              <div key={step} className="flex-1 flex flex-col items-center gap-1">
+                <div className={cn(
+                  "h-1.5 w-full rounded-full transition-all duration-500",
+                  isDone ? "bg-green-500" : isCurrent ? "bg-primary animate-pulse" : "bg-muted"
+                )} />
+                <div className="flex items-center gap-0.5">
+                  <StepIcon className={cn(
+                    "w-2.5 h-2.5",
+                    isDone ? "text-green-500" : isCurrent ? "text-primary" : "text-muted-foreground/40"
+                  )} />
+                  <span className={cn(
+                    "text-[9px]",
+                    isDone ? "text-green-500" : isCurrent ? "text-primary font-medium" : "text-muted-foreground/40"
+                  )}>
+                    {PHASE_LABELS[step] || step}
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Inline activity log */}
+      {showLog && logEntries.length > 0 && (
+        <div className="rounded-md border border-border/40 bg-background/50 overflow-hidden">
+          <div className="max-h-48 overflow-y-auto px-3 py-2 space-y-1 text-[11px] font-mono">
+            {logEntries.map((entry, i) => {
+              const PhaseIcon = PHASE_ICONS[entry.phase] || Zap
+              const isLatest = i === logEntries.length - 1 && isInProgress
+              return (
+                <div key={i} className={cn(
+                  "flex items-start gap-2 py-0.5",
+                  isLatest ? "text-primary" : "text-muted-foreground"
+                )}>
+                  <span className="text-muted-foreground/50 flex-shrink-0 tabular-nums">{entry.time}</span>
+                  <PhaseIcon className={cn("w-3 h-3 flex-shrink-0 mt-0.5",
+                    entry.phase === "done" ? "text-green-500" :
+                    entry.phase === "error" ? "text-red-500" :
+                    isLatest ? "text-primary" : "text-muted-foreground/60"
+                  )} />
+                  <div className="min-w-0">
+                    <span className={isLatest ? "font-medium" : ""}>{entry.message}</span>
+                    {entry.detail && (
+                      <>
+                        {entry.detail.startsWith("http") ? (
+                          <a
+                            href={entry.detail}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ml-1 text-blue-400 hover:underline"
+                          >
+                            {entry.detail.includes("youtube.com") ? "[YouTube]" : "[link]"}
+                          </a>
+                        ) : (
+                          <span className="ml-1 text-muted-foreground/50">{entry.detail}</span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
+
+      {/* New result card */}
+      {newResults.length > 0 && (
+        <div className="space-y-2 pt-1">
+          <p className="text-[10px] text-green-500 uppercase tracking-wider font-semibold">New clip added</p>
+          {newResults.map(r => (
+            <div key={r.result_id} className="flex items-start gap-3 rounded-md border border-green-500/20 bg-green-500/5 p-2.5">
+              <a
+                href={r.clip_url || `https://youtube.com/watch?v=${r.video_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-28 h-16 rounded overflow-hidden flex-shrink-0 bg-muted relative group"
+              >
+                <img
+                  src={r.thumbnail_url || `https://img.youtube.com/vi/${r.video_id}/mqdefault.jpg`}
+                  alt=""
+                  className="w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <Play className="w-5 h-5 text-white" />
+                </div>
+              </a>
+              <div className="min-w-0 flex-1">
+                <a
+                  href={r.clip_url || `https://youtube.com/watch?v=${r.video_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium hover:text-primary line-clamp-1"
+                >
+                  {r.video_title}
+                </a>
+                <p className="text-[11px] text-muted-foreground">{r.channel_name}</p>
+                {r.the_hook && (
+                  <p className="text-[10px] text-primary/80 italic mt-0.5 line-clamp-2">&quot;{r.the_hook}&quot;</p>
+                )}
+                <div className="flex items-center gap-2 mt-1">
+                  {r.relevance_score > 0 && (
+                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", scoreColor(r.relevance_score))}>
+                      {Math.round(r.relevance_score * 100)}% match
+                    </Badge>
+                  )}
+                  {r.start_time_seconds != null && r.end_time_seconds != null && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {formatTime(r.start_time_seconds)} – {formatTime(r.end_time_seconds)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {phase === "done" && !errorMsg && newResults.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No matching clip found for the new visual idea. You can try again for a different suggestion.
         </p>
+      )}
+
+      {(phase === "done" || phase === "error") && (
+        <Button variant="ghost" size="sm" className="text-xs gap-1.5" onClick={handleReset}>
+          <Plus className="w-3 h-3" />
+          {newResults.length > 0 ? "Add yet another shot" : "Try again"}
+        </Button>
       )}
     </div>
   )
