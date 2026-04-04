@@ -220,8 +220,8 @@ async def expand_shots_for_segment(
 async def _lightweight_llm_call(prompt: str, system_prompt: str = "Return valid JSON only.") -> dict | None:
     """Route a lightweight JSON-returning LLM call based on the `lightweight_model` setting.
     Returns parsed JSON dict, or None on failure."""
-    settings_svc = await get_settings_service()
-    pipeline_settings = await settings_svc.get_pipeline_settings()
+    settings_svc = get_settings_service()
+    pipeline_settings = await settings_svc.get_all_settings()
     lightweight_model = pipeline_settings.get("lightweight_model", "gpt-4o-mini")
 
     if lightweight_model == "ollama":

@@ -941,15 +941,18 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
       if (data.status === "ok") {
         setDlState("done")
         setDlInfo(`Saved to ${data.file_path} (${data.file_size_mb} MB)`)
+        setTimeout(() => { setDlState("idle"); setDlInfo("") }, 5000)
       } else {
         setDlState("error")
         setDlInfo(data.message || "Download failed")
+        setTimeout(() => { setDlState("idle"); setDlInfo("") }, 8000)
       }
     } catch {
       setDlState("error")
       const ytdlpCmd = `yt-dlp "${result.video_url}" --download-sections "*${formatTime(clipStart)}-${formatTime(clipEnd)}" --force-keyframes-at-cuts -o "clip_${result.video_id}_${clipStart}-${clipEnd}.mp4"`
       try { await navigator.clipboard.writeText(ytdlpCmd) } catch {}
       setDlInfo("Companion not running. yt-dlp command copied to clipboard.")
+      setTimeout(() => { setDlState("idle"); setDlInfo("") }, 8000)
     }
   }, [result.video_id, result.video_url, clipStart, clipEnd])
 
@@ -1049,11 +1052,18 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
             <Button
               variant="outline"
               size="sm"
-              className="h-7 text-xs gap-1.5 px-2.5"
+              className={cn("h-7 text-xs gap-1.5 px-2.5", dlState === "done" && "border-green-500/40 text-green-400", dlState === "error" && "border-red-500/40 text-red-400")}
               onClick={handleClipDownload}
+              disabled={dlState === "downloading"}
             >
-              <Scissors className="w-3 h-3" />
-              Clip & Download
+              {dlState === "downloading" ? (
+                <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+              ) : dlState === "done" ? (
+                <Check className="w-3 h-3" />
+              ) : (
+                <Scissors className="w-3 h-3" />
+              )}
+              {dlState === "downloading" ? "Downloading..." : dlState === "done" ? "Saved!" : dlState === "error" ? "Failed" : "Clip & Download"}
             </Button>
 
             <a
@@ -1106,6 +1116,12 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
               )}
             </div>
           </div>
+
+          {!showPreview && dlInfo && (
+            <p className={cn("text-xs mt-1", dlState === "done" ? "text-green-400" : dlState === "error" ? "text-red-400" : "text-muted-foreground")}>
+              {dlInfo}
+            </p>
+          )}
         </div>
       </div>
 
