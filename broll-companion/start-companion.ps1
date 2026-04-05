@@ -65,7 +65,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # --- Update yt-dlp ---
 Write-Host "  Updating yt-dlp..." -ForegroundColor Gray
-pip install --upgrade yt-dlp --quiet 2>$null
+& python -m pip install --upgrade yt-dlp --quiet 2>$null
 Write-Host "  OK" -ForegroundColor Green
 
 # --- Cookie extraction (reduces YouTube rate-limiting) ---

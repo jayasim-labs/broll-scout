@@ -169,7 +169,7 @@ Write-Host "  Upgrading pip..." -ForegroundColor White
 & python -m pip install --upgrade pip --quiet 2>$null
 
 Write-Host "  Installing flask, flask-cors, yt-dlp, youtube-transcript-api, ollama..." -ForegroundColor White
-pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
+& python -m pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: Companion package installation failed." -ForegroundColor Red
     exit 1
@@ -177,7 +177,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "  OK - Companion packages installed" -ForegroundColor Green
 
 Write-Host "  Installing Whisper AI (optional, speech-to-text)..." -ForegroundColor White
-pip install openai-whisper --quiet 2>$null
+& python -m pip install openai-whisper --quiet 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
 } else {
