@@ -56,6 +56,18 @@ class StorageService:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, partial(fn, *args, **kwargs))
 
+    async def _scan_all(self, table_name: str, **scan_kwargs) -> list[dict]:
+        """Paginated DynamoDB scan that reads all items across partitions."""
+        table = self._table(table_name)
+        items: list[dict] = []
+        while True:
+            resp = await self._run(table.scan, **scan_kwargs)
+            items.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+        return items
+
     async def create_job(
         self, job_id: str, script_hash: str,
         editor_id: str = "default_editor", script_language: str = "ta",
@@ -267,15 +279,13 @@ class StorageService:
             logger.exception("Failed to get job %s", job_id)
             return None
 
-    async def list_jobs(self, limit: int = 30) -> List[JobSummary]:
+    async def list_jobs(self, limit: int = 50) -> List[JobSummary]:
         try:
-            resp = await self._run(
-                self._table("jobs").scan,
-                Limit=min(limit, 100),
+            items = await self._scan_all(
+                "jobs",
                 ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category",
                 ExpressionAttributeNames={"#st": "status"},
             )
-            items = resp.get("Items", [])
             items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return [
                 JobSummary(
@@ -450,7 +460,7 @@ class StorageService:
         min_rating: Optional[int] = None,
     ) -> List[RankedResult]:
         try:
-            scan_kwargs: Dict[str, Any] = {"Limit": 100}
+            scan_kwargs: Dict[str, Any] = {}
             filter_parts = []
             values: Dict[str, Any] = {}
 
@@ -465,8 +475,7 @@ class StorageService:
                 scan_kwargs["FilterExpression"] = " AND ".join(filter_parts)
                 scan_kwargs["ExpressionAttributeValues"] = values
 
-            resp = await self._run(self._table("results").scan, **scan_kwargs)
-            items = resp.get("Items", [])
+            items = await self._scan_all("results", **scan_kwargs)
 
             return [
                 RankedResult(
@@ -537,23 +546,19 @@ class StorageService:
 
     async def list_projects(self, limit: int = 50) -> List[ProjectSummary]:
         try:
-            resp = await self._run(
-                self._table("projects").scan,
-                Limit=min(limit, 200),
-            )
-            items = resp.get("Items", [])
+            items = await self._scan_all("projects")
             items.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
 
             project_ids = [i.get("project_id", "") for i in items[:limit] if i.get("project_id")]
             live_counts: Dict[str, tuple] = {}
             if project_ids:
                 try:
-                    jobs_resp = await self._run(
-                        self._table("jobs").scan,
+                    job_items = await self._scan_all(
+                        "jobs",
                         FilterExpression=boto3.dynamodb.conditions.Attr("project_id").is_in(project_ids),
                         ProjectionExpression="project_id, result_count",
                     )
-                    for j in jobs_resp.get("Items", []):
+                    for j in job_items:
                         pid = j.get("project_id", "")
                         if pid:
                             prev = live_counts.get(pid, (0, 0))
@@ -580,13 +585,12 @@ class StorageService:
     async def update_project_stats(self, project_id: str) -> None:
         """Recalculate job_count and total_clips for a project by scanning jobs."""
         try:
-            resp = await self._run(
-                self._table("jobs").scan,
+            items = await self._scan_all(
+                "jobs",
                 FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
                 ProjectionExpression="job_id, result_count, #st",
                 ExpressionAttributeNames={"#st": "status"},
             )
-            items = resp.get("Items", [])
             job_count = len(items)
             total_clips = sum(int(i.get("result_count", 0)) for i in items)
 
