@@ -173,7 +173,7 @@ export default function JobPage() {
 
   const handleSelectJob = (selectedJobId: string) => {
     if (selectedJobId === jobId) return
-    router.push(`/jobs/${selectedJobId}`)
+    router.push(`/jobs/${selectedJobId}`, { scroll: false })
   }
 
   return (

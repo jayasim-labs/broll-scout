@@ -162,7 +162,7 @@ export default function HomePage() {
   }
 
   const handleSelectJob = (jobId: string) => {
-    router.push(`/jobs/${jobId}`)
+    router.push(`/jobs/${jobId}`, { scroll: false })
   }
 
   const handleSelectProject = (projectId: string) => {

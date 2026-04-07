@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import {
   Clock, CheckCircle, XCircle, Loader2, FileText, Ban,
   FolderOpen, Folder, ChevronRight, ChevronDown, Film,
@@ -57,6 +57,26 @@ export function JobHistory({
     }
     return { projectJobMap: map, orphanJobs: orphans }
   }, [jobs])
+
+  // Auto-expand the project that contains the active job or active project
+  useEffect(() => {
+    const idsToExpand: string[] = []
+    if (activeProjectId) idsToExpand.push(activeProjectId)
+    if (activeJobId) {
+      const ownerProject = jobs.find(j => j.job_id === activeJobId)?.project_id
+      if (ownerProject) idsToExpand.push(ownerProject)
+    }
+    if (idsToExpand.length > 0) {
+      setExpandedProjects(prev => {
+        const next = new Set(prev)
+        let changed = false
+        for (const id of idsToExpand) {
+          if (!next.has(id)) { next.add(id); changed = true }
+        }
+        return changed ? next : prev
+      })
+    }
+  }, [activeJobId, activeProjectId, jobs])
 
   const toggleExpand = (projectId: string) => {
     setExpandedProjects(prev => {
