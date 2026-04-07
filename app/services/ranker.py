@@ -4,14 +4,35 @@ from typing import Optional
 
 from app.config import DEFAULTS
 from app.models.schemas import (
-    BRollShot, ScriptContext, Segment, CandidateVideo, MatchResult, RankedResult, TranscriptSource,
+    AuditStatus, BRollShot, Scarcity, ScriptContext, Segment, ShotIntent,
+    CandidateVideo, MatchResult, RankedResult, TranscriptSource,
 )
 
 logger = logging.getLogger(__name__)
 
+SCARCITY_THRESHOLDS = {
+    Scarcity.COMMON: 0.60,
+    Scarcity.MEDIUM: 0.45,
+    Scarcity.RARE: 0.30,
+}
+
+INTENT_WEIGHTS = {
+    ShotIntent.LITERAL: (0.3, 0.7),
+    ShotIntent.ILLUSTRATIVE: (0.7, 0.3),
+    ShotIntent.ATMOSPHERIC: (0.9, 0.1),
+}
+
 
 class RankerService:
-    """Computes relevance scores, filters, and returns top ranked results."""
+    """Computes relevance scores, filters, and returns top ranked results.
+
+    V2 changes:
+    - Uses visual_fit + topical_fit from matcher with intent-weighted combination
+    - Dynamic thresholds based on shot scarcity
+    - Source diversity bonus/penalty per channel
+    - Per-shot independent ranking
+    - Early stopping for common shots with 3+ above 0.75
+    """
 
     def rank_and_filter(
         self,
@@ -20,35 +41,50 @@ class RankerService:
         settings: dict | None = None,
         script_context: ScriptContext | None = None,
         shot: BRollShot | None = None,
+        used_timestamps: dict[str, set[int]] | None = None,
     ) -> list[RankedResult]:
         cfg = settings or DEFAULTS
 
         w_ai = float(cfg.get("weight_ai_confidence", 0.35))
-        w_kw = float(cfg.get("weight_keyword_density", 0.10))
-        w_vs = float(cfg.get("weight_viral_score", 0.15))
+        w_fit = float(cfg.get("weight_fit_score", 0.20))
+        w_vs = float(cfg.get("weight_viral_score", 0.10))
         w_ca = float(cfg.get("weight_channel_authority", 0.10))
         w_cq = float(cfg.get("weight_caption_quality", 0.05))
         w_re = float(cfg.get("weight_recency", 0.10))
-        w_cx = float(cfg.get("weight_context_relevance", 0.15))
-        total_w = w_ai + w_kw + w_vs + w_ca + w_cq + w_re + w_cx
+        w_cx = float(cfg.get("weight_context_relevance", 0.10))
+        total_w = w_ai + w_fit + w_vs + w_ca + w_cq + w_re + w_cx
         if total_w > 0 and abs(total_w - 1.0) > 0.01:
-            w_ai /= total_w
-            w_kw /= total_w
-            w_vs /= total_w
-            w_ca /= total_w
-            w_cq /= total_w
-            w_re /= total_w
-            w_cx /= total_w
+            factor = 1.0 / total_w
+            w_ai *= factor
+            w_fit *= factor
+            w_vs *= factor
+            w_ca *= factor
+            w_cq *= factor
+            w_re *= factor
+            w_cx *= factor
 
-        threshold = float(cfg.get("confidence_threshold", 0.4))
+        scarcity = (shot.scarcity if shot and hasattr(shot, 'scarcity') else Scarcity.COMMON)
+        try:
+            scarcity = Scarcity(scarcity)
+        except ValueError:
+            scarcity = Scarcity.COMMON
+        threshold = SCARCITY_THRESHOLDS.get(scarcity, 0.45)
+
+        shot_intent = (shot.shot_intent if shot and hasattr(shot, 'shot_intent') else ShotIntent.LITERAL)
+        try:
+            shot_intent = ShotIntent(shot_intent)
+        except ValueError:
+            shot_intent = ShotIntent.LITERAL
+
         top_n = int(cfg.get("top_results_per_shot", 2)) if shot else int(cfg.get("top_results_per_segment", 2))
-
         min_subs = int(cfg.get("prefer_min_subscribers", 0))
         negative_kw = segment.negative_keywords or []
         ranking_key_terms = (shot.key_terms if shot and shot.key_terms else segment.key_terms)
 
+        channel_counts: dict[str, int] = {}
         scored: list[tuple[CandidateVideo, MatchResult, float]] = []
         best_fallback: tuple[CandidateVideo, MatchResult, float] | None = None
+
         for cand, match in candidates:
             if cand.is_blocked:
                 continue
@@ -61,6 +97,13 @@ class RankerService:
                 logger.info("Rejected %s: negative keyword hit", cand.video_id)
                 continue
 
+            # Session-level timestamp dedup
+            if used_timestamps and match.start_time_seconds is not None:
+                bucket = match.start_time_seconds // 30
+                if bucket in used_timestamps.get(cand.video_id, set()):
+                    logger.info("Skipped %s@%ds: timestamp already used", cand.video_id, match.start_time_seconds)
+                    continue
+
             if not match.context_match:
                 fallback_score = match.confidence_score * 0.5
                 if best_fallback is None or fallback_score > best_fallback[2]:
@@ -71,7 +114,7 @@ class RankerService:
                 relevance = 0.3
             else:
                 ai_score = match.confidence_score
-                kw_score = self._keyword_density(ranking_key_terms, match.transcript_excerpt)
+                fit_score = self._intent_weighted_fit(match, shot_intent)
                 vs_score = self._viral_score(cand.view_count)
                 ca_score = self._channel_authority(cand, min_subs)
                 cq_score = self._caption_quality(match.source_flag)
@@ -79,7 +122,7 @@ class RankerService:
                 cx_score = self._context_relevance(cand, script_context)
                 relevance = (
                     w_ai * ai_score
-                    + w_kw * kw_score
+                    + w_fit * fit_score
                     + w_vs * vs_score
                     + w_ca * ca_score
                     + w_cq * cq_score
@@ -87,9 +130,24 @@ class RankerService:
                     + w_cx * cx_score
                 )
 
+            # Source diversity: +0.05 first from channel, neutral second, -0.03 per extra
+            ch_id = cand.channel_id
+            ch_count = channel_counts.get(ch_id, 0)
+            if ch_count == 0:
+                relevance += 0.05
+            elif ch_count >= 2:
+                relevance -= 0.03 * (ch_count - 1)
+            channel_counts[ch_id] = ch_count + 1
+
             scored.append((cand, match, round(min(1.0, max(0.0, relevance)), 4)))
 
         scored.sort(key=lambda x: x[2], reverse=True)
+
+        # Early stopping: for common shots, if 3+ candidates above 0.75, take top_n immediately
+        if scarcity == Scarcity.COMMON:
+            above_75 = [s for s in scored if s[2] >= 0.75]
+            if len(above_75) >= 3:
+                scored = above_75
 
         if threshold > 0:
             above = [s for s in scored if s[2] >= threshold]
@@ -119,6 +177,8 @@ class RankerService:
                 segment_id=segment.segment_id,
                 shot_id=shot.shot_id if shot else None,
                 shot_visual_need=shot.visual_need if shot else None,
+                shot_intent=shot.shot_intent if shot else ShotIntent.LITERAL,
+                scarcity=shot.scarcity if shot else Scarcity.COMMON,
                 video_id=cand.video_id,
                 video_url=cand.video_url,
                 video_title=cand.video_title,
@@ -134,8 +194,11 @@ class RankerService:
                 transcript_excerpt=match.transcript_excerpt,
                 the_hook=match.the_hook,
                 relevance_note=match.relevance_note,
+                match_reasoning=match.match_reasoning,
                 relevance_score=rel_score,
                 confidence_score=match.confidence_score,
+                visual_fit=match.visual_fit,
+                topical_fit=match.topical_fit,
                 source_flag=match.source_flag,
                 context_match=match.context_match,
                 context_mismatch_reason=match.context_mismatch_reason,
@@ -146,8 +209,7 @@ class RankerService:
     def deduplicate_across_segments(
         self, all_results: dict[str, list[RankedResult]]
     ) -> dict[str, list[RankedResult]]:
-        """Light dedup: allow same video in different scenes if timestamps differ.
-        Only remove exact duplicates (same video + overlapping timestamp)."""
+        """Light dedup: allow same video in different scenes if timestamps differ by 30s+."""
         seen: set[tuple[str, int]] = set()
         deduped: dict[str, list[RankedResult]] = {}
 
@@ -163,12 +225,12 @@ class RankerService:
         return deduped
 
     @staticmethod
-    def _keyword_density(key_terms: list[str], excerpt: str | None) -> float:
-        if not excerpt or not key_terms:
-            return 0.0
-        excerpt_lower = excerpt.lower()
-        matches = sum(1 for t in key_terms if t.lower() in excerpt_lower)
-        return min(1.0, matches / len(key_terms))
+    def _intent_weighted_fit(match: MatchResult, shot_intent: ShotIntent) -> float:
+        """Use visual_fit + topical_fit with intent-appropriate weights, fall back to confidence."""
+        if match.visual_fit > 0 or match.topical_fit > 0:
+            w_vis, w_top = INTENT_WEIGHTS.get(shot_intent, (0.5, 0.5))
+            return w_vis * match.visual_fit + w_top * match.topical_fit
+        return match.confidence_score
 
     @staticmethod
     def _viral_score(view_count: int) -> float:

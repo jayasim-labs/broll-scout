@@ -58,12 +58,13 @@ DEFAULTS = {
     "recency_full_score_years": 2,
     "recency_mid_score_years": 4,
 
-    "weight_ai_confidence": 0.40,
-    "weight_keyword_density": 0.15,
-    "weight_viral_score": 0.15,
+    "weight_ai_confidence": 0.35,
+    "weight_fit_score": 0.20,
+    "weight_viral_score": 0.10,
     "weight_channel_authority": 0.10,
     "weight_caption_quality": 0.05,
-    "weight_recency": 0.15,
+    "weight_recency": 0.10,
+    "weight_context_relevance": 0.10,
 
     # Performance
     "max_concurrent_candidates": 3,

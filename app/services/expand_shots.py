@@ -306,7 +306,10 @@ async def _generate_shots(
         f"genuinely different from the existing shots. Each must be a specific, "
         f"searchable visual — not a vague concept.\n\n"
         f"Return JSON only:\n"
-        f'{{"shots": [{{"visual_need": "...", "search_queries": ["...", "..."], "key_terms": ["...", "..."]}}]}}'
+        f'{{"shots": [{{"visual_need": "...", "visual_description": "describe what the footage LOOKS like - camera angle, motion, lighting", '
+        f'"shot_intent": "literal|illustrative|atmospheric", "scarcity": "common|medium|rare", '
+        f'"preferred_source_type": "documentary|news_clip|stock_footage|drone_aerial|interview|timelapse|archival|animation|", '
+        f'"search_queries": ["...", "...", "...", "...", "..."], "key_terms": ["...", "..."]}}]}}'
     )
 
     existing_count = len(segment.broll_shots or [])
@@ -323,8 +326,12 @@ async def _generate_shots(
             shots.append(BRollShot(
                 shot_id=f"{segment.segment_id}_shot_{shot_num}",
                 visual_need=s.get("visual_need", ""),
+                visual_description=s.get("visual_description", ""),
                 search_queries=s.get("search_queries", []),
                 key_terms=s.get("key_terms", []),
+                shot_intent=s.get("shot_intent", "literal"),
+                scarcity=s.get("scarcity", "common"),
+                preferred_source_type=s.get("preferred_source_type", ""),
             ))
         return shots
 

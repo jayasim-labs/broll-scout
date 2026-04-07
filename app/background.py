@@ -488,8 +488,11 @@ async def run_pipeline(
                 video_meta = {
                     "video_duration_seconds": cand.video_duration_seconds,
                     "video_title": cand.video_title,
+                    "channel_name": cand.channel_name,
                     "view_count": cand.view_count,
                     "transcript_source": transcript_sources.get(vid, "unknown"),
+                    "is_preferred_tier1": cand.is_preferred_tier1,
+                    "is_preferred_tier2": cand.is_preferred_tier2,
                 }
                 match_result = await matcher.find_timestamp(
                     transcript_text, seg, video_meta, job_id,
@@ -545,6 +548,8 @@ async def run_pipeline(
         _log_activity(job_id, "check", f"Matching done in {match_elapsed}s — {matches_with_result} clips from {total_match_pairs} pairs", depth=1, group="match")
 
         # Rank per shot, pick best clip, assemble segment results
+        # Session-level dedup: track used (video_id, timestamp_bucket) across all shots
+        used_timestamps: Dict[str, set] = {}
         all_segment_results: Dict[str, List[RankedResult]] = {}
 
         for seg in active_segments:
@@ -554,10 +559,21 @@ async def run_pipeline(
 
             for shot in shots_for_seg:
                 matched = shot_match_results.get(shot.shot_id, [])
-                ranked = ranker.rank_and_filter(matched, seg, settings=pipeline_cfg, script_context=script_context, shot=shot)
+                ranked = ranker.rank_and_filter(
+                    matched, seg, settings=pipeline_cfg,
+                    script_context=script_context, shot=shot,
+                    used_timestamps=used_timestamps,
+                )
                 short_need = shot.visual_need[:55]
                 if ranked:
-                    _log_activity(job_id, "check", f"✓ \"{short_need}\" → \"{ranked[0].video_title[:50]}\" ({ranked[0].confidence_score:.0%})", depth=2, group=seg_group)
+                    best = ranked[0]
+                    # Record used timestamp for dedup
+                    if best.start_time_seconds is not None:
+                        bucket = best.start_time_seconds // 30
+                        used_timestamps.setdefault(best.video_id, set()).add(bucket)
+                    vf_label = f" vf={best.visual_fit:.0%}" if best.visual_fit > 0 else ""
+                    tf_label = f" tf={best.topical_fit:.0%}" if best.topical_fit > 0 else ""
+                    _log_activity(job_id, "check", f"✓ \"{short_need}\" → \"{best.video_title[:50]}\" ({best.relevance_score:.0%}{vf_label}{tf_label})", depth=2, group=seg_group)
                     seg_ranked.extend(ranked[:1])
                 else:
                     _log_activity(job_id, "alert", f"✗ No clip for \"{short_need}\"", depth=2, group=seg_group)
@@ -575,8 +591,15 @@ async def run_pipeline(
         for results in all_segment_results.values():
             all_results.extend(results)
 
-        # --- Re-search pass: retry low-confidence shots with alternative queries ---
+        # --- Re-search pass: failure-mode-aware, 2-attempt cap ---
+        from app.models.schemas import AuditStatus, Scarcity, ShotIntent
         RESEARCH_THRESHOLD = 0.5
+        MAX_RESEARCH_ATTEMPTS = 2
+        STOCK_SUGGESTIONS = {
+            "pexels": "https://www.pexels.com/search/videos/",
+            "pixabay": "https://pixabay.com/videos/search/",
+            "artgrid": "https://artgrid.io/search/",
+        }
         low_conf_shots: list[tuple[Segment, BRollShot, Optional[RankedResult]]] = []
         for seg in active_segments:
             seg_results = all_segment_results.get(seg.segment_id, [])
@@ -587,67 +610,113 @@ async def run_pipeline(
                     low_conf_shots.append((seg, shot, matching_result))
 
         if low_conf_shots:
-            _set_progress(job_id, "matching", 90, f"Re-searching {len(low_conf_shots)} low-confidence shots with alternative queries...")
-            _log_activity(job_id, "search", f"Found {len(low_conf_shots)} shots below {RESEARCH_THRESHOLD:.0%} relevance — generating alternative search queries", group="research")
+            _set_progress(job_id, "matching", 90, f"Re-searching {len(low_conf_shots)} low-confidence shots...")
+            _log_activity(job_id, "search", f"Found {len(low_conf_shots)} shots below {RESEARCH_THRESHOLD:.0%} — running failure-mode-aware re-search (up to {MAX_RESEARCH_ATTEMPTS} attempts each)", group="research")
 
             from app.services.expand_shots import _generate_alternative_queries
             research_improved = 0
+
+            # Detect consecutive similar low-scoring shots for consolidation suggestion
+            prev_shot_desc = ""
+            consecutive_similar = []
+            for i, (seg, shot, existing) in enumerate(low_conf_shots):
+                if prev_shot_desc and _text_similarity(prev_shot_desc, shot.visual_need) > 0.6:
+                    consecutive_similar.append((i - 1, i))
+                prev_shot_desc = shot.visual_need
+
+            if consecutive_similar:
+                for a, b in consecutive_similar[:3]:
+                    _log_activity(job_id, "alert",
+                                  f"Consolidation candidate: shots \"{low_conf_shots[a][1].visual_need[:40]}\" and \"{low_conf_shots[b][1].visual_need[:40]}\" are similar and both scored low",
+                                  depth=1, group="research")
+
             for seg, shot, existing_result in low_conf_shots:
                 old_score = existing_result.relevance_score if existing_result else 0
                 short_need = shot.visual_need[:50]
-                try:
-                    alt_queries = await _generate_alternative_queries(shot, script_context)
-                    if not alt_queries:
-                        continue
+                best_attempt_score = old_score
+                best_attempt_result = existing_result
 
-                    _log_activity(job_id, "search", f"Re-searching \"{short_need}\" with {len(alt_queries)} alternative queries", depth=1, group="research")
-
-                    alt_shot = BRollShot(
-                        shot_id=shot.shot_id,
-                        visual_need=shot.visual_need,
-                        search_queries=alt_queries,
-                        key_terms=shot.key_terms,
-                    )
-                    new_cands = await searcher.search_for_shot(alt_shot, seg, job_id=job_id, script_context=script_context)
-                    if not new_cands:
-                        continue
-
-                    existing_video_ids = {r.video_id for r in all_results}
-                    new_cands = [c for c in new_cands if c.video_id not in existing_video_ids]
-                    if not new_cands:
-                        _log_activity(job_id, "alert", f"Re-search for \"{short_need}\" found only duplicate videos", depth=2, group="research")
-                        continue
-
-                    _log_activity(job_id, "search", f"Found {len(new_cands)} new candidates for \"{short_need}\"", depth=2, group="research")
-
-                    matched_new = await _match_candidates(
-                        new_cands[:5], seg, matcher, transcriber, job_id,
-                        max_concurrent_candidates,
-                        script_context=script_context,
-                        shot=alt_shot,
-                    )
-                    if not matched_new:
-                        continue
-
-                    ranked_new = ranker.rank_and_filter(matched_new, seg, settings=pipeline_cfg, script_context=script_context, shot=alt_shot)
-                    if ranked_new and ranked_new[0].relevance_score > old_score:
-                        best_new = ranked_new[0]
-                        _log_activity(job_id, "check",
-                                      f"Upgrade: \"{short_need}\" — {old_score:.0%} → {best_new.relevance_score:.0%} (\"{best_new.video_title[:40]}\")",
-                                      depth=1, group="research")
-                        seg_results = all_segment_results.get(seg.segment_id, [])
-                        if existing_result:
-                            all_segment_results[seg.segment_id] = [
-                                best_new if r.result_id == existing_result.result_id else r
-                                for r in seg_results
-                            ]
+                for attempt in range(MAX_RESEARCH_ATTEMPTS):
+                    try:
+                        # Failure-mode-aware query generation
+                        query_modifiers = []
+                        if existing_result is None:
+                            query_modifiers = ["footage", "b-roll", "cinematic"]
+                            _log_activity(job_id, "search", f"Attempt {attempt + 1}: \"{short_need}\" — no results, broadening + trying different languages", depth=1, group="research")
+                        elif existing_result.visual_fit < 0.4:
+                            query_modifiers = ["footage", "b-roll", "cinematic", "drone"]
+                            _log_activity(job_id, "search", f"Attempt {attempt + 1}: \"{short_need}\" — low visual_fit ({existing_result.visual_fit:.0%}), adding visual modifiers", depth=1, group="research")
+                        elif existing_result.topical_fit < 0.4 and getattr(shot, 'shot_intent', ShotIntent.LITERAL) in (ShotIntent.ILLUSTRATIVE, ShotIntent.ATMOSPHERIC):
+                            _log_activity(job_id, "search", f"Attempt {attempt + 1}: \"{short_need}\" — low topical_fit but {shot.shot_intent.value} shot, recalculating with intent weights before re-searching", depth=1, group="research")
                         else:
-                            all_segment_results.setdefault(seg.segment_id, []).append(best_new)
-                        research_improved += 1
+                            _log_activity(job_id, "search", f"Attempt {attempt + 1}: \"{short_need}\" — generating alternative queries", depth=1, group="research")
+
+                        alt_queries = await _generate_alternative_queries(shot, script_context)
+                        if not alt_queries:
+                            break
+
+                        if query_modifiers and alt_queries:
+                            alt_queries.append(f"{alt_queries[0]} {query_modifiers[attempt % len(query_modifiers)]}")
+
+                        alt_shot = BRollShot(
+                            shot_id=shot.shot_id,
+                            visual_need=shot.visual_need,
+                            visual_description=getattr(shot, 'visual_description', ''),
+                            search_queries=alt_queries,
+                            key_terms=shot.key_terms,
+                            shot_intent=getattr(shot, 'shot_intent', ShotIntent.LITERAL),
+                            scarcity=getattr(shot, 'scarcity', Scarcity.COMMON),
+                            preferred_source_type=getattr(shot, 'preferred_source_type', ''),
+                        )
+                        new_cands = await searcher.search_for_shot(alt_shot, seg, job_id=job_id, script_context=script_context)
+                        if not new_cands:
+                            continue
+
+                        existing_video_ids = {r.video_id for r in all_results}
+                        new_cands = [c for c in new_cands if c.video_id not in existing_video_ids]
+                        if not new_cands:
+                            _log_activity(job_id, "alert", f"Re-search attempt {attempt + 1} for \"{short_need}\" found only duplicates", depth=2, group="research")
+                            continue
+
+                        matched_new = await _match_candidates(
+                            new_cands[:5], seg, matcher, transcriber, job_id,
+                            max_concurrent_candidates,
+                            script_context=script_context,
+                            shot=alt_shot,
+                        )
+                        if not matched_new:
+                            continue
+
+                        ranked_new = ranker.rank_and_filter(matched_new, seg, settings=pipeline_cfg, script_context=script_context, shot=alt_shot)
+                        if ranked_new and ranked_new[0].relevance_score > best_attempt_score:
+                            best_attempt_result = ranked_new[0]
+                            best_attempt_score = best_attempt_result.relevance_score
+                            _log_activity(job_id, "check",
+                                          f"Attempt {attempt + 1} upgrade: \"{short_need}\" → {best_attempt_score:.0%} (\"{best_attempt_result.video_title[:40]}\")",
+                                          depth=1, group="research")
+                            if best_attempt_score >= 0.6:
+                                break
+
+                    except Exception:
+                        logger.exception("Re-search attempt %d failed for shot %s", attempt + 1, shot.shot_id)
+
+                if best_attempt_result and best_attempt_score > old_score:
+                    seg_results = all_segment_results.get(seg.segment_id, [])
+                    if existing_result:
+                        all_segment_results[seg.segment_id] = [
+                            best_attempt_result if r.result_id == existing_result.result_id else r
+                            for r in seg_results
+                        ]
                     else:
-                        _log_activity(job_id, "alert", f"Re-search for \"{short_need}\" didn't improve ({old_score:.0%})", depth=2, group="research")
-                except Exception:
-                    logger.exception("Re-search failed for shot %s", shot.shot_id)
+                        all_segment_results.setdefault(seg.segment_id, []).append(best_attempt_result)
+                    research_improved += 1
+                elif best_attempt_result is None or best_attempt_score < RESEARCH_THRESHOLD:
+                    # After exhaustion: surface best available with low-confidence badge + stock suggestions
+                    stock_terms = " ".join(shot.key_terms[:3]) if shot.key_terms else short_need
+                    stock_urls = [f"{url}{stock_terms.replace(' ', '+')}" for _name, url in STOCK_SUGGESTIONS.items()]
+                    _log_activity(job_id, "alert",
+                                  f"Exhausted re-search for \"{short_need}\" — suggest stock: {', '.join(stock_urls[:2])}",
+                                  depth=1, group="research")
 
             if research_improved:
                 _log_activity(job_id, "check", f"Re-search improved {research_improved} of {len(low_conf_shots)} low-confidence shots", group="research")
@@ -657,17 +726,22 @@ async def run_pipeline(
             else:
                 _log_activity(job_id, "alert", f"Re-search could not improve any of the {len(low_conf_shots)} low-confidence shots", group="research")
 
-        # --- Context audit: single LLM call to flag outlier clips ---
+        # --- Context audit: three-tier pass/review/reject ---
         if script_context.script_topic and all_results:
             try:
-                _log_activity(job_id, "shield", "Running context audit — checking all clips fit the documentary's theme", group="rank")
-                all_results, flagged_count = await _audit_context(
+                _log_activity(job_id, "shield", "Running context audit — checking if clips would confuse viewers watching a documentary about \"{topic}\"".format(topic=script_context.script_topic[:60]), group="rank")
+                all_results, review_count, reject_count = await _audit_context(
                     all_results, script_context, matcher, job_id,
                 )
-                if flagged_count:
-                    _log_activity(job_id, "alert", f"Context audit removed {flagged_count} clips that didn't match \"{script_context.script_topic}\"", depth=1, group="rank")
+                if reject_count or review_count:
+                    parts = []
+                    if reject_count:
+                        parts.append(f"{reject_count} rejected (0.40x penalty, moved to bottom)")
+                    if review_count:
+                        parts.append(f"{review_count} flagged for review (0.85x penalty, yellow badge)")
+                    _log_activity(job_id, "alert", f"Context audit: {', '.join(parts)}", depth=1, group="rank")
                 else:
-                    _log_activity(job_id, "check", "Context audit passed — all clips are contextually appropriate", depth=1, group="rank")
+                    _log_activity(job_id, "check", "Context audit passed — all clips appropriate for the documentary", depth=1, group="rank")
             except Exception:
                 logger.warning("Context audit failed, keeping all results")
 
@@ -892,6 +966,15 @@ def _build_coverage_assessment(
     }
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Simple Jaccard word overlap for consolidation detection."""
+    wa = set(a.lower().split())
+    wb = set(b.lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
 _TRANSCRIPT_SOURCE_LABELS = {
     "cached_transcript": "DynamoDB cache",
     "youtube_captions": "YouTube manual captions",
@@ -951,8 +1034,11 @@ async def _match_candidates(
                 video_meta = {
                     "video_duration_seconds": cand.video_duration_seconds,
                     "video_title": cand.video_title,
+                    "channel_name": cand.channel_name,
                     "view_count": cand.view_count,
                     "transcript_source": transcript.transcript_source.value,
+                    "is_preferred_tier1": cand.is_preferred_tier1,
+                    "is_preferred_tier2": cand.is_preferred_tier2,
                 }
 
                 match = await matcher.find_timestamp(
@@ -994,57 +1080,126 @@ async def _audit_context(
     script_context: ScriptContext,
     matcher: MatcherService,
     job_id: str | None,
-) -> Tuple[List[RankedResult], int]:
-    """Single LLM call to review all clip titles for context outliers."""
+) -> Tuple[List[RankedResult], int, int]:
+    """Three-tier context audit: pass / review (0.85x) / reject (0.40x).
+
+    Returns (updated_results, review_count, reject_count).
+    Rejected clips are NEVER deleted — they get audit_status="reject" and a
+    severe score penalty that sinks them below any passing clip.
+    """
+    from app.models.schemas import AuditStatus
+
     if len(all_results) < 3:
-        return all_results, 0
+        for r in all_results:
+            r.audit_status = AuditStatus.PASS
+        return all_results, 0, 0
 
     clip_summaries = []
     for idx, r in enumerate(all_results):
+        vf = f"visual_fit={r.visual_fit:.2f}" if r.visual_fit > 0 else ""
         clip_summaries.append(
-            f"{idx}. \"{r.video_title}\" by {r.channel_name} (for segment {r.segment_id})"
+            f"{idx}. \"{r.video_title}\" by {r.channel_name} "
+            f"(segment {r.segment_id}, shot_intent={r.shot_intent.value}, "
+            f"score={r.relevance_score:.2f} {vf})"
         )
 
     prompt = (
-        "You are a documentary editor reviewing B-roll selections.\n\n"
+        "You are a documentary editor doing a final quality check on B-roll clips.\n\n"
         f"This documentary is about: {script_context.script_topic}\n"
         f"Geographic scope: {script_context.geographic_scope}\n"
         f"Domain: {script_context.script_domain}\n"
+        f"Time period: {script_context.temporal_scope}\n"
         f"NOT about: {script_context.exclusion_context}\n\n"
+        "For each clip, ask: 'Would this 5-10 second clip CONFUSE a viewer watching a documentary about "
+        f"{script_context.script_topic}?'\n\n"
         "Selected B-roll clips:\n"
         + "\n".join(clip_summaries) +
-        "\n\nReview each clip and flag any that are CONTEXTUALLY WRONG — "
-        "they share keywords but are about something unrelated.\n\n"
+        "\n\nCheck each clip for SPECIFIC CONCRETE problems:\n"
+        "- Visible on-screen text about an unrelated topic\n"
+        "- Watermarks or branding from other productions\n"
+        "- Misleading visuals (clip about a different event/location with similar name)\n"
+        "- Quality mismatch (low-res, phone footage in a polished documentary)\n\n"
+        "IMPORTANT: Clips with shot_intent='atmospheric' or 'illustrative' get a LONGER LEASH — "
+        "they don't need to be topically precise, just visually appropriate and not confusing.\n"
+        "Clips with high visual_fit scores should also be given more latitude.\n\n"
+        "Assign each clip a verdict:\n"
+        "- 'pass': no issues, appropriate for the documentary\n"
+        "- 'review': minor concerns the editor should be aware of (show a yellow warning badge)\n"
+        "- 'reject': concrete problem that would confuse viewers (clip gets a severe score penalty but is NOT deleted)\n\n"
         "Return JSON only:\n"
-        '{"flagged": [{"index": 5, "reason": "explanation"}, ...]}\n'
-        'If all are appropriate: {"flagged": []}'
+        '{"audited": [{"index": 0, "verdict": "pass|review|reject", "reason": "why", "concern_type": "none|text_mismatch|watermark|misleading|quality|geographic_mismatch|temporal_mismatch"}, ...]}\n'
+        "Include ALL clips in the response, not just flagged ones."
     )
 
     backend = matcher._get("matcher_backend", "auto")
     parsed = await matcher._route_call(prompt, backend, job_id)
     if not parsed:
-        return all_results, 0
+        for r in all_results:
+            r.audit_status = AuditStatus.PASS
+        return all_results, 0, 0
 
-    flagged_indices = set()
-    for f in parsed.get("flagged", []):
+    audit_map: dict[int, dict] = {}
+    for entry in parsed.get("audited", parsed.get("flagged", [])):
         try:
-            flagged_indices.add(int(f["index"]))
+            idx = int(entry["index"])
+            audit_map[idx] = entry
         except (KeyError, ValueError, TypeError):
             continue
 
-    if not flagged_indices:
-        return all_results, 0
+    review_count = 0
+    reject_count = 0
+    audit_records = []
 
-    for idx in flagged_indices:
-        if idx < len(all_results):
-            reason = next(
-                (f.get("reason", "") for f in parsed["flagged"] if f.get("index") == idx),
-                "",
-            )
-            logger.info(
-                "Context audit flagged [%d] %s — %s",
-                idx, all_results[idx].video_title[:60], reason,
-            )
+    for idx, r in enumerate(all_results):
+        entry = audit_map.get(idx, {})
+        verdict = entry.get("verdict", "pass").lower().strip()
+        reason = entry.get("reason", "")
+        concern_type = entry.get("concern_type", "none")
 
-    filtered = [r for i, r in enumerate(all_results) if i not in flagged_indices]
-    return filtered, len(flagged_indices)
+        if verdict == "reject":
+            r.audit_status = AuditStatus.REJECT
+            r.audit_reason = reason
+            r.relevance_score = round(max(0.0, r.relevance_score * 0.40), 4)
+            reject_count += 1
+            logger.info("Audit REJECT [%d] %s — %s", idx, r.video_title[:60], reason)
+        elif verdict == "review":
+            r.audit_status = AuditStatus.REVIEW
+            r.audit_reason = reason
+            r.relevance_score = round(max(0.0, r.relevance_score * 0.85), 4)
+            review_count += 1
+            logger.info("Audit REVIEW [%d] %s — %s", idx, r.video_title[:60], reason)
+        else:
+            r.audit_status = AuditStatus.PASS
+            r.audit_reason = None
+
+        audit_records.append({
+            "clip_index": idx,
+            "result_id": r.result_id,
+            "video_id": r.video_id,
+            "video_title": r.video_title[:100],
+            "channel_name": r.channel_name,
+            "segment_id": r.segment_id,
+            "shot_id": r.shot_id,
+            "relevance_score": r.relevance_score,
+            "visual_fit": r.visual_fit,
+            "topical_fit": r.topical_fit,
+            "verdict": r.audit_status.value,
+            "reason": reason,
+            "concern_type": concern_type,
+        })
+
+    # Log audit decisions to DynamoDB
+    if job_id and audit_records:
+        try:
+            storage = get_storage()
+            await storage.store_audit_log(job_id, audit_records)
+        except Exception:
+            logger.warning("Failed to store audit log for job %s", job_id)
+
+    # Re-sort: rejected clips sink to bottom but remain in list
+    all_results.sort(key=lambda r: (
+        0 if r.audit_status == AuditStatus.PASS else (1 if r.audit_status == AuditStatus.REVIEW else 2),
+        -r.relevance_score,
+    ))
+
+    return all_results, review_count, reject_count

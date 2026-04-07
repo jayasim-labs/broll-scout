@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from app.config import get_settings, DEFAULTS
-from app.models.schemas import BRollShot, ScriptContext, Segment, MatchResult, TranscriptSource
+from app.models.schemas import BRollShot, ScriptContext, Segment, MatchResult, TranscriptSource, ShotIntent
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils import agent_queue
 
@@ -26,12 +26,17 @@ Emotional tone: {emotional_tone}
 
 === SPECIFIC SHOT NEEDED ===
 Visual need: {visual_need}
+Visual description (what it should LOOK like): {visual_description}
+Shot intent: {shot_intent} — {shot_intent_explanation}
 Key terms: {key_terms}
 Shot context: {shot_context}
+Preferred source type: {preferred_source_type}
 
 === TERMS THAT INDICATE A WRONG MATCH ===
 If the transcript contains these terms prominently, this video is likely NOT relevant: {negative_keywords}
 
+Video title: {video_title}
+Video channel: {video_channel}
 Video duration: {video_duration} seconds (~{video_duration_min} minutes)
 
 Captions (format is either "M:SS text" or "[M:SS → M:SS] text" where M is minutes, SS is seconds):
@@ -39,6 +44,7 @@ Captions (format is either "M:SS text" or "[M:SS → M:SS] text" where M is minu
 
 CRITICAL INSTRUCTIONS:
 1. CONTEXT CHECK FIRST: Does this video actually discuss {script_topic} or a directly related topic? If the video is about a different region, different subject, or different context that merely shares similar keywords, return confidence_score: 0.0 and context_match: false immediately.
+   IMPORTANT: Evaluate context match based on the transcript EXCERPT around your chosen timestamp, not the entire video. A 60-minute documentary may cover many topics — only the 15-90s clip you select needs to match.
 2. Check for CONTEXT MISMATCH:
    - Geographic mismatch: Video discusses a different location than {geographic_scope} → REJECT
    - Temporal mismatch: Video discusses a different time period → REJECT
@@ -50,7 +56,12 @@ CRITICAL INSTRUCTIONS:
 6. AVOID the intro (first 30s) and outro (last 30s).
 7. The clip should be 15–90 seconds of continuous relevant content.
 8. TIMESTAMP CONVERSION: 0:45 = 45s, 1:30 = 90s, 3:15 = 195s, 8:22 = 502s.
-9. In relevance_note, explicitly state how the clip connects to {script_topic} — not just keyword overlap.
+9. Also look for transcript GAPS (pauses in narration, silence, music-only sections) — these often indicate visual B-roll moments with no talking.
+
+TWO-AXIS SCORING:
+Score each match on TWO independent axes (0.0 to 1.0):
+- visual_fit: How well does the footage at this timestamp LOOK like what the shot needs? Consider camera angle, motion, setting, lighting described in the visual_description. A drone shot of an island scores high for visual_fit if the shot needs "aerial island footage" even if the island is not the exact one discussed.
+- topical_fit: How well does the content at this timestamp match the TOPIC being discussed? A video about the exact historical event scores high, even if the footage quality is mediocre.
 
 Return JSON only:
 {{
@@ -58,10 +69,14 @@ Return JSON only:
   "end_time_seconds": int,
   "excerpt": "relevant transcript text (max 200 words)",
   "confidence_score": float (0.0 to 1.0),
+  "visual_fit": float (0.0 to 1.0),
+  "topical_fit": float (0.0 to 1.0),
   "context_match": true/false,
   "context_mismatch_reason": "string or null — if false, explain why",
+  "match_reasoning": "1-2 sentences explaining why this clip works (or doesn't) for this specific shot — reference both visual and topical aspects",
   "relevance_note": "must reference the overall documentary topic",
-  "the_hook": "why this timestamp is VISUALLY compelling"
+  "the_hook": "why this timestamp is VISUALLY compelling",
+  "has_transcript_gap": true/false (true if the selected region has a narration gap/pause suggesting visual-only footage)
 }}
 
 If no relevant section exists or context doesn't match, return confidence_score: 0.0 and context_match: false."""
@@ -114,15 +129,29 @@ class MatcherService:
 
         ctx = script_context or ScriptContext()
         video_duration = video_metadata.get("video_duration_seconds", 0) or 0
+        video_title = video_metadata.get("video_title", "")
+        video_channel = video_metadata.get("channel_name", "")
+
+        shot_intent_explanations = {
+            ShotIntent.LITERAL: "footage should directly show what's being discussed",
+            ShotIntent.ILLUSTRATIVE: "footage should represent/symbolize the concept (visual metaphor is fine)",
+            ShotIntent.ATMOSPHERIC: "footage should set mood/tone — topical connection is less important than visual feel",
+        }
 
         if shot:
             visual_need = shot.visual_need
+            visual_description = shot.visual_description or ""
             key_terms = ", ".join(shot.key_terms) if shot.key_terms else ", ".join(segment.key_terms)
             shot_context = f"This is shot {shot.shot_id} — find footage matching THIS specific visual need, not the segment's general topic."
+            shot_intent = shot.shot_intent if hasattr(shot, 'shot_intent') else ShotIntent.LITERAL
+            preferred_source_type = shot.preferred_source_type if hasattr(shot, 'preferred_source_type') else ""
         else:
             visual_need = segment.visual_need
+            visual_description = ""
             key_terms = ", ".join(segment.key_terms)
             shot_context = "Match the segment's overall visual need."
+            shot_intent = ShotIntent.LITERAL
+            preferred_source_type = ""
 
         prompt = TIMESTAMP_PROMPT_TEMPLATE.format(
             script_topic=ctx.script_topic or "general documentary",
@@ -133,10 +162,16 @@ class MatcherService:
             summary=segment.summary,
             context_anchor=segment.context_anchor or segment.summary,
             visual_need=visual_need,
+            visual_description=visual_description or "not specified",
+            shot_intent=shot_intent.value if isinstance(shot_intent, ShotIntent) else str(shot_intent),
+            shot_intent_explanation=shot_intent_explanations.get(shot_intent, "find the best matching footage"),
             emotional_tone=segment.emotional_tone,
             key_terms=key_terms,
             shot_context=shot_context,
+            preferred_source_type=preferred_source_type or "any",
             negative_keywords=", ".join(segment.negative_keywords) if segment.negative_keywords else "none",
+            video_title=video_title,
+            video_channel=video_channel,
             transcript=transcript_text,
             video_duration=video_duration,
             video_duration_min=round(video_duration / 60, 1),
@@ -167,6 +202,20 @@ class MatcherService:
 
         ctx_match = parsed.get("context_match", True)
         ctx_reason = parsed.get("context_mismatch_reason")
+        raw_visual_fit = min(1.0, max(0.0, float(parsed.get("visual_fit", 0.0))))
+        raw_topical_fit = min(1.0, max(0.0, float(parsed.get("topical_fit", 0.0))))
+        match_reasoning = parsed.get("match_reasoning")
+
+        # Apply priority channel boost
+        is_tier1 = video_metadata.get("is_preferred_tier1", False)
+        is_tier2 = video_metadata.get("is_preferred_tier2", False)
+        channel_boost = 0.1 if is_tier1 else (0.05 if is_tier2 else 0.0)
+
+        # Compute intent-weighted combined score
+        combined_score = self._intent_weighted_score(
+            raw_visual_fit, raw_topical_fit, shot_intent,
+        ) + channel_boost
+        combined_score = min(1.0, combined_score)
 
         if ctx_match is False:
             logger.info(
@@ -176,6 +225,9 @@ class MatcherService:
             )
             return MatchResult(
                 confidence_score=0.0,
+                visual_fit=raw_visual_fit,
+                topical_fit=raw_topical_fit,
+                match_reasoning=match_reasoning,
                 source_flag=source_flag,
                 context_match=False,
                 context_mismatch_reason=ctx_reason,
@@ -194,6 +246,9 @@ class MatcherService:
             end_time_seconds=parsed.get("end_time_seconds"),
             transcript_excerpt=excerpt or None,
             confidence_score=min(1.0, max(0.0, float(parsed.get("confidence_score", 0.0)))),
+            visual_fit=raw_visual_fit,
+            topical_fit=raw_topical_fit,
+            match_reasoning=match_reasoning,
             relevance_note=parsed.get("relevance_note"),
             the_hook=parsed.get("the_hook"),
             source_flag=source_flag,
@@ -237,6 +292,19 @@ class MatcherService:
             match.confidence_score = max(0.0, match.confidence_score - 0.15)
 
         return match
+
+    @staticmethod
+    def _intent_weighted_score(
+        visual_fit: float, topical_fit: float, shot_intent: ShotIntent,
+    ) -> float:
+        """Combine visual_fit and topical_fit using intent-appropriate weights."""
+        weights = {
+            ShotIntent.LITERAL: (0.3, 0.7),
+            ShotIntent.ILLUSTRATIVE: (0.7, 0.3),
+            ShotIntent.ATMOSPHERIC: (0.9, 0.1),
+        }
+        w_vis, w_top = weights.get(shot_intent, (0.5, 0.5))
+        return w_vis * visual_fit + w_top * topical_fit
 
     # ------------------------------------------------------------------
     # Routing

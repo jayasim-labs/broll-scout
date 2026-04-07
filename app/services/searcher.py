@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import re
+import time
+from typing import Optional
 
 import httpx
 
@@ -13,6 +15,28 @@ from app.utils import agent_queue
 logger = logging.getLogger(__name__)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
+# In-memory search cache with 7-day TTL
+_search_cache: dict[str, tuple[float, list[dict]]] = {}
+SEARCH_CACHE_TTL = 7 * 24 * 3600
+
+INDIAN_GEO_KEYWORDS = {
+    "india", "indian", "tamil", "tamil nadu", "chennai", "mumbai", "delhi",
+    "kolkata", "bengaluru", "hyderabad", "kerala", "karnataka", "maharashtra",
+    "andhra", "telangana", "rajasthan", "gujarat", "punjab", "bengal",
+    "assam", "bihar", "uttar pradesh", "madhya pradesh", "kashmir", "goa",
+}
+
+SOURCE_TYPE_MODIFIERS = {
+    "documentary": ["documentary", "full documentary"],
+    "news_clip": ["news report", "news coverage"],
+    "stock_footage": ["stock footage", "b-roll footage", "royalty free"],
+    "drone_aerial": ["drone footage", "aerial view", "drone 4k"],
+    "interview": ["interview", "expert interview"],
+    "timelapse": ["timelapse", "time lapse 4k"],
+    "archival": ["archival footage", "historical footage", "archive"],
+    "animation": ["animation", "animated explainer", "infographic"],
+}
 
 
 def contextualize_query(query: str, script_context: ScriptContext) -> str:
@@ -29,6 +53,42 @@ def contextualize_query(query: str, script_context: ScriptContext) -> str:
     else:
         anchor = script_context.script_topic.split(" and ")[0].strip()
     return f"{anchor} {query}"
+
+
+def _is_indian_topic(script_context: Optional[ScriptContext]) -> bool:
+    """Detect if the script relates to Indian topics for multilingual search."""
+    if not script_context:
+        return False
+    text = f"{script_context.geographic_scope} {script_context.script_topic} {script_context.script_domain}".lower()
+    return any(kw in text for kw in INDIAN_GEO_KEYWORDS)
+
+
+def _generate_multilingual_queries(query: str, script_context: Optional[ScriptContext]) -> list[str]:
+    """For Indian topics, generate parallel queries in Tamil and Hindi."""
+    queries = [query]
+    if _is_indian_topic(script_context):
+        base = query.split()[:4]
+        base_str = " ".join(base)
+        queries.append(f"{base_str} தமிழ்")
+        queries.append(f"{base_str} हिंदी")
+    return queries
+
+
+def _cached_search_key(query: str, max_results: int) -> str:
+    return f"{query}::{max_results}"
+
+
+def _get_cached_search(key: str) -> Optional[list[dict]]:
+    entry = _search_cache.get(key)
+    if entry and (time.time() - entry[0]) < SEARCH_CACHE_TTL:
+        return entry[1]
+    if entry:
+        del _search_cache[key]
+    return None
+
+
+def _set_cached_search(key: str, results: list[dict]) -> None:
+    _search_cache[key] = (time.time(), results)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +360,15 @@ class SearcherService:
         job_id: str | None = None, on_progress=None,
         script_context: ScriptContext | None = None,
     ) -> list[CandidateVideo]:
-        """Search for a single B-roll shot using the shot's own queries and key_terms."""
+        """Search for a single B-roll shot using the shot's own queries and key_terms.
+
+        Enhancements:
+        - Parallel tier-1 channel + open YouTube search
+        - Multilingual queries for Indian topics
+        - preferred_source_type modifiers
+        - 7-day search cache
+        - Exclusion context as soft deprioritization
+        """
         async def _emit(icon: str, text: str, depth: int = 2):
             if on_progress:
                 try:
@@ -336,16 +404,45 @@ class SearcherService:
                 for q in segment.search_queries[:2]
             ]
 
-        # Scale results per query inversely with number of queries to keep total pool reasonable
-        # 2-3 queries × 8 results = 16-24; 5 queries × 4 results = 20 — similar total, more diversity
+        # Add preferred_source_type modifier to one query
+        pst = getattr(shot, 'preferred_source_type', '') or ''
+        if pst and pst in SOURCE_TYPE_MODIFIERS:
+            modifiers = SOURCE_TYPE_MODIFIERS[pst]
+            if queries:
+                queries.append(f"{queries[0]} {modifiers[0]}")
+
+        # Add multilingual queries for Indian topics
+        if _is_indian_topic(script_context) and queries:
+            multilingual = _generate_multilingual_queries(queries[0], script_context)
+            queries.extend(multilingual[1:])
+
         results_per_query = min(configured_per_query, max(3, 20 // max(len(queries), 1)))
 
         short_need = shot.visual_need[:50]
         await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries ({results_per_query} results each)", depth=3)
 
-        yt_results = await self._search_youtube_primary_full(
-            queries, results_per_query, job_id, "ytdlp_only", None,
-        )
+        # Parallel: tier-1 channel search + open YouTube search
+        tier1_ids, tier2_ids = self._build_preferred_channel_ids()
+        tier1_list = list(tier1_ids)
+
+        async def _tier1_search():
+            if not tier1_list:
+                return []
+            query_text = " ".join(shot.key_terms[:3]) if shot.key_terms else queries[0] if queries else ""
+            return await self._search_tier1_channels_full(
+                tier1_list[:5], query_text, results_per_query, job_id, "ytdlp_only", None,
+            )
+
+        async def _open_search():
+            return await self._search_youtube_primary_full(
+                queries, results_per_query, job_id, "ytdlp_only", None,
+            )
+
+        tier1_task = asyncio.create_task(_tier1_search())
+        open_task = asyncio.create_task(_open_search())
+        tier1_results, yt_results = await asyncio.gather(tier1_task, open_task)
+
+        all_video_ids.extend(_collect(tier1_results))
         all_video_ids.extend(_collect(yt_results))
 
         unique_ids = list(dict.fromkeys(all_video_ids))
@@ -364,6 +461,14 @@ class SearcherService:
         t1_ids, t2_ids = self._build_preferred_channel_ids()
         old_tier2_names = self._get("preferred_channels_tier2") or []
         t2_name_lower = {name.lower() for name in old_tier2_names}
+
+        # Build exclusion keywords for soft deprioritization (not hard filtering)
+        exclusion_words = set()
+        if script_context and script_context.exclusion_context:
+            for word in script_context.exclusion_context.lower().replace(",", " ").split():
+                word = word.strip(".,;:!?\"'")
+                if len(word) > 3 and word not in {"about", "this", "that", "with", "from", "they", "their", "these", "those", "have", "been", "will", "would", "could"}:
+                    exclusion_words.add(word)
 
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
@@ -404,6 +509,14 @@ class SearcherService:
                 is_preferred_tier2=ch_id in t2_ids or ch_name.lower() in t2_name_lower,
                 is_blocked=False,
             ))
+
+        # Soft deprioritization: move exclusion-matching candidates to the end, don't remove
+        if exclusion_words:
+            def _exclusion_score(c: CandidateVideo) -> int:
+                title_lower = c.video_title.lower()
+                return sum(1 for w in exclusion_words if w in title_lower)
+
+            candidates.sort(key=lambda c: (_exclusion_score(c), -c.view_count))
 
         await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"", depth=3)
         return candidates[:max_candidates]
@@ -498,6 +611,13 @@ class SearcherService:
     ) -> list[dict]:
         all_results: list[dict] = []
         for q in queries:
+            cache_key = _cached_search_key(q, max_results)
+            cached = _get_cached_search(cache_key)
+            if cached is not None:
+                all_results.extend(cached)
+                if emit:
+                    await emit("check", f"→ {len(cached)} cached results for \"{q[:50]}\"", 3)
+                continue
             try:
                 if emit:
                     await emit("terminal", f"▸ yt-dlp \"ytsearch{max_results}:{q}\" --dump-json --flat-playlist", 3)
@@ -505,6 +625,7 @@ class SearcherService:
                     query=q, max_results=max_results, job_id=job_id, backend=backend,
                 )
                 found = [r for r in results if r.get("video_id")]
+                _set_cached_search(cache_key, found)
                 all_results.extend(found)
                 if emit:
                     await emit("check", f"→ {len(found)} results for \"{q[:50]}\"", 3)

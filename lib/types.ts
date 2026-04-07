@@ -41,11 +41,19 @@ export interface APICosts {
   quota_exhausted?: boolean
 }
 
+export type ShotIntent = "literal" | "illustrative" | "atmospheric"
+export type Scarcity = "common" | "medium" | "rare"
+export type AuditStatus = "pass" | "review" | "reject" | "unaudited"
+
 export interface BRollShot {
   shot_id: string
   visual_need: string
+  visual_description?: string
   search_queries: string[]
   key_terms: string[]
+  shot_intent?: ShotIntent
+  scarcity?: Scarcity
+  preferred_source_type?: string
 }
 
 export interface RankedResult {
@@ -53,6 +61,8 @@ export interface RankedResult {
   segment_id: string
   shot_id: string | null
   shot_visual_need: string | null
+  shot_intent?: ShotIntent
+  scarcity?: Scarcity
   video_id: string
   video_url: string
   video_title: string
@@ -68,11 +78,16 @@ export interface RankedResult {
   transcript_excerpt: string | null
   the_hook: string | null
   relevance_note: string | null
+  match_reasoning: string | null
   relevance_score: number
   confidence_score: number
+  visual_fit: number
+  topical_fit: number
   source_flag: TranscriptSource
   context_match: boolean
   context_mismatch_reason: string | null
+  audit_status?: AuditStatus
+  audit_reason?: string | null
   editor_rating: number | null
   clip_used: boolean
   editor_notes: string | null
@@ -254,6 +269,8 @@ export interface LibraryClip {
   segment_id: string
   shot_id: string | null
   shot_visual_need: string | null
+  shot_intent?: ShotIntent
+  scarcity?: Scarcity
   video_id: string
   video_url: string
   video_title: string
@@ -269,10 +286,15 @@ export interface LibraryClip {
   transcript_excerpt: string | null
   the_hook: string | null
   relevance_note: string | null
+  match_reasoning: string | null
   relevance_score: number
   confidence_score: number
+  visual_fit: number
+  topical_fit: number
   source_flag: TranscriptSource
   context_match: boolean
+  audit_status?: AuditStatus
+  audit_reason?: string | null
   editor_rating: number | null
   clip_used: boolean
   editor_notes: string | null
@@ -325,11 +347,12 @@ export interface PipelineSettings {
   prefer_min_subscribers: number
   recency_full_score_years: number
   weight_ai_confidence: number
-  weight_keyword_density: number
+  weight_fit_score: number
   weight_viral_score: number
   weight_channel_authority: number
   weight_caption_quality: number
   weight_recency: number
+  weight_context_relevance: number
 
   // Performance
   segment_timeout_sec: number

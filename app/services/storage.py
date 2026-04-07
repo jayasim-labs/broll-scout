@@ -634,6 +634,22 @@ class StorageService:
             logger.exception("Failed to rename project %s", project_id)
             return False
 
+    async def store_audit_log(self, job_id: str, records: list[dict]) -> None:
+        """Store context audit decisions for pattern analysis."""
+        table = self._table("audit_log")
+        timestamp = datetime.utcnow().isoformat()
+        for rec in records:
+            item = {
+                "job_id": job_id,
+                "result_id": rec.get("result_id", "unknown"),
+                "audited_at": timestamp,
+                **rec,
+            }
+            try:
+                await self._run(table.put_item, Item=item)
+            except Exception:
+                logger.debug("Failed to store audit record for %s", rec.get("result_id"))
+
 
 _storage: Optional[StorageService] = None
 

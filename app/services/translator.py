@@ -35,7 +35,7 @@ Do the following in one response:
    - title (short, descriptive)
    - summary (2–3 sentences describing what this section covers)
    - visual_need (what the editor needs to SEE on screen — overall for this segment)
-   - emotional_tone (the mood)
+   - emotional_tone: the emotional mood of this segment. Use one of: "urgent", "contemplative", "celebratory", "ominous", "neutral", "dramatic", "melancholic", "inspiring", "tense", "humorous"
    - key_terms (5–7 keywords a video editor would use to find relevant footage)
    - search_queries: 3 distinct YouTube search queries for this segment overall. CRITICAL: Every query MUST include the script's specific context. BAD: "tropical forest documentary". GOOD: "Sentinel Island aerial forest footage".
    - estimated_duration_seconds (rough estimate of how long this section of the script runs)
@@ -51,13 +51,23 @@ Do the following in one response:
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
        * visual_need: what the editor needs to see for THIS SPECIFIC shot (not the segment's general topic)
-       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. Each must contain at least one term from geographic_scope or script_topic. The 5 queries MUST be diverse in style:
+       * visual_description: describe what the ideal footage LOOKS like — camera angle, motion, lighting, color palette, framing. E.g., "Wide aerial shot of a dense green island surrounded by turquoise water, camera slowly orbiting". This is separate from what the footage is ABOUT.
+       * shot_intent: classify the visual relationship to the narration:
+           - "literal": footage directly showing what's being discussed (e.g., narration about the Eiffel Tower → footage of the Eiffel Tower)
+           - "illustrative": footage that represents or symbolizes the concept (e.g., narration about economic growth → footage of busy stock exchange floor)
+           - "atmospheric": footage that sets mood/tone without direct topical connection (e.g., narration about uncertainty → slow-motion clouds, empty corridors, rain on windows)
+       * scarcity: estimate how easy this footage is to find on YouTube:
+           - "common": generic footage widely available (city skylines, nature shots, tech demos)
+           - "medium": somewhat specific (particular historical events, specific locations, niche subjects)
+           - "rare": very specific footage unlikely to be on YouTube (classified events, obscure historical moments, specific private locations)
+       * preferred_source_type: what type of source video would be ideal — one of: "documentary", "news_clip", "stock_footage", "drone_aerial", "interview", "timelapse", "archival", "animation", or "" if no preference
+       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. The 5 queries MUST be diverse:
            1. SPECIFIC: exact location/event/subject name (e.g., "North Sentinel Island satellite view")
            2. DESCRIPTIVE: what it looks like visually (e.g., "isolated tropical island aerial drone footage")
            3. DOCUMENTARY: topic + "documentary" or "footage" (e.g., "Sentinel Island documentary aerial")
            4. BROADER CONTEXT: category + geographic context (e.g., "Andaman Islands forbidden island drone")
-           5. ALTERNATIVE ANGLE: different phrasing or related concept (e.g., "uncontacted tribe island aerial view")
-         This diversity is CRITICAL — different phrasings find different videos. A narrow set of similar queries misses relevant content.
+           5. LATERAL: visually relevant footage from a different angle or related concept that may not be topically connected but LOOKS right (e.g., for a shot needing "feeling of isolation" → "abandoned island cinematic b-roll")
+         This diversity is CRITICAL — different phrasings find different videos.
        * key_terms: 3-5 keywords for THIS shot
 
      Example for a 2-minute segment about "Sentinel Island's geography":
@@ -65,38 +75,34 @@ Do the following in one response:
        {
          "shot_id": "seg_005_shot_1",
          "visual_need": "Aerial/satellite view of North Sentinel Island showing its isolation",
+         "visual_description": "Wide overhead satellite or drone shot of a small green island surrounded by deep blue ocean, emphasizing its remoteness with no other land in frame",
+         "shot_intent": "literal",
+         "scarcity": "medium",
+         "preferred_source_type": "drone_aerial",
          "search_queries": [
            "North Sentinel Island satellite view",
            "isolated tropical island aerial drone footage",
            "Sentinel Island documentary aerial",
            "Andaman Islands forbidden island drone",
-           "uncontacted tribe island aerial overview"
+           "remote island overhead cinematic b-roll"
          ],
          "key_terms": ["satellite", "aerial", "island", "isolation"]
        },
        {
          "shot_id": "seg_005_shot_2",
          "visual_need": "Dense tropical rainforest canopy from above — the impenetrable jungle",
+         "visual_description": "Slow drone push over an endless canopy of tropical trees, rich greens, misty atmosphere, no clearings visible — conveying impassibility",
+         "shot_intent": "illustrative",
+         "scarcity": "common",
+         "preferred_source_type": "drone_aerial",
          "search_queries": [
            "North Sentinel Island jungle canopy aerial",
            "dense tropical rainforest island drone footage",
            "Andaman island rainforest documentary",
            "impenetrable jungle island overhead view",
-           "tropical island forest canopy drone"
+           "tropical jungle canopy cinematic flyover"
          ],
          "key_terms": ["rainforest", "canopy", "dense", "tropical"]
-       },
-       {
-         "shot_id": "seg_005_shot_3",
-         "visual_need": "Coral reef and shallow waters surrounding the island",
-         "search_queries": [
-           "North Sentinel Island coral reef aerial",
-           "coral reef shallow waters island footage",
-           "Andaman Islands coral reef documentary",
-           "isolated island reef barrier drone view",
-           "tropical island coastline underwater reef"
-         ],
-         "key_terms": ["coral", "reef", "shallow", "barrier"]
        }
      ]
 

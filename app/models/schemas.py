@@ -22,6 +22,25 @@ class TranscriptSource(str, Enum):
     NONE = "no_transcript"
 
 
+class ShotIntent(str, Enum):
+    LITERAL = "literal"
+    ILLUSTRATIVE = "illustrative"
+    ATMOSPHERIC = "atmospheric"
+
+
+class Scarcity(str, Enum):
+    COMMON = "common"
+    MEDIUM = "medium"
+    RARE = "rare"
+
+
+class AuditStatus(str, Enum):
+    PASS = "pass"
+    REVIEW = "review"
+    REJECT = "reject"
+    UNAUDITED = "unaudited"
+
+
 VALID_CATEGORIES = [
     "history", "mystery", "current_affairs", "science",
     "finance", "ai_tech", "geo_politics", "societal_issues", "sports",
@@ -144,8 +163,12 @@ class BRollShot(BaseModel):
 
     shot_id: str
     visual_need: str
+    visual_description: str = ""
     search_queries: List[str] = Field(default_factory=list)
     key_terms: List[str] = Field(default_factory=list)
+    shot_intent: ShotIntent = ShotIntent.LITERAL
+    scarcity: Scarcity = Scarcity.COMMON
+    preferred_source_type: str = ""
 
 
 class Segment(BaseModel):
@@ -199,6 +222,9 @@ class MatchResult(BaseModel):
     end_time_seconds: Optional[int] = None
     transcript_excerpt: Optional[str] = None
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    visual_fit: float = Field(default=0.0, ge=0.0, le=1.0)
+    topical_fit: float = Field(default=0.0, ge=0.0, le=1.0)
+    match_reasoning: Optional[str] = None
     relevance_note: Optional[str] = None
     the_hook: Optional[str] = None
     source_flag: TranscriptSource = TranscriptSource.NONE
@@ -215,6 +241,8 @@ class RankedResult(BaseModel):
     segment_id: str
     shot_id: Optional[str] = None
     shot_visual_need: Optional[str] = None
+    shot_intent: ShotIntent = ShotIntent.LITERAL
+    scarcity: Scarcity = Scarcity.COMMON
     video_id: str
     video_url: str
     video_title: str
@@ -230,11 +258,16 @@ class RankedResult(BaseModel):
     transcript_excerpt: Optional[str] = None
     the_hook: Optional[str] = None
     relevance_note: Optional[str] = None
+    match_reasoning: Optional[str] = None
     relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    visual_fit: float = Field(default=0.0, ge=0.0, le=1.0)
+    topical_fit: float = Field(default=0.0, ge=0.0, le=1.0)
     source_flag: TranscriptSource = TranscriptSource.NONE
     context_match: bool = True
     context_mismatch_reason: Optional[str] = None
+    audit_status: AuditStatus = AuditStatus.UNAUDITED
+    audit_reason: Optional[str] = None
     editor_rating: Optional[int] = Field(default=None, ge=1, le=5)
     clip_used: bool = False
     editor_notes: Optional[str] = None
@@ -358,6 +391,8 @@ class LibraryClip(BaseModel):
     segment_id: str
     shot_id: Optional[str] = None
     shot_visual_need: Optional[str] = None
+    shot_intent: ShotIntent = ShotIntent.LITERAL
+    scarcity: Scarcity = Scarcity.COMMON
     video_id: str
     video_url: str
     video_title: str
@@ -373,10 +408,15 @@ class LibraryClip(BaseModel):
     transcript_excerpt: Optional[str] = None
     the_hook: Optional[str] = None
     relevance_note: Optional[str] = None
+    match_reasoning: Optional[str] = None
     relevance_score: float = 0.0
     confidence_score: float = 0.0
+    visual_fit: float = 0.0
+    topical_fit: float = 0.0
     source_flag: TranscriptSource = TranscriptSource.NONE
     context_match: bool = True
+    audit_status: AuditStatus = AuditStatus.UNAUDITED
+    audit_reason: Optional[str] = None
     editor_rating: Optional[int] = None
     clip_used: bool = False
     editor_notes: Optional[str] = None

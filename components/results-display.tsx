@@ -17,7 +17,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { JobResponse, Segment, RankedResult, ActivityEntry } from "@/lib/types"
+import type { JobResponse, Segment, RankedResult, ActivityEntry, ShotIntent, Scarcity, AuditStatus } from "@/lib/types"
 import { categoryLabel } from "@/lib/types"
 
 interface ResultsDisplayProps {
@@ -45,6 +45,25 @@ function scoreColor(score: number): string {
   if (score >= 0.7) return "bg-green-500/20 text-green-400 border-green-500/30"
   if (score >= 0.4) return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
   return "bg-red-500/20 text-red-400 border-red-500/30"
+}
+
+const INTENT_LABELS: Record<string, { label: string; color: string }> = {
+  literal: { label: "Literal", color: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
+  illustrative: { label: "Illustrative", color: "bg-purple-500/15 text-purple-400 border-purple-500/30" },
+  atmospheric: { label: "Atmospheric", color: "bg-teal-500/15 text-teal-400 border-teal-500/30" },
+}
+
+const SCARCITY_LABELS: Record<string, { label: string; color: string }> = {
+  common: { label: "Common", color: "bg-green-500/15 text-green-400 border-green-500/30" },
+  medium: { label: "Medium", color: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30" },
+  rare: { label: "Rare", color: "bg-red-500/15 text-red-400 border-red-500/30" },
+}
+
+const AUDIT_LABELS: Record<string, { label: string; color: string; icon: typeof Check }> = {
+  pass: { label: "Passed", color: "bg-green-500/15 text-green-400 border-green-500/30", icon: Check },
+  review: { label: "Review", color: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30", icon: AlertTriangle },
+  reject: { label: "Flagged", color: "bg-red-500/15 text-red-400 border-red-500/30", icon: X },
+  unaudited: { label: "", color: "", icon: Check },
 }
 
 const SEGMENTS_PER_PAGE = 15
@@ -356,13 +375,29 @@ function SegmentCard({ segment, index, jobId, onRefreshJob }: { segment: Segment
                   <div className="space-y-4">
                     {segment.broll_shots.map((shot, shotIdx) => {
                       const shotResults = resultsByShot[shot.shot_id] || []
+                      const intentMeta = INTENT_LABELS[shot.shot_intent || "literal"]
+                      const scarcityMeta = SCARCITY_LABELS[shot.scarcity || "common"]
                       return (
                         <div key={shot.shot_id} className="space-y-2">
                           <div className="flex items-start gap-2">
                             <span className="text-xs font-mono text-muted-foreground/70 pt-0.5 shrink-0">
                               Shot {shotIdx + 1}
                             </span>
-                            <p className="text-sm font-medium">{shot.visual_need}</p>
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium">{shot.visual_need}</p>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                {intentMeta && (
+                                  <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border", intentMeta.color)}>
+                                    {intentMeta.label}
+                                  </Badge>
+                                )}
+                                {scarcityMeta && shot.scarcity && shot.scarcity !== "common" && (
+                                  <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border", scarcityMeta.color)}>
+                                    {scarcityMeta.label} footage
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
                           </div>
                           {shotResults.length > 0 ? (
                             <div className="space-y-2 ml-12">
@@ -1031,9 +1066,63 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
             <Badge variant="outline" className="text-xs">
               {result.source_flag.replace(/_/g, ' ')}
             </Badge>
+            {result.visual_fit > 0 && (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border cursor-help", scoreColor(result.visual_fit))}>
+                      VF {(result.visual_fit * 100).toFixed(0)}%
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="text-xs max-w-48">
+                    <p className="font-medium">Visual Fit</p>
+                    <p className="text-muted-foreground">How well the footage looks like what the shot needs</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+            {result.topical_fit > 0 && (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border cursor-help", scoreColor(result.topical_fit))}>
+                      TF {(result.topical_fit * 100).toFixed(0)}%
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="text-xs max-w-48">
+                    <p className="font-medium">Topical Fit</p>
+                    <p className="text-muted-foreground">How well the content matches the documentary topic</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+            {result.audit_status && result.audit_status !== "unaudited" && result.audit_status !== "pass" && (() => {
+              const auditMeta = AUDIT_LABELS[result.audit_status]
+              const AuditIcon = auditMeta?.icon || AlertTriangle
+              return (
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border cursor-help gap-0.5", auditMeta?.color)}>
+                        <AuditIcon className="w-2.5 h-2.5" />
+                        {auditMeta?.label}
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="text-xs max-w-64">
+                      <p className="font-medium">Audit: {auditMeta?.label}</p>
+                      {result.audit_reason && <p className="text-muted-foreground">{result.audit_reason}</p>}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })()}
           </div>
 
-          {result.the_hook && (
+          {result.match_reasoning && (
+            <p className="text-xs text-muted-foreground/80 italic line-clamp-2">{result.match_reasoning}</p>
+          )}
+
+          {result.the_hook && !result.match_reasoning && (
             <p className="text-xs text-primary italic line-clamp-1">&quot;{result.the_hook}&quot;</p>
           )}
 
