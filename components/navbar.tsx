@@ -2,7 +2,8 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Video, Settings, Home, FolderOpen, DollarSign, Cloud, Cpu, Film } from "lucide-react"
+import Image from "next/image"
+import { Settings, Home, FolderOpen, DollarSign, Cloud, Cpu, Film } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { AgentStatusBadge } from "@/components/agent-status"
 import { useEffect, useState, useCallback } from "react"
@@ -35,14 +36,11 @@ export function Navbar() {
     <nav className="bg-card border-b border-border sticky top-0 z-50">
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
-          <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-            <Video className="w-8 h-8 text-primary" />
-            <div>
-              <span className="text-xl font-bold">B-Roll Scout</span>
-              <span className="hidden sm:inline text-xs text-muted-foreground ml-2">
-                Beyond the Obvious
-              </span>
-            </div>
+          <Link href="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
+            <Image src="/logo.png" alt="JJ" width={36} height={36} className="rounded" />
+            <span className="text-lg font-bold tracking-tight hidden sm:inline">
+              BRoll Scout Intelligence
+            </span>
           </Link>
 
           <div className="flex items-center gap-4">

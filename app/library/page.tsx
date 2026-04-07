@@ -12,6 +12,7 @@ import {
   Search, ExternalLink, Copy, Eye, Star, Clock,
   Database, FileText, Loader2, Sparkles, Library as LibraryIcon,
   Film, Filter, X, ArrowUpDown, ChevronDown, ChevronUp,
+  Play, Pause, Scissors, Download, Check, SkipBack, SkipForward,
 } from "lucide-react"
 import type {
   LibraryClip, LibraryStats, LibraryCategoryCount, LibrarySearchResponse,
@@ -615,36 +616,86 @@ function StatCard({ icon: Icon, label, value, color }: {
 }
 
 
+const COMPANION_URL = "http://localhost:9876"
+type DownloadState = "idle" | "downloading" | "done" | "error"
+
 function ClipCard({ clip, onCopy, copied }: {
   clip: LibraryClip
   onCopy: () => void
   copied: boolean
 }) {
   const clipUrl = clip.clip_url || clip.video_url
-  const start = clip.start_time_seconds ?? 0
-  const end = clip.end_time_seconds
-  const timeRange = end ? `${formatTime(start)}-${formatTime(end)}` : formatTime(start)
+  const initStart = clip.start_time_seconds ?? 0
+  const initEnd = clip.end_time_seconds ?? initStart + 45
+  const [showPreview, setShowPreview] = useState(false)
+  const [clipStart, setClipStart] = useState(Math.min(initStart, initEnd))
+  const [clipEnd, setClipEnd] = useState(Math.max(initStart, initEnd) || initStart + 45)
+  const [dlState, setDlState] = useState<DownloadState>("idle")
+  const [dlInfo, setDlInfo] = useState("")
+  const playerRef = useRef<HTMLIFrameElement>(null)
+
+  const clipDuration = Math.max(0, clipEnd - clipStart)
+  const embedUrl = `https://www.youtube.com/embed/${clip.video_id}?start=${clipStart}&end=${clipEnd}&autoplay=1&rel=0&modestbranding=1`
+  const timeRange = initEnd ? `${formatTime(initStart)}-${formatTime(initEnd)}` : formatTime(initStart)
+
+  const handleClipDownload = useCallback(async () => {
+    if (clipStart >= clipEnd) {
+      setDlState("error")
+      setDlInfo(`Invalid range: start (${formatTime(clipStart)}) must be before end (${formatTime(clipEnd)}).`)
+      return
+    }
+    setDlState("downloading")
+    setDlInfo("Sending clip request to companion app...")
+    try {
+      const resp = await fetch(`${COMPANION_URL}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_type: "clip",
+          payload: { video_id: clip.video_id, start_seconds: clipStart, end_seconds: clipEnd },
+        }),
+        mode: "cors",
+      })
+      const data = await resp.json()
+      if (data.status === "ok") {
+        setDlState("done")
+        setDlInfo(`Saved to ${data.file_path} (${data.file_size_mb} MB)`)
+        setTimeout(() => { setDlState("idle"); setDlInfo("") }, 5000)
+      } else {
+        setDlState("error")
+        setDlInfo(data.message || "Download failed")
+        setTimeout(() => { setDlState("idle"); setDlInfo("") }, 8000)
+      }
+    } catch {
+      setDlState("error")
+      const ytdlpCmd = `yt-dlp "${clip.video_url}" --download-sections "*${formatTime(clipStart)}-${formatTime(clipEnd)}" --force-keyframes-at-cuts -o "clip_${clip.video_id}_${clipStart}-${clipEnd}.mp4"`
+      try { await navigator.clipboard.writeText(ytdlpCmd) } catch {}
+      setDlInfo("Companion not running. yt-dlp command copied to clipboard.")
+      setTimeout(() => { setDlState("idle"); setDlInfo("") }, 8000)
+    }
+  }, [clip.video_id, clip.video_url, clipStart, clipEnd])
 
   return (
-    <Card className="bg-card border-border hover:border-primary/30 transition-colors">
-      <CardContent className="p-4">
-        <div className="flex gap-4">
-          {/* Thumbnail */}
-          <a
-            href={clipUrl}
-            target="_blank"
-            rel="noopener noreferrer"
+    <Card className="bg-card border-border hover:border-primary/30 transition-colors overflow-hidden">
+      <CardContent className="p-0">
+        <div className="flex gap-4 p-4">
+          {/* Thumbnail — click to toggle preview */}
+          <button
+            onClick={() => setShowPreview(!showPreview)}
             className="flex-shrink-0 relative w-40 h-[90px] rounded-lg overflow-hidden bg-muted group"
           >
             <img
               src={clip.thumbnail_url || `https://img.youtube.com/vi/${clip.video_id}/mqdefault.jpg`}
               alt=""
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+              className="w-full h-full object-cover group-hover:opacity-80 transition-opacity"
             />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
+              {showPreview ? <X className="w-7 h-7 text-white" /> : <Play className="w-7 h-7 text-white fill-white" />}
+            </div>
             <span className="absolute bottom-1 right-1 bg-black/80 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
               {timeRange}
             </span>
-          </a>
+          </button>
 
           {/* Content */}
           <div className="flex-1 min-w-0">
@@ -698,24 +749,43 @@ function ClipCard({ clip, onCopy, copied }: {
               </p>
             )}
 
-            {/* Actions */}
-            <div className="flex items-center gap-2 mt-2">
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <a
-                      href={clipUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      Open clip at {formatTime(start)}
-                    </a>
-                  </TooltipTrigger>
-                  <TooltipContent>Opens YouTube at the matched timestamp</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+            {/* Action buttons row */}
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
+              <Button
+                variant={showPreview ? "secondary" : "default"}
+                size="sm"
+                className="h-7 text-xs gap-1.5 px-2.5"
+                onClick={() => setShowPreview(!showPreview)}
+              >
+                {showPreview ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                {showPreview ? "Close Preview" : "Preview"}
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn("h-7 text-xs gap-1.5 px-2.5",
+                  dlState === "done" && "border-green-500/40 text-green-400",
+                  dlState === "error" && "border-red-500/40 text-red-400")}
+                onClick={handleClipDownload}
+                disabled={dlState === "downloading"}
+              >
+                {dlState === "downloading" ? (
+                  <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+                ) : dlState === "done" ? (
+                  <Check className="w-3 h-3" />
+                ) : (
+                  <Scissors className="w-3 h-3" />
+                )}
+                {dlState === "downloading" ? "Downloading..." : dlState === "done" ? "Saved!" : dlState === "error" ? "Failed" : "Clip & Download"}
+              </Button>
+
+              <a href={clipUrl} target="_blank" rel="noopener noreferrer">
+                <Button variant="ghost" size="sm" className="h-7 text-xs gap-1.5 px-2.5">
+                  <ExternalLink className="w-3 h-3" />
+                  YouTube
+                </Button>
+              </a>
 
               <button
                 onClick={onCopy}
@@ -726,6 +796,13 @@ function ClipCard({ clip, onCopy, copied }: {
               </button>
             </div>
 
+            {!showPreview && dlInfo && (
+              <p className={cn("text-xs mt-1",
+                dlState === "done" ? "text-green-400" : dlState === "error" ? "text-red-400" : "text-muted-foreground")}>
+                {dlInfo}
+              </p>
+            )}
+
             {/* Job context */}
             {clip.job_title && (
               <p className="text-[10px] text-muted-foreground mt-1.5">
@@ -734,6 +811,130 @@ function ClipCard({ clip, onCopy, copied }: {
             )}
           </div>
         </div>
+
+        {/* Expandable preview + clip controls */}
+        {showPreview && (
+          <div className="border-t border-border bg-black/20 p-3 space-y-3">
+            <div className="aspect-video w-full max-w-2xl mx-auto rounded-lg overflow-hidden bg-black">
+              <iframe
+                ref={playerRef}
+                src={embedUrl}
+                className="w-full h-full"
+                allow="autoplay; encrypted-media"
+                allowFullScreen
+                title={`Preview: ${clip.video_title}`}
+              />
+            </div>
+
+            <div className="max-w-2xl mx-auto space-y-2">
+              {/* Clip range controls */}
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-20">Clip range:</span>
+                <div className="flex items-center gap-2 flex-1">
+                  <div className="flex items-center gap-1">
+                    <label className="text-[10px] text-muted-foreground uppercase">Start</label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={clip.video_duration_seconds}
+                      value={clipStart}
+                      onChange={(e) => setClipStart(Math.min(clipEnd - 1, Math.max(0, parseInt(e.target.value) || 0)))}
+                      className="w-20 h-7 text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-muted-foreground">{formatTime(clipStart)}</span>
+                  </div>
+                  <span className="text-muted-foreground">–</span>
+                  <div className="flex items-center gap-1">
+                    <label className="text-[10px] text-muted-foreground uppercase">End</label>
+                    <Input
+                      type="number"
+                      min={clipStart}
+                      max={clip.video_duration_seconds}
+                      value={clipEnd}
+                      onChange={(e) => setClipEnd(Math.max(clipStart, parseInt(e.target.value) || 0))}
+                      className="w-20 h-7 text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-muted-foreground">{formatTime(clipEnd)}</span>
+                  </div>
+                  <Badge variant="secondary" className="text-[10px] ml-1">
+                    {clipDuration}s clip
+                  </Badge>
+                </div>
+              </div>
+
+              {/* Quick adjust buttons */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground w-20">Quick adjust:</span>
+                <div className="flex gap-1">
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2"
+                    onClick={() => setClipStart(Math.max(0, clipStart - 10))}>
+                    <SkipBack className="w-3 h-3 mr-0.5" /> -10s
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2"
+                    onClick={() => setClipStart(Math.min(clipEnd - 1, clipStart + 10))}>
+                    +10s <SkipForward className="w-3 h-3 ml-0.5" />
+                  </Button>
+                  <span className="text-muted-foreground/40 mx-1">|</span>
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2"
+                    onClick={() => setClipEnd(Math.max(clipStart, clipEnd - 10))}>
+                    <SkipBack className="w-3 h-3 mr-0.5" /> -10s end
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2"
+                    onClick={() => setClipEnd(clipEnd + 10)}>
+                    +10s end <SkipForward className="w-3 h-3 ml-0.5" />
+                  </Button>
+                  <span className="text-muted-foreground/40 mx-1">|</span>
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2"
+                    onClick={() => { setClipStart(initStart); setClipEnd(initEnd) }}>
+                    Reset
+                  </Button>
+                </div>
+              </div>
+
+              {/* Download row */}
+              <div className="space-y-2 pt-1 border-t border-border/50">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    size="sm"
+                    className="h-8 text-xs gap-2 bg-primary"
+                    onClick={handleClipDownload}
+                    disabled={dlState === "downloading"}
+                  >
+                    {dlState === "downloading" ? (
+                      <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5" />
+                    )}
+                    {dlState === "downloading"
+                      ? "Downloading..."
+                      : `Clip & Download (${formatTime(clipStart)} – ${formatTime(clipEnd)})`}
+                  </Button>
+                </div>
+                {dlInfo && (
+                  <p className={cn(
+                    "text-xs px-2 py-1.5 rounded",
+                    dlState === "done" && "bg-green-500/10 text-green-400",
+                    dlState === "error" && "bg-amber-500/10 text-amber-400",
+                    dlState === "downloading" && "bg-blue-500/10 text-blue-400",
+                  )}>
+                    {dlState === "done" && <Check className="w-3 h-3 inline mr-1" />}
+                    {dlInfo}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Transcript excerpt */}
+            {clip.transcript_excerpt && (
+              <div className="max-w-2xl mx-auto">
+                <p className="text-[10px] text-muted-foreground uppercase mb-1">Transcript at this moment</p>
+                <p className="text-xs text-muted-foreground bg-black/30 rounded p-2 font-mono leading-relaxed">
+                  {clip.transcript_excerpt}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
