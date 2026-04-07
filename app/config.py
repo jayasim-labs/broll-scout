@@ -45,6 +45,8 @@ DEFAULTS = {
     "api_fallback_enabled": False,
     "lightweight_model": "gpt-4o-mini",
     "confidence_threshold": 0.15,
+    "top_results_per_shot": 2,
+    "top_results_per_segment": 2,
     "whisper_max_video_duration_min": 60,
     "avg_whisper_processing_sec": 45,
     "transcript_excerpt_max_words": 200,

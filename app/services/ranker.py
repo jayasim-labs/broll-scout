@@ -41,26 +41,30 @@ class RankerService:
             w_cx /= total_w
 
         threshold = float(cfg.get("confidence_threshold", 0.4))
-        top_n = 1 if shot else int(cfg.get("top_results_per_segment", 1))
+        top_n = int(cfg.get("top_results_per_shot", 2)) if shot else int(cfg.get("top_results_per_segment", 2))
 
         min_subs = int(cfg.get("prefer_min_subscribers", 0))
         negative_kw = segment.negative_keywords or []
         ranking_key_terms = (shot.key_terms if shot and shot.key_terms else segment.key_terms)
 
         scored: list[tuple[CandidateVideo, MatchResult, float]] = []
+        best_fallback: tuple[CandidateVideo, MatchResult, float] | None = None
         for cand, match in candidates:
             if cand.is_blocked:
                 continue
             if not match.context_match_valid:
-                continue
-            if not match.context_match:
-                logger.info("Rejected %s: context mismatch — %s", cand.video_id, match.context_mismatch_reason)
                 continue
             if match.confidence_score <= 0 and match.start_time_seconds is None:
                 continue
 
             if negative_kw and self._has_negative_keyword(cand, match, negative_kw):
                 logger.info("Rejected %s: negative keyword hit", cand.video_id)
+                continue
+
+            if not match.context_match:
+                fallback_score = match.confidence_score * 0.5
+                if best_fallback is None or fallback_score > best_fallback[2]:
+                    best_fallback = (cand, match, round(min(1.0, max(0.0, fallback_score)), 4))
                 continue
 
             if match.source_flag == TranscriptSource.NONE:
@@ -92,11 +96,16 @@ class RankerService:
             if above:
                 scored = above
 
-        if not scored and candidates:
-            for cand, match in candidates:
-                if match.start_time_seconds is not None and match.confidence_score > 0:
-                    scored = [(cand, match, 0.1)]
-                    break
+        if not scored:
+            if best_fallback is not None:
+                logger.info("Using context-mismatch fallback for %s: %s (%.0f%%)",
+                            segment.segment_id, best_fallback[0].video_id, best_fallback[2] * 100)
+                scored = [best_fallback]
+            elif candidates:
+                for cand, match in candidates:
+                    if match.start_time_seconds is not None and match.confidence_score > 0:
+                        scored = [(cand, match, 0.1)]
+                        break
 
         results: list[RankedResult] = []
         for idx, (cand, match, rel_score) in enumerate(scored[:top_n]):
