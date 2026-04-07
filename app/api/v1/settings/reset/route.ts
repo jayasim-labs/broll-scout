@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function POST() {
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/settings/reset`, {
+    const resp = await fetch(backendUrl("/api/v1/settings/reset"), {
       method: "POST",
+      headers: backendHeaders(),
     })
     const data = await resp.json()
     return NextResponse.json(data, { status: resp.status })

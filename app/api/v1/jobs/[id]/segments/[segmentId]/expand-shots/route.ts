@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function POST(
   request: NextRequest,
@@ -10,10 +9,10 @@ export async function POST(
   try {
     const body = await request.json()
     const resp = await fetch(
-      `${BACKEND}/api/v1/jobs/${id}/segments/${segmentId}/expand-shots`,
+      backendUrl(`/api/v1/jobs/${id}/segments/${segmentId}/expand-shots`),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: backendHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       }
     )

@@ -128,7 +128,7 @@ if (Test-Path $envLocal) {
 } else {
     Write-Host "  .env.example not found. Creating minimal .env.local..." -ForegroundColor Yellow
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($envLocal, "BACKEND_URL=https://broll.jayasim.com`n", $utf8NoBom)
+    [System.IO.File]::WriteAllText($envLocal, "BACKEND_URL=https://broll.jayasim.com`nBACKEND_API_KEY=zQCtPzOz1LU2rDK-vtzzcWey18yO1ZgqyU4cCloWwZE`n", $utf8NoBom)
 }
 
 # Always ensure BACKEND_URL points to production API
@@ -141,6 +141,12 @@ if ($envContent -match 'BACKEND_URL=http://localhost') {
 } elseif ($envContent -notmatch 'BACKEND_URL=') {
     Add-Content $envLocal "`nBACKEND_URL=https://broll.jayasim.com"
     Write-Host "  Added BACKEND_URL=https://broll.jayasim.com" -ForegroundColor Cyan
+}
+# Ensure BACKEND_API_KEY is present
+$envContent = Get-Content $envLocal -Raw
+if ($envContent -notmatch 'BACKEND_API_KEY=') {
+    Add-Content $envLocal "`nBACKEND_API_KEY=zQCtPzOz1LU2rDK-vtzzcWey18yO1ZgqyU4cCloWwZE"
+    Write-Host "  Added BACKEND_API_KEY" -ForegroundColor Cyan
 }
 Write-Host "  OK - Backend: broll.jayasim.com" -ForegroundColor Green
 

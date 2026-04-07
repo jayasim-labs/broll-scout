@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json()
-    const resp = await fetch(`${BACKEND}/api/v1/settings/bulk`, {
+    const resp = await fetch(backendUrl("/api/v1/settings/bulk"), {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: backendHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     })
     const data = await resp.json()

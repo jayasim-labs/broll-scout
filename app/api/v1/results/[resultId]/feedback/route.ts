@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function POST(
   request: NextRequest,
@@ -11,10 +10,10 @@ export async function POST(
     const jobId = request.nextUrl.searchParams.get("job_id")
     const body = await request.json()
     const resp = await fetch(
-      `${BACKEND}/api/v1/results/${resultId}/feedback?job_id=${jobId}`,
+      backendUrl(`/api/v1/results/${resultId}/feedback?job_id=${jobId}`),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: backendHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       }
     )

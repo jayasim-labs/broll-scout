@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function POST(request: NextRequest) {
   try {
@@ -8,9 +7,9 @@ export async function POST(request: NextRequest) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 60_000)
 
-    const resp = await fetch(`${BACKEND}/api/v1/jobs`, {
+    const resp = await fetch(backendUrl("/api/v1/jobs"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: backendHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
       signal: controller.signal,
     })
@@ -31,7 +30,8 @@ export async function GET() {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 30_000)
 
-    const resp = await fetch(`${BACKEND}/api/v1/jobs`, {
+    const resp = await fetch(backendUrl("/api/v1/jobs"), {
+      headers: backendHeaders(),
       cache: "no-store",
       signal: controller.signal,
     })

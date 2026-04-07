@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function GET() {
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/usage`, {
+    const resp = await fetch(backendUrl("/api/v1/usage"), {
+      headers: backendHeaders(),
       cache: "no-store",
     })
     const data = await resp.json()
@@ -16,9 +16,9 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/usage/recalculate`, {
+    const resp = await fetch(backendUrl("/api/v1/usage/recalculate"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: backendHeaders({ "Content-Type": "application/json" }),
     })
     const data = await resp.json()
     return NextResponse.json(data, { status: resp.status })

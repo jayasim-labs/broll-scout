@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function GET() {
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/library/stats`, {
+    const resp = await fetch(backendUrl("/api/v1/library/stats"), {
+      headers: backendHeaders(),
       cache: "no-store",
     })
     const data = await resp.json()

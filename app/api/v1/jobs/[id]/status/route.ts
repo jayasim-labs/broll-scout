@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-
-const BACKEND = process.env.BACKEND_URL || "http://localhost:8000"
+import { backendUrl, backendHeaders } from "@/lib/backend"
 
 export async function GET(
   _request: NextRequest,
@@ -8,7 +7,7 @@ export async function GET(
 ) {
   const { id } = await params
   try {
-    const resp = await fetch(`${BACKEND}/api/v1/jobs/${id}/status`, { cache: "no-store" })
+    const resp = await fetch(backendUrl(`/api/v1/jobs/${id}/status`), { headers: backendHeaders(), cache: "no-store" })
     const data = await resp.json()
     return NextResponse.json(data, { status: resp.status })
   } catch (error) {
