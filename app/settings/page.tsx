@@ -261,13 +261,16 @@ export default function SettingsPage() {
 
 function ChannelCard({ channel, onRemove }: { channel: ChannelEntry; onRemove: () => void }) {
   const channelUrl = channel.channel_url || `https://www.youtube.com/channel/${channel.channel_id}`
+  const [imgError, setImgError] = useState(false)
   return (
     <div className="flex items-center gap-3 p-2.5 bg-secondary/40 rounded-lg border border-border group hover:border-primary/30 transition-colors">
       <a href={channelUrl} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open channel on YouTube">
-        {channel.thumbnail_url ? (
+        {channel.thumbnail_url && !imgError ? (
           <img
             src={channel.thumbnail_url}
             alt={channel.channel_name}
+            referrerPolicy="no-referrer"
+            onError={() => setImgError(true)}
             className="w-10 h-10 rounded-full object-cover ring-2 ring-border hover:ring-primary/50 transition-all"
           />
         ) : (
@@ -412,7 +415,7 @@ function ChannelSearchInput({
               className="w-full flex items-center gap-3 p-2.5 hover:bg-accent/50 transition-colors text-left border-b border-border/50 last:border-0"
             >
               {ch.thumbnail_url ? (
-                <img src={ch.thumbnail_url} alt={ch.channel_name} className="w-9 h-9 rounded-full object-cover shrink-0" />
+                <img src={ch.thumbnail_url} alt={ch.channel_name} referrerPolicy="no-referrer" className="w-9 h-9 rounded-full object-cover shrink-0" />
               ) : (
                 <div className="w-9 h-9 rounded-full bg-muted flex items-center justify-center shrink-0">
                   <Tv className="w-4 h-4 text-muted-foreground" />
