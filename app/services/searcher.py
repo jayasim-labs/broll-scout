@@ -119,7 +119,7 @@ async def _dispatch_search(
     task_id = await agent_queue.create_task("search", {
         "query": query,
         "max_results": max_results,
-    })
+    }, job_id=job_id)
     return await agent_queue.wait_for_result(task_id)
 
 
@@ -134,7 +134,7 @@ async def _dispatch_channel_search(
         "channel_id": channel_id,
         "query": query,
         "max_results": max_results,
-    })
+    }, job_id=job_id)
     return await agent_queue.wait_for_result(task_id)
 
 
@@ -145,7 +145,7 @@ async def _dispatch_video_details(
 ) -> list[dict]:
     task_id = await agent_queue.create_task("video_details", {
         "video_ids": video_ids,
-    })
+    }, job_id=job_id)
     return await agent_queue.wait_for_result(task_id)
 
 

@@ -373,7 +373,7 @@ class MatcherService:
         task_id = await agent_queue.create_task("match_timestamp", {
             "prompt": prompt,
             "model": matcher_model,
-        })
+        }, job_id=job_id)
         results = await agent_queue.wait_for_result(task_id, timeout=300)
         if not results:
             logger.warning("Local match task timed out or returned empty")

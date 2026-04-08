@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -51,6 +52,21 @@ log = logging.getLogger("companion")
 
 YTDLP_TIMEOUT = 60
 _executor = ThreadPoolExecutor(max_workers=4)
+
+_abort_lock = threading.Lock()
+_task_aborts: dict[str, threading.Event] = {}
+
+
+def _register_abort(task_id: str) -> threading.Event:
+    ev = threading.Event()
+    with _abort_lock:
+        _task_aborts[task_id] = ev
+    return ev
+
+
+def _unregister_abort(task_id: str) -> None:
+    with _abort_lock:
+        _task_aborts.pop(task_id, None)
 
 # ---------------------------------------------------------------------------
 # Ollama (local LLM) configuration
@@ -260,11 +276,28 @@ def settings():
     })
 
 
+@app.route("/abort_task", methods=["POST"])
+def abort_task():
+    """Signal an in-flight task (e.g. Whisper) to stop at the next checkpoint."""
+    data = request.json or {}
+    tid = data.get("task_id")
+    if not tid:
+        return jsonify({"error": "task_id required"}), 400
+    tid = str(tid)
+    with _abort_lock:
+        ev = _task_aborts.get(tid)
+    if ev:
+        ev.set()
+        log.info("Abort requested for task %s", tid[:8])
+    return jsonify({"ok": True})
+
+
 @app.route("/execute", methods=["POST"])
 def execute():
     task = request.json or {}
     task_type = task.get("task_type")
     payload = task.get("payload", {})
+    task_id = task.get("task_id")
 
     log.info("Task: %s  payload keys: %s", task_type, list(payload.keys()))
 
@@ -279,7 +312,16 @@ def execute():
     elif task_type == "transcript":
         results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
     elif task_type == "whisper":
-        results = whisper_transcribe(payload["video_id"], payload.get("max_duration_min", 60))
+        ev = _register_abort(str(task_id)) if task_id else None
+        try:
+            results = whisper_transcribe(
+                payload["video_id"],
+                payload.get("max_duration_min", 60),
+                abort_event=ev,
+            )
+        finally:
+            if task_id:
+                _unregister_abort(str(task_id))
     elif task_type == "match_timestamp":
         result = ollama_match_timestamp(payload)
         return jsonify({"results": [result]})
@@ -409,7 +451,11 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
         return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
 
-def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
+def whisper_transcribe(
+    video_id: str,
+    max_duration_min: int = 60,
+    abort_event: threading.Event | None = None,
+) -> list[dict]:
     """Download audio via yt-dlp, transcribe with OpenAI Whisper locally."""
     import tempfile
     import os
@@ -436,6 +482,10 @@ def whisper_transcribe(video_id: str, max_duration_min: int = 60) -> list[dict]:
             log.info("Whisper: audio downloaded → %s", os.path.basename(audio_path))
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp audio download timed out for %s", video_id)
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+
+        if abort_event and abort_event.is_set():
+            log.info("Whisper: aborted before transcribe for %s", video_id)
             return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
 
         try:

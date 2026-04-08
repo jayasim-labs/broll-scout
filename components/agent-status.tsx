@@ -261,13 +261,43 @@ export function AgentOnboardingBanner() {
   )
 }
 
-export function useAgentLoop(jobActive: boolean) {
+/** Best-effort: ask the local companion to stop work for these agent task IDs (e.g. Whisper). */
+export async function abortCompanionAgentTasks(taskIds: string[]) {
+  await Promise.all(
+    taskIds.map((task_id) =>
+      fetch(`${COMPANION_URL}/abort_task`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id }),
+        mode: "cors",
+      }).catch(() => {})
+    )
+  )
+}
+
+async function jobIsCancelled(jobId: string): Promise<boolean> {
+  try {
+    const st = await fetch(`/api/v1/jobs/${jobId}/status`)
+    if (!st.ok) return false
+    const data = await st.json()
+    return data.status === "cancelled"
+  } catch {
+    return false
+  }
+}
+
+export function useAgentLoop(jobActive: boolean, currentJobId: string | null = null) {
   const runningRef = useRef(false)
   const jobActiveRef = useRef(jobActive)
+  const jobIdRef = useRef(currentJobId)
 
   useEffect(() => {
     jobActiveRef.current = jobActive
   }, [jobActive])
+
+  useEffect(() => {
+    jobIdRef.current = currentJobId
+  }, [currentJobId])
 
   useEffect(() => {
     if (runningRef.current) return
@@ -318,6 +348,24 @@ export function useAgentLoop(jobActive: boolean) {
 
           await Promise.all(tasks.map(async (task: { task_id: string; task_type: string; payload: unknown }) => {
             try {
+              const payload = task.payload as Record<string, unknown> | null
+              const scopedId =
+                typeof payload?.job_id === "string"
+                  ? payload.job_id
+                  : jobIdRef.current
+              if (scopedId && await jobIsCancelled(scopedId)) {
+                await fetch("/api/v1/agent/result", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    task_id: task.task_id,
+                    status: "failed",
+                    result: [],
+                  }),
+                }).catch(() => {})
+                return
+              }
+
               const execResp = await fetch(`${COMPANION_URL}/execute`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

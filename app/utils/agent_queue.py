@@ -25,13 +25,19 @@ _lock = asyncio.Lock()
 TASK_TIMEOUT = 600
 
 
-async def create_task(task_type: str, payload: dict) -> str:
+async def create_task(
+    task_type: str, payload: dict, job_id: str | None = None,
+) -> str:
     task_id = str(uuid4())
+    merged_payload = dict(payload)
+    if job_id is not None:
+        merged_payload.setdefault("job_id", job_id)
     async with _lock:
         _pending[task_id] = {
             "task_id": task_id,
             "task_type": task_type,
-            "payload": payload,
+            "payload": merged_payload,
+            "job_id": job_id,
             "status": "pending",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -48,8 +54,12 @@ async def wait_for_result(task_id: str, timeout: float = TASK_TIMEOUT) -> list[d
         async with _lock:
             result = _completed.pop(task_id, {})
             _events.pop(task_id, None)
-        if result.get("status") == "failed":
-            logger.warning("Agent task %s failed", task_id)
+        status = result.get("status")
+        if status in ("failed", "cancelled"):
+            if status == "failed":
+                logger.warning("Agent task %s failed", task_id)
+            else:
+                logger.info("Agent task %s cancelled", task_id)
             return []
         return result.get("result", [])
     except asyncio.TimeoutError:
@@ -58,6 +68,33 @@ async def wait_for_result(task_id: str, timeout: float = TASK_TIMEOUT) -> list[d
             _pending.pop(task_id, None)
             _events.pop(task_id, None)
         return []
+
+
+async def cancel_tasks_for_job(job_id: str) -> list[str]:
+    """Mark pending/claimed agent tasks for this job as cancelled and wake waiters.
+
+    Returns task_ids so the browser can ask the companion to abort in-flight work.
+    """
+    events_to_set: list[asyncio.Event] = []
+    cancelled_ids: list[str] = []
+    async with _lock:
+        for tid, t in list(_pending.items()):
+            if t.get("job_id") != job_id:
+                continue
+            cancelled_ids.append(tid)
+            _completed[tid] = {"status": "cancelled", "result": []}
+            _pending.pop(tid, None)
+            ev = _events.pop(tid, None)
+            if ev:
+                events_to_set.append(ev)
+    for ev in events_to_set:
+        ev.set()
+    if cancelled_ids:
+        logger.info(
+            "Cancelled %d agent task(s) for job %s",
+            len(cancelled_ids), job_id,
+        )
+    return cancelled_ids
 
 
 async def poll_tasks(agent_id: str, max_tasks: int = 3) -> list[dict]:

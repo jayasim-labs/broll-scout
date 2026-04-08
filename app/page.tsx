@@ -7,7 +7,7 @@ import { Navbar } from "@/components/navbar"
 import { ScriptInput } from "@/components/script-input"
 import { ProgressTracker } from "@/components/progress-tracker"
 import { JobHistory } from "@/components/job-history"
-import { AgentOnboardingBanner, useAgentLoop } from "@/components/agent-status"
+import { AgentOnboardingBanner, useAgentLoop, abortCompanionAgentTasks } from "@/components/agent-status"
 import type { JobProgress, JobSummary, ProjectSummary } from "@/lib/types"
 
 const API_BASE = '/api/v1'
@@ -28,7 +28,7 @@ export default function HomePage() {
   })
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
-  useAgentLoop(viewState === 'processing')
+  useAgentLoop(viewState === 'processing', currentJobId)
 
   useEffect(() => {
     loadJobHistory()
@@ -208,6 +208,9 @@ export default function HomePage() {
     try {
       const resp = await fetch(`/api/v1/jobs/${currentJobId}/cancel`, { method: 'POST' })
       const data = await resp.json()
+      if (Array.isArray(data.cancelled_agent_task_ids) && data.cancelled_agent_task_ids.length) {
+        await abortCompanionAgentTasks(data.cancelled_agent_task_ids)
+      }
       if (data.cancelled) {
         toast.info('Job cancelled — pipeline stopped')
       } else {

@@ -555,7 +555,9 @@ class TestFastAPIEndpoints:
                 "status": "completed",
                 "result": [],
             })
-            assert resp.status_code == 404
+            # Idempotent: unknown / already-finished tasks are accepted (no 404)
+            assert resp.status_code == 200
+            assert resp.json().get("ok") is True
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1188,7 @@ class TestTranscriberWhisperFallback:
         whisper_result = [{"video_id": "vid789", "transcript": "0:00 Whisper transcription\n0:05 More text", "source": "whisper_transcription"}]
 
         call_count = {"n": 0}
-        async def mock_create_task(task_type, payload):
+        async def mock_create_task(task_type, payload, job_id=None):
             call_count["n"] += 1
             return f"task-{call_count['n']}"
 
@@ -1200,7 +1202,8 @@ class TestTranscriberWhisperFallback:
         with patch("app.services.transcriber._ytt_api") as mock_api, \
              patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create_task), \
-             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result):
+             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result), \
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
 
             mock_api.fetch.side_effect = Exception("RequestBlocked")
             mock_api.list.side_effect = Exception("RequestBlocked")
@@ -1250,7 +1253,7 @@ class TestTranscriberWhisperFallback:
         whisper_result = [{"video_id": "vid_cache", "transcript": "0:00 Cached text", "source": "whisper_transcription"}]
 
         call_count = {"n": 0}
-        async def mock_create_task(task_type, payload):
+        async def mock_create_task(task_type, payload, job_id=None):
             call_count["n"] += 1
             return f"task-{call_count['n']}"
 
@@ -1264,7 +1267,8 @@ class TestTranscriberWhisperFallback:
         with patch("app.services.transcriber._ytt_api") as mock_api, \
              patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create_task), \
-             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result):
+             patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait_for_result), \
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
 
             mock_api.fetch.side_effect = Exception("RequestBlocked")
             mock_api.list.side_effect = Exception("RequestBlocked")

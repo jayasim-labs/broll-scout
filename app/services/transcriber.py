@@ -77,7 +77,7 @@ class TranscriberService:
         # Fallback: fetch transcript via local companion agent
         try:
             logger.warning("[transcript] Trying agent captions for %s", video_id)
-            agent_result = await self._fetch_via_agent(video_id)
+            agent_result = await self._fetch_via_agent(video_id, job_id=job_id)
             if agent_result:
                 await storage.store_transcript(
                     video_id=video_id,
@@ -113,7 +113,9 @@ class TranscriberService:
                         await on_whisper_start(video_id, effective_duration)
                     except Exception:
                         pass
-                whisper_result = await self._whisper_via_agent(video_id, effective_duration)
+                whisper_result = await self._whisper_via_agent(
+                    video_id, effective_duration, job_id=job_id,
+                )
                 if whisper_result:
                     await storage.store_transcript(
                         video_id=video_id,
@@ -145,7 +147,9 @@ class TranscriberService:
         logger.warning("[transcript] All sources exhausted for %s", video_id)
         return no_transcript
 
-    async def _fetch_via_agent(self, video_id: str) -> dict | None:
+    async def _fetch_via_agent(
+        self, video_id: str, job_id: str | None = None,
+    ) -> dict | None:
         """Ask the local companion to fetch the transcript."""
         if not agent_queue.is_agent_available():
             logger.info("No agent available for transcript fetch of %s", video_id)
@@ -154,7 +158,7 @@ class TranscriberService:
         task_id = await agent_queue.create_task("transcript", {
             "video_id": video_id,
             "languages": ["en"],
-        })
+        }, job_id=job_id)
         results = await agent_queue.wait_for_result(task_id, timeout=90)
         if not results:
             return None
@@ -171,7 +175,9 @@ class TranscriberService:
         source = source_map.get(source_str, TranscriptSource.YOUTUBE_MANUAL)
         return {"text": transcript_text, "source": source}
 
-    async def _whisper_via_agent(self, video_id: str, duration_seconds: int) -> dict | None:
+    async def _whisper_via_agent(
+        self, video_id: str, duration_seconds: int, job_id: str | None = None,
+    ) -> dict | None:
         """Ask the local companion to download audio and run Whisper transcription."""
         if not agent_queue.is_agent_available():
             logger.warning("[whisper] No agent available for %s", video_id)
@@ -181,7 +187,7 @@ class TranscriberService:
         task_id = await agent_queue.create_task("whisper", {
             "video_id": video_id,
             "max_duration_min": max_dur_min,
-        })
+        }, job_id=job_id)
         queue_depth = agent_queue.pending_task_count("whisper")
         avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 45)
         queue_wait = queue_depth * avg_whisper_sec

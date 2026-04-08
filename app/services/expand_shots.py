@@ -66,7 +66,7 @@ async def expand_shots_for_segment(
             ]
 
         new_shots = await _generate_shots(
-            segment, existing_needs, count, script_context
+            segment, existing_needs, count, script_context, job_id=job_id,
         )
         if not new_shots:
             logger.warning("No new shots generated for %s", seg_id)
@@ -217,7 +217,11 @@ async def expand_shots_for_segment(
         _emit_progress(job_id, seg_id, "error", "Pipeline error — check server logs")
 
 
-async def _lightweight_llm_call(prompt: str, system_prompt: str = "Return valid JSON only.") -> dict | None:
+async def _lightweight_llm_call(
+    prompt: str,
+    system_prompt: str = "Return valid JSON only.",
+    job_id: str | None = None,
+) -> dict | None:
     """Route a lightweight JSON-returning LLM call based on the `lightweight_model` setting.
     Returns parsed JSON dict, or None on failure."""
     settings_svc = get_settings_service()
@@ -225,7 +229,9 @@ async def _lightweight_llm_call(prompt: str, system_prompt: str = "Return valid 
     lightweight_model = pipeline_settings.get("lightweight_model", "gpt-4o-mini")
 
     if lightweight_model == "ollama":
-        return await _lightweight_via_ollama(prompt, system_prompt, pipeline_settings)
+        return await _lightweight_via_ollama(
+            prompt, system_prompt, pipeline_settings, job_id=job_id,
+        )
     else:
         return await _lightweight_via_openai(prompt, system_prompt)
 
@@ -257,7 +263,10 @@ async def _lightweight_via_openai(prompt: str, system_prompt: str) -> dict | Non
         return None
 
 
-async def _lightweight_via_ollama(prompt: str, system_prompt: str, pipeline_settings: dict) -> dict | None:
+async def _lightweight_via_ollama(
+    prompt: str, system_prompt: str, pipeline_settings: dict,
+    job_id: str | None = None,
+) -> dict | None:
     from app.utils import agent_queue
 
     if not agent_queue.is_agent_available():
@@ -269,7 +278,7 @@ async def _lightweight_via_ollama(prompt: str, system_prompt: str, pipeline_sett
         "prompt": prompt,
         "system_prompt": system_prompt + " /nothink",
         "model": matcher_model,
-    })
+    }, job_id=job_id)
     results = await agent_queue.wait_for_result(task_id, timeout=60)
     if not results:
         logger.warning("Ollama lightweight call timed out — falling back to OpenAI")
@@ -288,6 +297,7 @@ async def _generate_shots(
     existing_needs: list[str],
     count: int,
     script_context: Optional[ScriptContext],
+    job_id: str | None = None,
 ) -> list[BRollShot]:
     """Ask LLM for additional visual moments distinct from existing shots."""
     existing_list = "\n".join(f"- {n}" for n in existing_needs) if existing_needs else "(none)"
@@ -315,7 +325,10 @@ async def _generate_shots(
     existing_count = len(segment.broll_shots or [])
 
     try:
-        data = await _lightweight_llm_call(prompt, "You are a documentary B-roll planner. Return valid JSON only.")
+        data = await _lightweight_llm_call(
+            prompt, "You are a documentary B-roll planner. Return valid JSON only.",
+            job_id=job_id,
+        )
         if not data:
             return []
 

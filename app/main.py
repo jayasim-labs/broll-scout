@@ -21,6 +21,7 @@ from app.models.schemas import (
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
 from app.services.settings_service import get_settings_service
+from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
@@ -167,10 +168,17 @@ async def cancel_job(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         return {"job_id": job_id, "status": job.status.value, "cancelled": False,
-                "message": "Job already finished"}
+                "message": "Job already finished",
+                "cancelled_agent_task_ids": []}
 
+    cancelled_agent_task_ids = await agent_queue.cancel_tasks_for_job(job_id)
     task.cancel()
-    return {"job_id": job_id, "status": "cancelled", "cancelled": True}
+    return {
+        "job_id": job_id,
+        "status": "cancelled",
+        "cancelled": True,
+        "cancelled_agent_task_ids": cancelled_agent_task_ids,
+    }
 
 
 @app.post("/api/v1/jobs/{job_id}/segments/{segment_id}/expand-shots")
@@ -663,8 +671,6 @@ async def recalculate_usage(
 
 
 # --- Local yt-dlp Agent Endpoints ---
-
-from app.utils import agent_queue
 
 
 @app.post("/api/v1/agent/poll")

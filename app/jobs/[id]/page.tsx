@@ -7,7 +7,7 @@ import { Navbar } from "@/components/navbar"
 import { ResultsDisplay } from "@/components/results-display"
 import { ProgressTracker } from "@/components/progress-tracker"
 import { JobHistory } from "@/components/job-history"
-import { AgentOnboardingBanner, useAgentLoop } from "@/components/agent-status"
+import { AgentOnboardingBanner, useAgentLoop, abortCompanionAgentTasks } from "@/components/agent-status"
 import { Loader2 } from "lucide-react"
 import type { JobResponse, JobProgress, JobSummary, ProjectSummary } from "@/lib/types"
 
@@ -31,7 +31,7 @@ export default function JobPage() {
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
 
-  useAgentLoop(isProcessing)
+  useAgentLoop(isProcessing, jobId)
 
   const loadJobHistory = useCallback(async () => {
     try {
@@ -159,6 +159,9 @@ export default function JobPage() {
     try {
       const resp = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, { method: "POST" })
       const data = await resp.json()
+      if (Array.isArray(data.cancelled_agent_task_ids) && data.cancelled_agent_task_ids.length) {
+        await abortCompanionAgentTasks(data.cancelled_agent_task_ids)
+      }
       if (data.cancelled) {
         toast.info("Job cancelled")
         setIsProcessing(false)
