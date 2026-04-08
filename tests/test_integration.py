@@ -34,9 +34,13 @@ MOCK_YOUTUBE_SEARCH_RESULT = [
         "video_id": "dQw4w9WgXcQ",
         "title": "Test Documentary",
         "channel_id": "UCtest123456789012345",
+        "channel_name": "Test Channel",
         "channel_title": "Test Channel",
         "published_at": "2025-01-01T00:00:00Z",
         "thumbnail_url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+        "duration_seconds": 600,
+        "view_count": 100000,
+        "channel_subscribers": 50000,
     }
 ]
 
@@ -276,15 +280,10 @@ class TestSearcherUsesSettings:
         })
         assert svc._get("max_candidates_per_segment") == 99
 
-    def test_backend_defaults_to_auto(self):
+    def test_get_falls_back_to_defaults(self):
         from app.services.searcher import SearcherService
         svc = SearcherService(pipeline_settings={})
-        assert svc._backend() == "auto"
-
-    def test_backend_from_settings(self):
-        from app.services.searcher import SearcherService
-        svc = SearcherService(pipeline_settings={"search_backend": "ytdlp_only"})
-        assert svc._backend() == "ytdlp_only"
+        assert svc._get("max_candidates_per_segment") == 15  # DEFAULTS value
 
 
 # ---------------------------------------------------------------------------
@@ -399,51 +398,49 @@ class TestRanker:
 class TestSearchDispatchers:
 
     @pytest.mark.asyncio
-    async def test_auto_uses_api_when_quota_ok(self):
+    async def test_dispatch_search_creates_agent_task(self):
+        """_dispatch_search routes through the agent queue."""
         from app.services.searcher import _dispatch_search
-        from app.utils.quota_tracker import QuotaTracker
+        from app.utils import agent_queue
 
-        mock_qt = QuotaTracker()
-        with patch("app.services.searcher.get_quota_tracker", return_value=mock_qt), \
-             patch("app.services.searcher.search_videos", new_callable=AsyncMock) as mock_sv:
-            mock_sv.return_value = MOCK_YOUTUBE_SEARCH_RESULT
-            results = await _dispatch_search("test", max_results=5, backend="auto")
+        with patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-1") as mock_create, \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=[{"video_id": "abc"}]):
+            results = await _dispatch_search("test query", max_results=5)
             assert len(results) == 1
-            mock_sv.assert_called_once()
-            assert mock_qt.stats["api_units_used"] == 100
+            assert results[0]["video_id"] == "abc"
+            mock_create.assert_called_once()
+            call_args = mock_create.call_args
+            assert call_args[0][0] == "search"
+            assert call_args[0][1]["query"] == "test query"
+            assert call_args[0][1]["max_results"] == 5
 
     @pytest.mark.asyncio
-    async def test_ytdlp_only_uses_agent(self):
-        from app.services.searcher import _dispatch_search
-        from app.utils.quota_tracker import QuotaTracker
+    async def test_dispatch_channel_search_creates_agent_task(self):
+        """_dispatch_channel_search routes through the agent queue."""
+        from app.services.searcher import _dispatch_channel_search
 
-        mock_qt = QuotaTracker()
-        with patch("app.services.searcher.get_quota_tracker", return_value=mock_qt), \
-             patch("app.services.searcher._search_via_agent", new_callable=AsyncMock) as mock_ag:
-            mock_ag.return_value = [{"video_id": "abc"}]
-            results = await _dispatch_search("test", max_results=5, backend="ytdlp_only")
+        with patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-2") as mock_create, \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=[{"video_id": "ch_vid"}]):
+            results = await _dispatch_channel_search("UC_test", "query", max_results=3)
             assert len(results) == 1
-            mock_ag.assert_called_once()
-            assert mock_qt.stats["ytdlp_searches_via_agent"] == 1
+            mock_create.assert_called_once()
+            call_args = mock_create.call_args
+            assert call_args[0][0] == "channel_search"
+            assert call_args[0][1]["channel_id"] == "UC_test"
 
     @pytest.mark.asyncio
-    async def test_auto_falls_back_on_quota_exceeded(self):
-        from app.services.searcher import _dispatch_search
-        from app.utils.youtube import YouTubeQuotaExceeded
-        from app.utils.quota_tracker import QuotaTracker
+    async def test_dispatch_video_details_creates_agent_task(self):
+        """_dispatch_video_details routes through the agent queue."""
+        from app.services.searcher import _dispatch_video_details
 
-        mock_qt = QuotaTracker()
-        with patch("app.services.searcher.get_quota_tracker", return_value=mock_qt), \
-             patch("app.services.searcher.search_videos", new_callable=AsyncMock) as mock_sv, \
-             patch("app.services.searcher._search_via_agent", new_callable=AsyncMock) as mock_ag:
-            mock_sv.side_effect = YouTubeQuotaExceeded("quota exceeded")
-            mock_ag.return_value = [{"video_id": "fallback"}]
-
-            results = await _dispatch_search("test", max_results=5, backend="auto")
+        with patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-3") as mock_create, \
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=MOCK_VIDEO_DETAILS):
+            results = await _dispatch_video_details(["vid1", "vid2"])
             assert len(results) == 1
-            assert results[0]["video_id"] == "fallback"
-            assert mock_qt.is_quota_exhausted
-            assert mock_qt.stats["ytdlp_searches_via_agent"] == 1
+            mock_create.assert_called_once()
+            call_args = mock_create.call_args
+            assert call_args[0][0] == "video_details"
+            assert call_args[0][1]["video_ids"] == ["vid1", "vid2"]
 
 
 # ---------------------------------------------------------------------------
@@ -467,13 +464,11 @@ class TestSearchForSegment:
 
         with patch("app.services.searcher._dispatch_channel_search", new_callable=AsyncMock) as mock_ch, \
              patch("app.services.searcher._dispatch_search", new_callable=AsyncMock) as mock_sv, \
-             patch("app.services.searcher._dispatch_video_details", new_callable=AsyncMock) as mock_vd, \
-             patch("app.services.searcher._dispatch_channel_stats", new_callable=AsyncMock) as mock_cs:
+             patch("app.services.searcher._dispatch_video_details", new_callable=AsyncMock) as mock_vd:
 
             mock_ch.return_value = MOCK_YOUTUBE_SEARCH_RESULT
             mock_sv.return_value = MOCK_YOUTUBE_SEARCH_RESULT
             mock_vd.return_value = MOCK_VIDEO_DETAILS
-            mock_cs.return_value = MOCK_CHANNEL_STATS
 
             svc = SearcherService(pipeline_settings={
                 "preferred_channels_tier1": ["UCtest123456789012345"],
@@ -585,15 +580,24 @@ class TestProgressTracking:
         assert len(p["activity_log"]) == 2
         _progress.clear()
 
-    def test_activity_log_capped(self):
-        from app.background import _log_activity, get_job_progress, _progress
-        _progress.clear()
-        _progress["test-job"] = {"activity_log": []}
-        for i in range(120):
-            _log_activity("test-job", "info", f"Entry {i}")
-        p = get_job_progress("test-job")
-        assert len(p["activity_log"]) == 100
-        _progress.clear()
+    def test_activity_log_compacted_for_storage(self):
+        """_compact_activity_log reduces oversized logs for DynamoDB storage."""
+        from app.background import _compact_activity_log
+        from datetime import datetime
+        log = []
+        for i in range(1000):
+            log.append({
+                "time": f"2026-01-01T00:00:{i:02d}Z",
+                "icon": "info",
+                "text": f"Entry {i}",
+                "depth": 2,
+                "group": "search",
+            })
+        compacted = _compact_activity_log(log, max_entries=100)
+        assert len(compacted) <= 100
+        # Below the cap, no compaction
+        small_log = log[:50]
+        assert len(_compact_activity_log(small_log, max_entries=100)) == 50
 
 
 # ---------------------------------------------------------------------------
@@ -720,11 +724,7 @@ class TestAgentRelayFlow:
     async def test_concurrent_segments_via_dispatchers(self):
         """Two segments searching concurrently via dispatchers both get results."""
         from app.services.searcher import _dispatch_search
-        from app.utils.quota_tracker import QuotaTracker
         from app.utils import agent_queue
-
-        mock_qt = QuotaTracker()
-        mock_qt.mark_quota_exhausted()
 
         async def fake_agent_consumer():
             """Simulates the browser agent loop — poll and submit results."""
@@ -732,16 +732,16 @@ class TestAgentRelayFlow:
                 await asyncio.sleep(0.05)
                 tasks = await agent_queue.poll_tasks("test-consumer", max_tasks=10)
                 for task in tasks:
-                    fake_results = [{"video_id": f"vid_{task['payload']['query'][:5]}"}]
+                    query_word = task['payload']['query'].split()[0]
+                    fake_results = [{"video_id": f"vid_{query_word}"}]
                     await agent_queue.submit_result(task["task_id"], "completed", fake_results)
 
         consumer = asyncio.create_task(fake_agent_consumer())
 
-        with patch("app.services.searcher.get_quota_tracker", return_value=mock_qt):
-            r1, r2 = await asyncio.gather(
-                _dispatch_search("alpha query", max_results=3, backend="ytdlp_only"),
-                _dispatch_search("beta query", max_results=3, backend="ytdlp_only"),
-            )
+        r1, r2 = await asyncio.gather(
+            _dispatch_search("alpha query", max_results=3, backend="ytdlp_only"),
+            _dispatch_search("beta query", max_results=3, backend="ytdlp_only"),
+        )
 
         consumer.cancel()
         try:
@@ -752,7 +752,7 @@ class TestAgentRelayFlow:
         assert len(r1) >= 1
         assert len(r2) >= 1
         assert r1[0]["video_id"] == "vid_alpha"
-        assert r2[0]["video_id"] == "vid_beta "
+        assert r2[0]["video_id"] == "vid_beta"
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +958,7 @@ class TestMatcherClipExtraction:
         from app.services.matcher import MatcherService
         from app.models.schemas import Segment
 
-        gpt_response = {
+        parsed_response = {
             "start_time_seconds": 120,
             "end_time_seconds": 165,
             "excerpt": "This is the relevant section about the topic...",
@@ -977,7 +977,7 @@ class TestMatcherClipExtraction:
             search_queries=["history documentary"],
         )
 
-        with patch.object(MatcherService, "_call_model", return_value=gpt_response):
+        with patch.object(MatcherService, "_route_call", new_callable=AsyncMock, return_value=parsed_response):
             matcher = MatcherService()
             result = await matcher.find_timestamp(
                 "0:00 This is a test transcript\n2:00 This is the relevant section about the topic",
@@ -1561,7 +1561,7 @@ class TestConfigWarningThresholds:
 
     def test_new_warning_thresholds_exist(self):
         from app.config import DEFAULTS
-        assert DEFAULTS["min_broll_per_segment"] == 0
+        assert "min_broll_per_segment" not in DEFAULTS
         assert DEFAULTS["warn_long_no_broll_sec"] == 180
         assert DEFAULTS["max_no_broll_gap_sec"] == 300
 
@@ -2062,10 +2062,10 @@ class TestFullPipelineMock:
         assert r.relevance_score > 0
 
     @pytest.mark.asyncio
-    async def test_pipeline_no_transcript_still_ranks(self):
-        """Even without transcript, the ranker should produce a fallback result."""
+    async def test_pipeline_no_transcript_skipped_by_ranker(self):
+        """A match with confidence=0 and no timestamp is correctly skipped by the ranker."""
         from app.models.schemas import (
-            CandidateVideo, MatchResult, Segment, TranscriptSource, Transcript,
+            CandidateVideo, MatchResult, Segment, TranscriptSource,
         )
         from app.services.ranker import RankerService
 
@@ -2089,12 +2089,51 @@ class TestFullPipelineMock:
             published_at="2025-01-01T00:00:00Z",
             view_count=50000,
         )
-        match = MatchResult(
+        # confidence=0 with no start_time is correctly filtered out
+        zero_match = MatchResult(
             confidence_score=0.0,
             source_flag=TranscriptSource.NONE,
         )
+        ranker = RankerService()
+        ranked = ranker.rank_and_filter([(candidate, zero_match)], segment)
+        assert len(ranked) == 0
 
+    @pytest.mark.asyncio
+    async def test_pipeline_low_confidence_with_timestamp_still_ranks(self):
+        """A match with low confidence but a valid timestamp can still produce a result."""
+        from app.models.schemas import (
+            CandidateVideo, MatchResult, Segment, TranscriptSource,
+        )
+        from app.services.ranker import RankerService
+
+        segment = Segment(
+            segment_id="seg_002",
+            title="Test Segment Low Confidence",
+            summary="Testing low confidence with timestamp.",
+            visual_need="any footage",
+            emotional_tone="neutral",
+            key_terms=["test"],
+            search_queries=["test search"],
+        )
+        candidate = CandidateVideo(
+            video_id="vid_low",
+            video_url="https://www.youtube.com/watch?v=vid_low",
+            video_title="Low Confidence Video",
+            channel_name="SomeChannel",
+            channel_id="UC_some",
+            thumbnail_url="",
+            video_duration_seconds=1800,
+            published_at="2025-01-01T00:00:00Z",
+            view_count=50000,
+        )
+        match = MatchResult(
+            start_time_seconds=60,
+            end_time_seconds=120,
+            confidence_score=0.15,
+            source_flag=TranscriptSource.YOUTUBE_AUTO,
+            context_match_valid=True,
+        )
         ranker = RankerService()
         ranked = ranker.rank_and_filter([(candidate, match)], segment)
         assert len(ranked) >= 1
-        assert ranked[0].video_id == "vid_no_tx"
+        assert ranked[0].video_id == "vid_low"
