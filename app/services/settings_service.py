@@ -48,6 +48,19 @@ class SettingsService:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, partial(fn, *args, **kwargs))
 
+    @staticmethod
+    def _from_dynamo(value: Any) -> Any:
+        """Convert DynamoDB Decimal back to int/float for JSON compatibility."""
+        if isinstance(value, Decimal):
+            if value == int(value):
+                return int(value)
+            return float(value)
+        if isinstance(value, dict):
+            return {k: SettingsService._from_dynamo(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [SettingsService._from_dynamo(v) for v in value]
+        return value
+
     async def get_all_settings(self) -> Dict[str, Any]:
         result = dict(DEFAULTS)
         try:
@@ -61,7 +74,7 @@ class SettingsService:
                             value = json.loads(value)
                         except (json.JSONDecodeError, TypeError):
                             pass
-                    result[key] = value
+                    result[key] = self._from_dynamo(value)
         except ClientError:
             logger.exception("Failed to fetch settings")
         return result
@@ -76,13 +89,24 @@ class SettingsService:
                 value = resp["Item"].get("setting_value")
                 if isinstance(value, str):
                     try:
-                        return json.loads(value)
+                        return self._from_dynamo(json.loads(value))
                     except (json.JSONDecodeError, TypeError):
                         return value
-                return value
+                return self._from_dynamo(value)
         except ClientError:
             logger.exception("Failed to fetch setting %s", key)
         return DEFAULTS.get(key)
+
+    @staticmethod
+    def _to_dynamo_safe(value: Any) -> Any:
+        """Convert floats to Decimal for DynamoDB compatibility."""
+        if isinstance(value, float):
+            return Decimal(str(value))
+        if isinstance(value, dict):
+            return {k: SettingsService._to_dynamo_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [SettingsService._to_dynamo_safe(v) for v in value]
+        return value
 
     async def update_setting(
         self, key: str, value: Any, editor_id: str = "system"
@@ -94,6 +118,8 @@ class SettingsService:
             stored = value
             if isinstance(value, (list, dict)):
                 stored = json.dumps(value)
+            elif isinstance(value, float):
+                stored = Decimal(str(value))
             await self._run(
                 self._table("settings").put_item,
                 Item={
@@ -104,7 +130,7 @@ class SettingsService:
                 },
             )
             return True
-        except ClientError:
+        except Exception:
             logger.exception("Failed to update setting %s", key)
             return False
 

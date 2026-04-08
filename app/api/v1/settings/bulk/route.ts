@@ -9,9 +9,18 @@ export async function PUT(request: NextRequest) {
       headers: backendHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     })
-    const data = await resp.json()
+    let data
+    try {
+      data = await resp.json()
+    } catch {
+      const text = await resp.text()
+      return NextResponse.json(
+        { detail: `Backend error: ${text.slice(0, 200)}` },
+        { status: resp.status || 502 },
+      )
+    }
     return NextResponse.json(data, { status: resp.status })
-  } catch (error) {
+  } catch {
     return NextResponse.json({ detail: "Backend unavailable" }, { status: 502 })
   }
 }
