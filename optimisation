@@ -567,20 +567,22 @@ Total: ~4-5 minutes
 ## Files to modify
 
 ### EC2 server
-- `background.py` — full restructure: dedup, two-stage streaming, Whisper parallel pipeline
-- `main.py` — update agent poll to return mixed task types
+- `background.py` — already has streaming search + transcript pipeline (`run_pipeline`). Still needs: global video dedup (Phase 2), Whisper parallel pipeline (caption-less videos processed concurrently with main matching)
+- `main.py` — agent poll endpoint already exists. Still needs: mixed task type batching (return search + match + whisper tasks in one poll response)
 
 ### Companion app
-- `companion.py` — add ThreadPoolExecutor-based routing for Ollama/Whisper/yt-dlp, add hardware detection, add concurrency config to health endpoint
+- `companion.py` — currently uses single-threaded Flask request handling. Needs: ThreadPoolExecutor-based routing for Ollama/Whisper/yt-dlp, hardware detection, concurrency config in health endpoint
+
+### Already changed (contextual search fix)
+- `schemas.py` — `ScriptContext` now has a `context_keywords: List[str]` field containing 8–15 ranked identity-bearing keywords extracted at translation time
+- `translator.py` — GPT-4o prompt updated to output `context_keywords` in `script_context`. Server-side TF-weighted keyword extraction fallback added (`_extract_keywords_from_text`) for when GPT-4o returns too few keywords
+- `searcher.py` — `contextualize_query` rewritten to use ranked `context_keywords` instead of naive topic-word overlap. Top-3 keywords are the anchors; if a query doesn't contain any of them, keyword #1 is prepended. `_GENERIC_WORDS` stoplist prevents false-positive anchoring on words like "elite", "network", "files"
 
 ### No changes needed
-- `translator.py` — segmentation is upstream of all this
 - `matcher.py` — same single-shot matching function, just called with better scheduling
-- `searcher.py` — same search logic, just called by the new pipeline orchestrator  
 - `transcriber.py` — same transcript fetch logic
 - `ranker.py` — same ranking logic, receives results from the new pipeline
 - `settings.py` — no new settings (concurrency is auto-detected from hardware)
-- `schemas.py` — no model changes
 
 ## Test by
 

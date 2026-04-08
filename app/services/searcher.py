@@ -39,20 +39,73 @@ SOURCE_TYPE_MODIFIERS = {
 }
 
 
+_GENERIC_WORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "be", "been", "with", "from", "by", "as",
+    "its", "it", "this", "that", "these", "those", "their", "they",
+    "not", "no", "has", "have", "had", "will", "would", "could", "should",
+    "about", "into", "between", "through", "during", "after", "before",
+    "global", "local", "new", "old", "big", "small", "great", "real",
+    "secret", "network", "elite", "files", "story", "inside", "world",
+    "documentary", "footage", "video", "clip", "full", "official",
+    "scene", "part", "episode", "season", "series", "stock", "broll",
+    "aerial", "drone", "cinematic", "visual", "visuals", "animation",
+    "timelapse", "interview", "news", "report", "coverage",
+})
+
+
+def _get_anchor_keywords(script_context: ScriptContext) -> list[str]:
+    """Return the top identity-bearing keywords for this script.
+
+    Uses context_keywords (ranked by GPT-4o + TF fallback) if available,
+    otherwise falls back to extracting from script_topic.
+    """
+    if script_context.context_keywords:
+        return script_context.context_keywords
+
+    # Legacy fallback: extract from script_topic
+    topic = script_context.script_topic
+    for sep in (" and ", " — ", " - ", ": "):
+        if sep in topic:
+            topic = topic.split(sep)[0]
+            break
+    words = [w for w in topic.split() if w.lower() not in _GENERIC_WORDS and len(w) > 2]
+    return words[:5] if words else topic.split()[:1]
+
+
+def _query_contains_anchor(query: str, anchor_keywords: list[str], top_n: int = 3) -> bool:
+    """Check if the query already contains at least one of the top-N anchor keywords."""
+    if not anchor_keywords:
+        return True
+    query_lower = query.lower()
+    for kw in anchor_keywords[:top_n]:
+        # Multi-word keywords: check as substring. Single words: word boundary.
+        kw_lower = kw.lower()
+        if " " in kw_lower:
+            if kw_lower in query_lower:
+                return True
+        else:
+            if kw_lower in query_lower:
+                return True
+    return False
+
+
 def contextualize_query(query: str, script_context: ScriptContext) -> str:
-    """Prepend script-level context to a search query if it lacks topic anchoring."""
+    """Ensure every search query is anchored to the script's core subject.
+
+    Uses ranked context_keywords from the script. The top keyword (position 0)
+    is the primary anchor — the single most distinctive identifier.
+    If the query already contains one of the top-3 keywords, it's considered
+    anchored. Otherwise, prepend the #1 keyword.
+    """
     if not script_context or not script_context.script_topic:
         return query
-    topic_words = set(script_context.script_topic.lower().split())
-    query_words = set(query.lower().split())
-    if topic_words.intersection(query_words):
+    anchor_keywords = _get_anchor_keywords(script_context)
+    if not anchor_keywords:
         return query
-    geo = script_context.geographic_scope
-    if geo:
-        anchor = geo.split(",")[0].strip()
-    else:
-        anchor = script_context.script_topic.split(" and ")[0].strip()
-    return f"{anchor} {query}"
+    if _query_contains_anchor(query, anchor_keywords, top_n=3):
+        return query
+    return f"{anchor_keywords[0]} {query}"
 
 
 def _is_indian_topic(script_context: Optional[ScriptContext]) -> bool:

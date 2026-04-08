@@ -1,6 +1,9 @@
 import asyncio
 import json
 import logging
+import math
+import re as _re
+from collections import Counter
 
 import httpx
 
@@ -9,6 +12,95 @@ from app.models.schemas import BRollShot, ScriptContext, Segment
 from app.utils.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
+
+
+# ── Server-side keyword extraction fallback ──────────────────────────────
+# Used when GPT-4o returns no context_keywords or too few.
+_STOPWORDS_EN = frozenset({
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "be", "been", "being", "with", "from",
+    "by", "as", "its", "it", "this", "that", "these", "those", "their",
+    "they", "them", "he", "she", "him", "her", "his", "we", "us", "our",
+    "you", "your", "not", "no", "has", "have", "had", "will", "would",
+    "could", "should", "may", "might", "shall", "can", "do", "does", "did",
+    "about", "into", "between", "through", "during", "after", "before",
+    "also", "but", "if", "then", "than", "when", "where", "who", "what",
+    "which", "how", "why", "more", "most", "very", "just", "only", "even",
+    "so", "all", "each", "every", "both", "any", "some", "many", "much",
+    "such", "own", "other", "new", "old", "one", "two", "three", "first",
+    "last", "long", "great", "little", "own", "same", "big", "high", "small",
+    "large", "next", "early", "young", "important", "few", "public", "bad",
+    "same", "able", "video", "footage", "documentary", "story", "network",
+    "elite", "secret", "mystery", "real", "world", "global", "local",
+    "inside", "behind", "files", "part", "full", "time", "year", "years",
+    "people", "man", "woman", "way", "day", "thing", "life", "said",
+    "know", "like", "come", "make", "take", "want", "give", "use", "find",
+    "tell", "ask", "work", "seem", "feel", "try", "leave", "call",
+    "need", "become", "keep", "let", "begin", "show", "hear", "play",
+    "run", "move", "live", "believe", "bring", "happen", "write", "sit",
+    "stand", "lose", "pay", "meet", "include", "continue", "set", "learn",
+    "change", "lead", "understand", "watch", "follow", "stop", "create",
+    "speak", "read", "allow", "add", "spend", "grow", "open", "walk",
+    "win", "offer", "remember", "love", "consider", "appear", "buy",
+    "wait", "serve", "die", "send", "expect", "build", "stay", "fall",
+    "cut", "reach", "kill", "remain", "however", "still", "back", "here",
+    "there", "now", "over", "well", "really", "already", "around", "never",
+    "always", "often", "ever", "away", "again", "look", "point", "being",
+    "went", "going", "got", "get", "made", "see", "seen", "says",
+})
+
+
+def _extract_keywords_from_text(text: str, top_n: int = 15) -> list[str]:
+    """Extract the most important keywords from translated text using TF weighting
+    with a strong bias toward capitalized words (likely proper nouns).
+
+    Returns up to *top_n* keywords sorted by importance.
+    """
+    words = _re.findall(r"[A-Za-z][A-Za-z'-]*[A-Za-z]|[A-Za-z]", text)
+    if not words:
+        return []
+
+    total = len(words)
+    freq: Counter = Counter()
+    cap_freq: Counter = Counter()
+
+    for w in words:
+        low = w.lower()
+        if low in _STOPWORDS_EN or len(low) < 3:
+            continue
+        freq[low] += 1
+        if w[0].isupper():
+            cap_freq[w] += 1
+
+    if not freq:
+        return []
+
+    # Score = tf * capital_boost
+    # Capitalized words (proper nouns) get 3x boost
+    scores: dict[str, float] = {}
+    for word, count in freq.items():
+        tf = count / total
+        scores[word] = tf
+
+    # Merge capitalized forms: prefer the capitalized version
+    final: dict[str, float] = {}
+    used_lower: set[str] = set()
+    # First pass: capitalized words
+    for cap_word, count in cap_freq.most_common():
+        low = cap_word.lower()
+        if low in used_lower:
+            continue
+        used_lower.add(low)
+        base_score = scores.get(low, 0)
+        final[cap_word] = base_score * 3.0
+
+    # Second pass: remaining non-capitalized but frequent words
+    for word, score in scores.items():
+        if word not in used_lower:
+            final[word] = score
+
+    ranked = sorted(final.items(), key=lambda x: -x[1])
+    return [word for word, _ in ranked[:top_n]]
 
 SYSTEM_PROMPT = """You are the Viral B-Roll Scout — a specialist in digital storytelling and YouTube retention for a Tamil-language documentary channel.
 
@@ -22,6 +114,12 @@ Do the following in one response:
    - geographic_scope: Specific regions/countries relevant (e.g., "Andaman Islands, Bay of Bengal, India")
    - temporal_scope: Time period covered (e.g., "prehistoric to present day, with focus on 2018 incident")
    - exclusion_context: What this video is NOT about — topics that share keywords but are unrelated (e.g., "NOT about mainland Indian forests, NOT about wildlife reserves, NOT about tourism destinations")
+   - context_keywords: An ordered list of 8–15 keywords/phrases that DEFINE this script's identity, ranked by importance. These are the terms that MUST appear in YouTube search queries to keep results on-topic. Rules:
+       * Position 1–3: The MOST distinctive proper nouns or names — the words that, if missing from a query, would return completely wrong results. (e.g., for a script about Jeffrey Epstein: ["Epstein", "Jeffrey Epstein", "Ghislaine Maxwell"]. For Sentinel Island: ["Sentinel Island", "Sentinelese", "North Sentinel"])
+       * Position 4–8: Important people, places, organizations, or events mentioned repeatedly (e.g., "Little St. James Island", "Bill Clinton", "Prince Andrew")
+       * Position 9+: Supporting terms that add specificity (e.g., "sex trafficking", "plea deal", "FBI investigation")
+       * NEVER include generic words like "elite", "network", "secret", "mystery", "story", "documentary", "footage", "investigation" — these match thousands of unrelated videos
+       * Each entry should be a proper noun, specific name, or highly specific concept — the kind of word that narrows YouTube results to THIS script's topic
 
 3. Break the English translation into segments based on NATURAL narrative shifts.
    Do NOT force one segment per minute. Some sections naturally run 2-3 minutes
@@ -204,19 +302,42 @@ class TranslatorService:
         english_translation = data.get("english_translation", "")
 
         ctx_raw = data.get("script_context", {})
+        gpt_keywords = ctx_raw.get("context_keywords", [])
+        if not isinstance(gpt_keywords, list):
+            gpt_keywords = []
+
+        # Fallback: if GPT-4o returned fewer than 5 keywords, extract from text
+        MIN_KEYWORDS = 5
+        if len(gpt_keywords) < MIN_KEYWORDS and english_translation:
+            extracted = _extract_keywords_from_text(english_translation, top_n=15)
+            # Merge: GPT keywords first (they're higher quality), then fill with extracted
+            seen_lower = {kw.lower() for kw in gpt_keywords}
+            for kw in extracted:
+                if kw.lower() not in seen_lower:
+                    gpt_keywords.append(kw)
+                    seen_lower.add(kw.lower())
+                if len(gpt_keywords) >= 15:
+                    break
+            logger.info(
+                "context_keywords supplemented by TF extraction: %d total keywords",
+                len(gpt_keywords),
+            )
+
         script_context = ScriptContext(
             script_topic=ctx_raw.get("script_topic", ""),
             script_domain=ctx_raw.get("script_domain", ""),
             geographic_scope=ctx_raw.get("geographic_scope", ""),
             temporal_scope=ctx_raw.get("temporal_scope", ""),
             exclusion_context=ctx_raw.get("exclusion_context", ""),
+            context_keywords=gpt_keywords,
         )
 
         logger.info(
-            "Translation complete: %d segments, ~%d min script, topic=%s",
+            "Translation complete: %d segments, ~%d min script, topic=%s, keywords=%s",
             len(segments),
             estimated_minutes,
             script_context.script_topic[:80],
+            script_context.context_keywords[:5],
         )
         return segments, english_translation, script_context
 

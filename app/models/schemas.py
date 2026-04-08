@@ -155,6 +155,7 @@ class ScriptContext(BaseModel):
     geographic_scope: str = ""
     temporal_scope: str = ""
     exclusion_context: str = ""
+    context_keywords: List[str] = Field(default_factory=list)
 
 
 class BRollShot(BaseModel):
