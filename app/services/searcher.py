@@ -91,6 +91,21 @@ def _set_cached_search(key: str, results: list[dict]) -> None:
     _search_cache[key] = (time.time(), results)
 
 
+def _is_portrait_aspect_ratio_9_16(width: int, height: int, tolerance: float) -> bool:
+    """True when display size matches ~9:16 portrait (typical YouTube Shorts).
+
+    Landscape and square are False. Other tall ratios (e.g. 4:5, 3:4) are False so
+    vertical clips that are not Shorts-shaped can still be candidates.
+    """
+    if width <= 0 or height <= 0:
+        return False
+    if height <= width:
+        return False
+    ratio = width / height
+    target = 9.0 / 16.0
+    return abs(ratio - target) <= tolerance
+
+
 # ---------------------------------------------------------------------------
 # Dispatchers — all searches go through the local yt-dlp companion agent
 # ---------------------------------------------------------------------------
@@ -152,6 +167,19 @@ class SearcherService:
             return self._pipeline[key]
         return DEFAULTS.get(key)
 
+    def _should_exclude_shorts_9_16_aspect(self, width: int, height: int) -> bool:
+        """Exclude candidates whose resolution matches portrait ~9:16 (YouTube Shorts shape)."""
+        flag = self._get("filter_9_16_shorts")
+        if flag is False:
+            return False
+        tol_raw = self._get("shorts_9_16_aspect_tolerance")
+        try:
+            tol = float(tol_raw)
+        except (TypeError, ValueError):
+            tol = float(DEFAULTS["shorts_9_16_aspect_tolerance"])
+        if tol <= 0:
+            tol = float(DEFAULTS["shorts_9_16_aspect_tolerance"])
+        return _is_portrait_aspect_ratio_9_16(width, height, tol)
 
     def _build_blocked_channel_ids(self) -> set[str]:
         sources = self._get("channel_sources") or []
@@ -200,8 +228,8 @@ class SearcherService:
         tier1_ids = list(tier1_channel_ids | set(old_tier1_ids))
         results_per_query: int = self._get("youtube_results_per_query") or 8
         max_candidates: int = self._get("max_candidates_per_segment") or 15
-        min_duration: int = self._get("min_video_duration_sec") or 30
-        max_duration: int = self._get("max_video_duration_sec") or 5400
+        min_duration: int = int(self._get("min_video_duration_sec") or DEFAULTS["min_video_duration_sec"])
+        max_duration: int = int(self._get("max_video_duration_sec") or DEFAULTS["max_video_duration_sec"])
 
         all_video_ids: list[str] = []
         search_metadata: dict[str, dict] = {}
@@ -297,7 +325,7 @@ class SearcherService:
         seen_ids: set[str] = set()
         blocked_count = 0
         duration_filtered = 0
-        vertical_filtered = 0
+        shorts_aspect_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -310,10 +338,10 @@ class SearcherService:
                 duration_filtered += 1
                 continue
 
-            w = v.get("width") or 0
-            h = v.get("height") or 0
-            if w > 0 and h > 0 and h > w:
-                vertical_filtered += 1
+            w = int(v.get("width") or 0)
+            h = int(v.get("height") or 0)
+            if self._should_exclude_shorts_9_16_aspect(w, h):
+                shorts_aspect_filtered += 1
                 continue
 
             ch_id = v.get("channel_id", "")
@@ -346,8 +374,8 @@ class SearcherService:
         filter_notes = []
         if duration_filtered:
             filter_notes.append(f"{duration_filtered} too short/long")
-        if vertical_filtered:
-            filter_notes.append(f"{vertical_filtered} vertical/shorts")
+        if shorts_aspect_filtered:
+            filter_notes.append(f"{shorts_aspect_filtered} ~9:16 shorts-shaped")
         if blocked_count:
             filter_notes.append(f"{blocked_count} from blocked channels")
         filter_text = f" (removed {', '.join(filter_notes)})" if filter_notes else ""
@@ -378,8 +406,8 @@ class SearcherService:
 
         configured_per_query: int = self._get("youtube_results_per_query") or 8
         max_candidates: int = self._get("max_candidates_per_shot") or 12
-        min_duration: int = self._get("min_video_duration_sec") or 30
-        max_duration: int = self._get("max_video_duration_sec") or 5400
+        min_duration: int = int(self._get("min_video_duration_sec") or DEFAULTS["min_video_duration_sec"])
+        max_duration: int = int(self._get("max_video_duration_sec") or DEFAULTS["max_video_duration_sec"])
 
         all_video_ids: list[str] = []
         search_metadata: dict[str, dict] = {}
@@ -472,6 +500,7 @@ class SearcherService:
 
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
+        shorts_aspect_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -483,9 +512,10 @@ class SearcherService:
             if duration < min_duration or duration > max_duration:
                 continue
 
-            w = v.get("width") or 0
-            h = v.get("height") or 0
-            if w > 0 and h > 0 and h > w:
+            w = int(v.get("width") or 0)
+            h = int(v.get("height") or 0)
+            if self._should_exclude_shorts_9_16_aspect(w, h):
+                shorts_aspect_filtered += 1
                 continue
 
             ch_id = v.get("channel_id", "")
@@ -518,7 +548,8 @@ class SearcherService:
 
             candidates.sort(key=lambda c: (_exclusion_score(c), -c.view_count))
 
-        await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"", depth=3)
+        aspect_note = f", {shorts_aspect_filtered} ~9:16 excluded" if shorts_aspect_filtered else ""
+        await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"{aspect_note}", depth=3)
         return candidates[:max_candidates]
 
     async def search_batch(

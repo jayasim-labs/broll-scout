@@ -32,6 +32,10 @@ _usage_task: asyncio.Task | None = None
 async def lifespan(app: FastAPI):
     global _usage_task
     await _cleanup_stale_jobs()
+    try:
+        await get_settings_service().migrate_min_video_duration_to_current_default()
+    except Exception:
+        logger.exception("min_video_duration_sec DynamoDB migration skipped")
     _usage_task = asyncio.create_task(_usage_recalc_loop())
     yield
     if _usage_task:

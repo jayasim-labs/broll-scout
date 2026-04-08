@@ -344,6 +344,10 @@ export interface PipelineSettings {
   // Video filtering & ranking
   min_video_duration_sec: number
   max_video_duration_sec: number
+  /** Exclude ~9:16 portrait (YouTube Shorts shape); not all vertical video */
+  filter_9_16_shorts: boolean
+  /** Allowed deviation of width/height from 9/16 (e.g. 0.06) */
+  shorts_9_16_aspect_tolerance: number
   prefer_min_subscribers: number
   recency_full_score_years: number
   weight_ai_confidence: number

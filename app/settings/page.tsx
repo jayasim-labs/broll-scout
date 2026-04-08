@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import type { PipelineSettings, ChannelEntry } from "@/lib/types"
+import { DEFAULT_MIN_VIDEO_DURATION_SEC } from "@/lib/pipeline-defaults"
 
 const API = "/api/v1"
 
@@ -672,19 +673,20 @@ function BlockedTab({
 function SliderSetting({
   label, value, min, max, step = 1, onChange, unit = "", help,
 }: {
-  label: string; value: number; min: number; max: number; step?: number;
+  label: string; value: number | undefined; min: number; max: number; step?: number;
   onChange: (v: number) => void; unit?: string; help?: string
 }) {
+  const safe = typeof value === "number" && !Number.isNaN(value) ? value : 0
   return (
     <div className="space-y-1.5">
       <div className="flex justify-between text-sm">
         <Label>{label}</Label>
         <span className="font-mono text-muted-foreground tabular-nums">
-          {Number.isInteger(step) ? value : value.toFixed(2)}{unit}
+          {Number.isInteger(step) ? safe : safe.toFixed(2)}{unit}
         </span>
       </div>
       <Slider
-        value={[value]}
+        value={[safe]}
         min={min} max={max} step={step}
         onValueChange={(v) => onChange(v[0])}
       />
@@ -698,11 +700,15 @@ function SliderSetting({
 function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
   const normalizeWeights = (key: string, newVal: number) => {
     const keys = [
-      "weight_ai_confidence", "weight_keyword_density", "weight_viral_score",
+      "weight_ai_confidence", "weight_fit_score", "weight_viral_score",
       "weight_channel_authority", "weight_caption_quality", "weight_recency",
-    ]
+      "weight_context_relevance",
+    ] as const
     const current: Record<string, number> = {}
-    keys.forEach((k) => (current[k] = (settings as Record<string, unknown>)[k] as number || 0))
+    keys.forEach((k) => {
+      const raw = (settings as Record<string, unknown>)[k]
+      current[k] = typeof raw === "number" && !Number.isNaN(raw) ? raw : 0
+    })
     current[key] = newVal
     const total = Object.values(current).reduce((a, b) => a + b, 0)
     if (total > 0) {
@@ -854,12 +860,33 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
           <SliderSetting
             label="Min video duration" value={settings.min_video_duration_sec} min={30} max={600}
             onChange={(v) => onChange("min_video_duration_sec", v)} unit="s"
-            help="Videos shorter than this are excluded. Filters out trailers, teasers, and short-form content that rarely have useful B-roll. Default 120s (2 min)."
+            help={
+              `Videos shorter than this are excluded (trailers, shorts, etc.). ` +
+              `Backend default is ${DEFAULT_MIN_VIDEO_DURATION_SEC}s (2 min); DynamoDB entries still at 30s are auto-upgraded on API restart. ` +
+              `Run python scripts/sync_min_video_duration_dynamo.py if you need to force-sync.`
+            }
           />
           <SliderSetting
             label="Max video duration" value={settings.max_video_duration_sec} min={600} max={10800} step={300}
             onChange={(v) => onChange("max_video_duration_sec", v)} unit="s"
             help="Videos longer than this are excluded. Filters out extremely long livestreams and multi-hour content. Default 5400s (90 min)."
+          />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Exclude ~9:16 Shorts-shaped video</Label>
+              <Switch
+                checked={settings.filter_9_16_shorts ?? true}
+                onCheckedChange={(v) => onChange("filter_9_16_shorts", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 leading-tight">
+              Uses yt-dlp width/height: drops portrait clips whose aspect is close to 9:16 (typical YouTube Shorts). Other tall formats (e.g. 4:5) are kept, so this targets Shorts more than a generic “vertical” rule. Turn off if you need Shorts as B-roll.
+            </p>
+          </div>
+          <SliderSetting
+            label="9:16 detection tolerance" value={settings.shorts_9_16_aspect_tolerance ?? 0.06} min={0.02} max={0.12} step={0.01}
+            onChange={(v) => onChange("shorts_9_16_aspect_tolerance", v)}
+            help="How strictly width÷height must match 9÷16. Lower = only near-perfect Shorts; higher = slightly wider/narrower portrait still excluded."
           />
           <SliderSetting
             label="Prefer channels with min subscribers" value={settings.prefer_min_subscribers} min={0} max={100000} step={1000}
@@ -877,55 +904,62 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Ranking Weights</CardTitle>
-          <p className="text-xs text-muted-foreground">Each clip is scored across 5 dimensions. Adjust weights to prioritize what matters most for your editing style. Weights auto-normalize to sum to 1.0.</p>
+          <p className="text-xs text-muted-foreground">Each clip is scored across seven dimensions. Adjust weights, then save — values auto-normalize to sum to 1.0.</p>
         </CardHeader>
         <CardContent className="space-y-4">
           <SliderSetting
-            label="AI confidence (GPT-4o-mini)" value={settings.weight_ai_confidence} min={0} max={1} step={0.05}
+            label="AI confidence (matcher)" value={settings.weight_ai_confidence} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_ai_confidence", v)}
-            help="The confidence score from GPT-4o-mini's transcript analysis — how well the clip matches the scene's visual need. This is the most important signal; keep it highest."
+            help="Confidence from the timestamp matcher (transcript fit). Usually the strongest signal for clip quality."
           />
           <SliderSetting
-            label="Keyword density" value={settings.weight_keyword_density} min={0} max={1} step={0.05}
-            onChange={(v) => normalizeWeights("weight_keyword_density", v)}
-            help="How many of the scene's key terms appear in the clip's transcript. High weight = prefer clips that are topically on-point."
+            label="Visual / topical fit" value={settings.weight_fit_score} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_fit_score", v)}
+            help="Intent-weighted visual_fit and topical_fit from matching — how well the clip matches the shot visually and by topic."
           />
           <SliderSetting
             label="View count (viral)" value={settings.weight_viral_score} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_viral_score", v)}
-            help="Tiers: >1M views = 1.0, >100K = 0.8, >10K = 0.5, below = 0.2. High weight = prefer popular, well-produced videos."
+            help="Tiers: &gt;1M views = 1.0, &gt;100K = 0.8, &gt;10K = 0.5, below = 0.2."
           />
           <SliderSetting
             label="Channel authority" value={settings.weight_channel_authority} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_channel_authority", v)}
-            help="Tier 1 preferred = 1.0, Tier 2 = 0.9, >100K subs = 0.7, above min threshold = 0.5, below = 0.3. High weight = prefer trusted channels."
+            help="Tier 1 preferred = 1.0, Tier 2 = 0.9, subscriber tiers below."
           />
           <SliderSetting
             label="Caption quality" value={settings.weight_caption_quality} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_caption_quality", v)}
-            help="Manual captions = 1.0, auto-captions = 0.8, Whisper = 0.6, none = 0.3. Higher quality captions mean more accurate timestamp detection."
+            help="Manual captions = 1.0, auto = 0.8, Whisper = 0.6, none = 0.3."
           />
           <SliderSetting
             label="Recency" value={settings.weight_recency} min={0} max={1} step={0.05}
             onChange={(v) => normalizeWeights("weight_recency", v)}
-            help="Based on publish date vs 'Full recency score' setting above. High weight = prefer newer content. Set low for historical/archival projects."
+            help="Based on publish date vs &apos;Full recency score&apos; setting above."
+          />
+          <SliderSetting
+            label="Script context relevance" value={settings.weight_context_relevance} min={0} max={1} step={0.05}
+            onChange={(v) => normalizeWeights("weight_context_relevance", v)}
+            help="How well the video title aligns with script topic / geography (light keyword overlap signal)."
           />
 
-          <div className="flex gap-1 h-6 mt-2">
-            <div className="bg-cyan-500 rounded-l" style={{ width: `${settings.weight_ai_confidence * 100}%` }} title="AI Confidence" />
-            <div className="bg-blue-500" style={{ width: `${settings.weight_keyword_density * 100}%` }} title="Keyword" />
-            <div className="bg-green-500" style={{ width: `${settings.weight_viral_score * 100}%` }} title="Viral" />
-            <div className="bg-yellow-500" style={{ width: `${settings.weight_channel_authority * 100}%` }} title="Authority" />
-            <div className="bg-purple-500" style={{ width: `${settings.weight_caption_quality * 100}%` }} title="Caption" />
-            <div className="bg-red-500 rounded-r" style={{ width: `${settings.weight_recency * 100}%` }} title="Recency" />
+          <div className="flex gap-px h-6 mt-2 rounded overflow-hidden">
+            <div className="bg-cyan-500" style={{ width: `${(settings.weight_ai_confidence ?? 0) * 100}%` }} title="AI confidence" />
+            <div className="bg-blue-500" style={{ width: `${(settings.weight_fit_score ?? 0) * 100}%` }} title="Fit score" />
+            <div className="bg-green-500" style={{ width: `${(settings.weight_viral_score ?? 0) * 100}%` }} title="Viral" />
+            <div className="bg-yellow-500" style={{ width: `${(settings.weight_channel_authority ?? 0) * 100}%` }} title="Authority" />
+            <div className="bg-purple-500" style={{ width: `${(settings.weight_caption_quality ?? 0) * 100}%` }} title="Caption" />
+            <div className="bg-red-500" style={{ width: `${(settings.weight_recency ?? 0) * 100}%` }} title="Recency" />
+            <div className="bg-orange-500" style={{ width: `${(settings.weight_context_relevance ?? 0) * 100}%` }} title="Context" />
           </div>
           <div className="flex flex-wrap text-xs text-muted-foreground gap-3">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-cyan-500 rounded-full" />AI Confidence</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full" />Keyword</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-cyan-500 rounded-full" />AI confidence</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full" />Fit</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500 rounded-full" />Viral</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-yellow-500 rounded-full" />Authority</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-purple-500 rounded-full" />Caption</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-full" />Recency</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-orange-500 rounded-full" />Context</span>
           </div>
         </CardContent>
       </Card>

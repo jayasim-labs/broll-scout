@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -428,10 +429,71 @@ class SettingsService:
 
         return len(new_entries)
 
+    # Legacy default before min duration was raised to 120s (keep in sync with git history).
+    _LEGACY_MIN_VIDEO_DURATION_SEC = 30
+
+    async def migrate_min_video_duration_to_current_default(self, force: bool = False) -> bool:
+        """Align DynamoDB ``min_video_duration_sec`` with :data:`app.config.DEFAULTS`.
+
+        - With ``force=False`` (e.g. on API startup): only updates when the stored
+          value is still the old default (30), so custom values are preserved.
+        - With ``force=True``: always writes the current code default (use with care).
+
+        Returns True if a row was written.
+        """
+        target = int(DEFAULTS["min_video_duration_sec"])
+        if force:
+            return await self.update_setting(
+                "min_video_duration_sec", target, editor_id="system_default_sync",
+            )
+
+        try:
+            resp = await self._run(
+                self._table("settings").get_item,
+                Key={"setting_key": "min_video_duration_sec"},
+            )
+            item = resp.get("Item")
+            if item is None:
+                return False
+            raw = item.get("setting_value")
+            if isinstance(raw, str):
+                try:
+                    current = int(json.loads(raw))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    try:
+                        current = int(raw)
+                    except (TypeError, ValueError):
+                        return False
+            elif isinstance(raw, Decimal):
+                current = int(raw)
+            else:
+                try:
+                    current = int(raw)
+                except (TypeError, ValueError):
+                    return False
+
+            if current == self._LEGACY_MIN_VIDEO_DURATION_SEC and current != target:
+                ok = await self.update_setting(
+                    "min_video_duration_sec", target, editor_id="system_default_sync",
+                )
+                if ok:
+                    logger.info(
+                        "Updated min_video_duration_sec in DynamoDB: %s -> %s",
+                        current, target,
+                    )
+                return ok
+        except ClientError:
+            logger.exception("migrate_min_video_duration_to_current_default: DynamoDB read failed")
+        except Exception:
+            logger.exception("migrate_min_video_duration_to_current_default failed")
+        return False
+
     def _validate_setting(self, key: str, value: Any) -> bool:
         weight_keys = {
-            "weight_ai_confidence", "weight_keyword_density", "weight_viral_score",
+            "weight_ai_confidence", "weight_fit_score",
+            "weight_viral_score",
             "weight_channel_authority", "weight_caption_quality", "weight_recency",
+            "weight_context_relevance",
         }
         if key in weight_keys:
             try:
@@ -451,6 +513,24 @@ class SettingsService:
             for ch in value:
                 if isinstance(ch, str) and not ch.startswith("UC"):
                     return False
+
+        if key == "min_video_duration_sec":
+            try:
+                v = int(value)
+                return 30 <= v <= 600
+            except (TypeError, ValueError):
+                return False
+
+        if key == "filter_9_16_shorts":
+            return value is True or value is False
+
+        if key == "shorts_9_16_aspect_tolerance":
+            try:
+                v = float(value)
+                return 0.02 <= v <= 0.15
+            except (TypeError, ValueError):
+                return False
+
         return True
 
     @staticmethod

@@ -652,8 +652,32 @@ class TestSearcherMultilingual:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 12. Searcher — search cache
+# 11b. Searcher — 9:16 Shorts aspect filter
 # ═══════════════════════════════════════════════════════════════════════════
+
+class TestShorts9_16Aspect:
+
+    def test_classic_shorts_resolution(self):
+        from app.config import DEFAULTS
+        from app.services.searcher import _is_portrait_aspect_ratio_9_16
+        tol = float(DEFAULTS["shorts_9_16_aspect_tolerance"])
+        assert _is_portrait_aspect_ratio_9_16(1080, 1920, tol)
+        assert _is_portrait_aspect_ratio_9_16(720, 1280, tol)
+
+    def test_landscape_not_shorts_shape(self):
+        from app.services.searcher import _is_portrait_aspect_ratio_9_16
+        tol = 0.06
+        assert not _is_portrait_aspect_ratio_9_16(1920, 1080, tol)
+
+    def test_vertical_4_5_not_treated_as_9_16(self):
+        from app.services.searcher import _is_portrait_aspect_ratio_9_16
+        tol = 0.06
+        assert not _is_portrait_aspect_ratio_9_16(1080, 1350, tol)
+
+    def test_searcher_respects_toggle_off(self):
+        from app.services.searcher import SearcherService
+        svc = SearcherService(pipeline_settings={"filter_9_16_shorts": False})
+        assert not svc._should_exclude_shorts_9_16_aspect(1080, 1920)
 
 class TestSearchCache:
 
