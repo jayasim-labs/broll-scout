@@ -11,9 +11,9 @@ from app.models.schemas import (
 logger = logging.getLogger(__name__)
 
 SCARCITY_THRESHOLDS = {
-    Scarcity.COMMON: 0.40,
-    Scarcity.MEDIUM: 0.30,
-    Scarcity.RARE: 0.20,
+    Scarcity.COMMON: 0.30,
+    Scarcity.MEDIUM: 0.25,
+    Scarcity.RARE: 0.15,
 }
 
 INTENT_WEIGHTS = {

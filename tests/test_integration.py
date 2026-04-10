@@ -283,7 +283,7 @@ class TestSearcherUsesSettings:
     def test_get_falls_back_to_defaults(self):
         from app.services.searcher import SearcherService
         svc = SearcherService(pipeline_settings={})
-        assert svc._get("max_candidates_per_segment") == 15  # DEFAULTS value
+        assert svc._get("max_candidates_per_segment") == 20  # DEFAULTS value
 
 
 # ---------------------------------------------------------------------------

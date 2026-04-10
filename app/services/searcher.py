@@ -639,7 +639,7 @@ class SearcherService:
             multilingual = _generate_multilingual_queries(queries[0], script_context)
             queries.extend(multilingual[1:])
 
-        results_per_query = min(configured_per_query, max(3, 20 // max(len(queries), 1)))
+        results_per_query = min(configured_per_query, max(5, 30 // max(len(queries), 1)))
 
         short_need = shot.visual_need[:50]
         await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries ({results_per_query} results each)", depth=3)

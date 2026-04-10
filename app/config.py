@@ -29,9 +29,9 @@ def get_settings() -> Settings:
 
 DEFAULTS = {
     # Search
-    "youtube_results_per_query": 8,
-    "max_candidates_per_segment": 15,
-    "max_candidates_per_shot": 12,
+    "youtube_results_per_query": 12,
+    "max_candidates_per_segment": 20,
+    "max_candidates_per_shot": 20,
 
     # Segmentation quality checks (internal, not exposed in UI)
     "warn_long_no_broll_sec": 180,
@@ -45,8 +45,8 @@ DEFAULTS = {
     "api_fallback_enabled": False,
     "lightweight_model": "gpt-4o-mini",
     "confidence_threshold": 0.15,
-    "top_results_per_shot": 2,
-    "top_results_per_segment": 2,
+    "top_results_per_shot": 3,
+    "top_results_per_segment": 3,
     "whisper_max_video_duration_min": 60,
     "avg_whisper_processing_sec": 45,
     "transcript_excerpt_max_words": 200,

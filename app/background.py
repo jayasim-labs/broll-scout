@@ -597,7 +597,7 @@ async def run_pipeline(
         # --- Re-search pass: failure-mode-aware, 2-attempt cap ---
         from app.models.schemas import AuditStatus, Scarcity, ShotIntent
         RESEARCH_THRESHOLD = 0.5
-        MAX_RESEARCH_ATTEMPTS = 2
+        MAX_RESEARCH_ATTEMPTS = 3
         STOCK_SUGGESTIONS = {
             "pexels": "https://www.pexels.com/search/videos/",
             "pixabay": "https://pixabay.com/videos/search/",
@@ -682,7 +682,7 @@ async def run_pipeline(
                             continue
 
                         matched_new = await _match_candidates(
-                            new_cands[:5], seg, matcher, transcriber, job_id,
+                            new_cands[:8], seg, matcher, transcriber, job_id,
                             max_concurrent_candidates,
                             script_context=script_context,
                             shot=alt_shot,
