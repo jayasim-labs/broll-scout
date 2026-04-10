@@ -787,6 +787,18 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
                   onCheckedChange={(v) => onChange("api_fallback_enabled", v)}
                 />
               </div>
+              <div className="flex items-center justify-between mt-3 p-2.5 rounded-md border border-amber-500/20 bg-amber-500/5">
+                <div>
+                  <Label className="text-sm">Zero-confidence rescue (GPT-4o-mini)</Label>
+                  <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+                    When the local model returns confidence 0 (couldn&apos;t find a match), retry with GPT-4o-mini which may find valid timestamps the local model missed. Unlike full API fallback, this only fires on zero-confidence — context mismatches from Ollama are still trusted. Costs ~$0.001 per rescue attempt.
+                  </p>
+                </div>
+                <Switch
+                  checked={!!settings.confident_fallback_enabled}
+                  onCheckedChange={(v) => onChange("confident_fallback_enabled", v)}
+                />
+              </div>
             </div>
             <div>
               <Label className="text-sm">Local LLM model</Label>

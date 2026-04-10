@@ -143,12 +143,6 @@ class RankerService:
 
         scored.sort(key=lambda x: x[2], reverse=True)
 
-        # Early stopping: for common shots, if 3+ candidates above 0.75, take top_n immediately
-        if scarcity == Scarcity.COMMON:
-            above_75 = [s for s in scored if s[2] >= 0.75]
-            if len(above_75) >= 3:
-                scored = above_75
-
         if threshold > 0:
             above = [s for s in scored if s[2] >= threshold]
             if above:
@@ -283,14 +277,36 @@ class RankerService:
     ) -> float:
         if not script_context or not script_context.script_topic:
             return 0.5
+
+        title_lower = cand.video_title.lower()
+        title_words = set(title_lower.split())
+
         topic_words = set(script_context.script_topic.lower().split())
-        title_words = set(cand.video_title.lower().split())
-        if topic_words.intersection(title_words):
+        if topic_words & title_words:
             return 1.0
+
+        context_kw = script_context.context_keywords or []
+        for kw in context_kw:
+            if kw.lower() in title_lower:
+                return 0.95
+
+        domain_words = set(script_context.script_domain.lower().replace(",", " ").split()) if script_context.script_domain else set()
+        if domain_words & title_words:
+            return 0.85
+
         geo_words = set(script_context.geographic_scope.lower().replace(",", " ").split()) if script_context.geographic_scope else set()
-        if geo_words.intersection(title_words):
-            return 0.9
-        return 0.4
+        if geo_words & title_words:
+            return 0.8
+
+        temporal = script_context.temporal_scope or ""
+        if temporal:
+            import re
+            years = re.findall(r"\b\d{4}\b", temporal)
+            for y in years:
+                if y in title_lower:
+                    return 0.75
+
+        return 0.5
 
     @staticmethod
     def _recency_score(published_at: str, cfg: dict) -> float:

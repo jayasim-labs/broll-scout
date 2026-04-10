@@ -330,6 +330,7 @@ class MatcherService:
             return result
 
         # "auto" — try local first, optionally fall back to API
+        local_zero_confidence = False
         if agent_queue.is_agent_available():
             try:
                 result = await self._call_local(prompt, job_id)
@@ -343,19 +344,25 @@ class MatcherService:
                     logger.info("Local model unavailable")
                 else:
                     logger.info("Local model returned zero confidence")
+                    local_zero_confidence = True
             except Exception:
                 logger.warning("Local matcher failed")
 
         api_fallback = self._get("api_fallback_enabled", False)
-        if not api_fallback:
-            logger.info("API fallback disabled — returning no match (enable api_fallback_enabled in settings to use GPT-4o-mini)")
+        confident_fallback = self._get("confident_fallback_enabled", False)
+
+        should_fallback = api_fallback or (confident_fallback and local_zero_confidence)
+
+        if not should_fallback:
+            logger.info("API fallback disabled — returning no match (enable api_fallback_enabled or confident_fallback_enabled in settings)")
             return None
 
         model = self._get("timestamp_model", "gpt-4o-mini")
-        logger.info("Falling back to API model %s", model)
+        reason = "zero-confidence rescue" if (confident_fallback and local_zero_confidence) else "full fallback"
+        logger.info("Falling back to API model %s (%s)", model, reason)
         result = await self._call_api(prompt, model, job_id)
         if result:
-            result["_matcher_source"] = model
+            result["_matcher_source"] = f"{model} ({reason})"
         return result
 
     # ------------------------------------------------------------------

@@ -43,6 +43,7 @@ DEFAULTS = {
     "matcher_backend": "auto",
     "matcher_model": "qwen3:8b",
     "api_fallback_enabled": False,
+    "confident_fallback_enabled": False,
     "lightweight_model": "gpt-4o-mini",
     "confidence_threshold": 0.15,
     "top_results_per_shot": 5,
