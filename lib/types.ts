@@ -331,6 +331,9 @@ export interface PipelineSettings {
   youtube_results_per_query: number
   max_candidates_per_segment: number
 
+  max_candidates_per_shot: number
+  top_results_per_shot: number
+
   // Models & matching
   timestamp_model: string
   translation_model: string

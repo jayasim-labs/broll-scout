@@ -738,14 +738,19 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             </p>
           </div>
           <SliderSetting
-            label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={10}
+            label="YouTube results per query" value={settings.youtube_results_per_query} min={3} max={15}
             onChange={(v) => onChange("youtube_results_per_query", v)}
-            help="How many YouTube results to fetch per search query. GPT-4o generates ~3 search queries per shot, so 3 queries × 5 results = 15 raw candidates per shot before filtering."
+            help="How many YouTube results to fetch per search query. GPT-4o generates ~5 search queries per shot, so 5 queries × 12 results = 60 raw candidates per shot before filtering."
           />
           <SliderSetting
-            label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={20}
+            label="Max candidates per segment" value={settings.max_candidates_per_segment} min={5} max={30}
             onChange={(v) => onChange("max_candidates_per_segment", v)}
             help="After deduplication and duration filtering, keep at most this many videos per scene for transcript analysis. Higher = more thorough but slower (each candidate needs a transcript fetch + AI match call)."
+          />
+          <SliderSetting
+            label="Clips per shot" value={settings.top_results_per_shot ?? 5} min={1} max={10}
+            onChange={(v) => onChange("top_results_per_shot", v)}
+            help="How many final clips to keep per shot for editors to choose from. Higher = more choices but more matching time. Set to 5 to give editors a good selection."
           />
         </CardContent>
       </Card>

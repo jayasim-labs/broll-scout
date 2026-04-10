@@ -1580,13 +1580,12 @@ class TestTranslatorPromptQuality:
 
     def test_prompt_has_quality_guidance(self):
         from app.services.translator import SYSTEM_PROMPT
-        assert "Do NOT pad broll_count" in SYSTEM_PROMPT
-        assert "Quality over quantity" in SYSTEM_PROMPT
+        assert "AIM HIGH on broll_count" in SYSTEM_PROMPT
         assert "coverage_note" in SYSTEM_PROMPT
 
     def test_prompt_has_content_based_guidelines(self):
         from app.services.translator import SYSTEM_PROMPT
-        assert "Determine based on CONTENT, not duration" in SYSTEM_PROMPT
+        assert "Determine based on CONTENT" in SYSTEM_PROMPT
 
     @pytest.mark.asyncio
     async def test_translator_no_retry_on_low_shots(self):

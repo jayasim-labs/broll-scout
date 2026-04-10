@@ -139,12 +139,12 @@ Do the following in one response:
    - estimated_duration_seconds (rough estimate of how long this section of the script runs)
    - context_anchor: A one-sentence statement connecting this segment to the overall script topic
    - negative_keywords: 3–5 terms that would indicate a WRONG match for this segment
-   - broll_count: how many DIFFERENT B-roll clips this segment needs. Determine based on CONTENT, not duration:
-       * 0 clips: host on camera, personal narration, interview clips where the speaker IS the visual, intro/outro cards, sections where the audience should focus on the narrator's face and emotion. Mark with broll_note explaining why.
-       * 1 clip: a single concept, location, or event. One strong visual is enough.
-       * 2-3 clips: multiple distinct visual ideas — e.g., a location PLUS a historical event PLUS data. Each shot must be a genuinely different visual need, NOT the same concept rephrased.
-       * 4+ clips: rare. Only for rapid-fire montage sections or segments covering many distinct events/locations in sequence.
-       Do NOT pad broll_count to hit a target number. If the script naturally needs 24 shots across 20 segments, return 24. Quality over quantity — precisely targeted shots are more useful than vague padded ones.
+   - broll_count: how many DIFFERENT B-roll clips this segment needs. Editors need CHOICES — more distinct shots means more options to pick from. Determine based on CONTENT:
+       * 0 clips: host on camera, personal narration, interview clips where the speaker IS the visual, intro/outro cards. Mark with broll_note explaining why.
+       * 1 clip: a very brief single concept (rare — most segments benefit from 2+).
+       * 2-3 clips: the STANDARD for most segments — a location PLUS a historical event PLUS a contextual visual. Each shot must be a genuinely different visual need.
+       * 4+ clips: for segments covering multiple distinct events, locations, or concepts in sequence. This is COMMON for documentary content — don't hesitate to use it.
+       AIM HIGH on broll_count — editors would rather have 40 diverse shots to choose from than 20 generic ones. When in doubt, add another shot with a different visual angle on the same topic. A 30-minute script typically needs 30-45 total B-roll shots.
    - broll_note: if broll_count is 0, explain why (e.g., "Host on camera — no B-roll needed"). Otherwise null.
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
@@ -159,13 +159,14 @@ Do the following in one response:
            - "medium": somewhat specific (particular historical events, specific locations, niche subjects)
            - "rare": very specific footage unlikely to be on YouTube (classified events, obscure historical moments, specific private locations)
        * preferred_source_type: what type of source video would be ideal — one of: "documentary", "news_clip", "stock_footage", "drone_aerial", "interview", "timelapse", "archival", "animation", or "" if no preference
-       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. The 5 queries MUST be diverse:
-           1. SPECIFIC: exact location/event/subject name (e.g., "North Sentinel Island satellite view")
-           2. DESCRIPTIVE: what it looks like visually (e.g., "isolated tropical island aerial drone footage")
-           3. DOCUMENTARY: topic + "documentary" or "footage" (e.g., "Sentinel Island documentary aerial")
-           4. BROADER CONTEXT: category + geographic context (e.g., "Andaman Islands forbidden island drone")
-           5. LATERAL: visually relevant footage from a different angle or related concept that may not be topically connected but LOOKS right (e.g., for a shot needing "feeling of isolation" → "abandoned island cinematic b-roll")
+       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. Think about how YouTube videos are actually TITLED — not how an editor would describe the shot. The 5 queries MUST be diverse:
+           1. SPECIFIC: exact event/subject name as a YouTuber would title it (e.g., "North Sentinel Island drone footage")
+           2. DESCRIPTIVE: what the footage looks like (e.g., "isolated tropical island aerial view 4K")
+           3. DOCUMENTARY: topic + "documentary" or "history" (e.g., "Sentinel Island documentary")
+           4. BROADER CONTEXT: related broader category that would still yield relevant footage (e.g., "Andaman Islands drone aerial")
+           5. CREATIVE SYNONYM: rephrase using completely different words, synonyms, or a related concept that would show visually similar footage (e.g., "uncontacted tribe island footage", "forbidden island ocean")
          This diversity is CRITICAL — different phrasings find different videos.
+         IMPORTANT: Avoid overly academic/niche queries that nobody would use as a YouTube title. "King Edward II ban on football" won't find results — but "medieval football history England" will.
        * key_terms: 3-5 keywords for THIS shot
 
      Example for a 2-minute segment about "Sentinel Island's geography":

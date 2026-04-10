@@ -16,6 +16,7 @@ from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
 from app.utils.cost_tracker import get_cost_tracker
+from app.utils.quota_tracker import get_quota_tracker
 from app.services.usage_service import get_usage_service
 
 logger = logging.getLogger(__name__)
@@ -217,9 +218,9 @@ async def run_pipeline(
         failed_fetches: set = set()
         video_pool_lock = asyncio.Lock()
 
-        transcript_queue: asyncio.Queue = asyncio.Queue()
+        transcript_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         search_semaphore = asyncio.Semaphore(5)
-        transcript_semaphore = asyncio.Semaphore(pipeline_cfg.get("max_concurrent_candidates", 3))
+        transcript_semaphore = asyncio.Semaphore(max(5, pipeline_cfg.get("max_concurrent_candidates", 3)))
 
         shots_searched = 0
         transcripts_fetched = 0
@@ -248,7 +249,8 @@ async def run_pipeline(
                         if is_new:
                             video_pool[vid] = c
                             video_to_shots[vid] = []
-                            await transcript_queue.put(vid)
+                            priority = c.video_duration_seconds or 9999
+                            await transcript_queue.put((priority, vid))
                         if shot.shot_id not in video_to_shots[vid]:
                             video_to_shots[vid].append(shot.shot_id)
 
@@ -267,10 +269,11 @@ async def run_pipeline(
         async def _transcript_fetch_worker(worker_id: int):
             nonlocal transcripts_fetched
             while True:
-                vid = await transcript_queue.get()
-                if vid is None:
+                item = await transcript_queue.get()
+                if item is None or (isinstance(item, tuple) and item[1] is None):
                     transcript_queue.task_done()
                     break
+                vid = item[1] if isinstance(item, tuple) else item
 
                 async with transcript_semaphore:
                     cand = video_pool.get(vid)
@@ -324,7 +327,7 @@ async def run_pipeline(
                 transcript_queue.task_done()
 
         # Start transcript fetch workers BEFORE searches begin
-        NUM_FETCH_WORKERS = 3
+        NUM_FETCH_WORKERS = 5
         fetch_worker_tasks = [
             asyncio.create_task(_transcript_fetch_worker(i))
             for i in range(NUM_FETCH_WORKERS)
@@ -338,7 +341,7 @@ async def run_pipeline(
 
         # All searches complete — no more new videos will be queued.
         # Wait for all queued transcript fetches to finish.
-        TRANSCRIPT_FETCH_TIMEOUT = min(600, max(180, len(video_pool) * 3))
+        TRANSCRIPT_FETCH_TIMEOUT = min(900, max(300, len(video_pool) * 4))
         total_to_fetch = len(video_pool)
         already_done = len(transcript_cache) + len(failed_fetches)
         remaining = total_to_fetch - already_done
@@ -397,7 +400,7 @@ async def run_pipeline(
             await asyncio.gather(*fetch_worker_tasks, return_exceptions=True)
         else:
             for _ in range(NUM_FETCH_WORKERS):
-                await transcript_queue.put(None)
+                await transcript_queue.put((999999, None))
             await asyncio.gather(*fetch_worker_tasks)
 
         search_elapsed = round(time.time() - search_start, 1)
@@ -551,7 +554,7 @@ async def run_pipeline(
         # Session-level dedup: track used (video_id, timestamp_bucket) across all shots
         used_timestamps: Dict[str, set] = {}
         all_segment_results: Dict[str, List[RankedResult]] = {}
-        keep_per_shot = int(pipeline_cfg.get("top_results_per_shot", 2))
+        keep_per_shot = int(pipeline_cfg.get("top_results_per_shot", 5))
 
         for seg in active_segments:
             seg_ranked: List[RankedResult] = []
@@ -806,7 +809,12 @@ async def run_pipeline(
 
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
-        api_costs["search_mode"] = "ytdlp"
+        qt = get_quota_tracker()
+        qt_stats = qt.stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        api_costs["search_mode"] = qt_stats.get("search_mode", "ytdlp")
+        qt.reset_for_job()
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
         _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}", group="done")
@@ -839,6 +847,11 @@ async def run_pipeline(
         _log_activity(job_id, "alert", "Job cancelled by user.")
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
+        qt = get_quota_tracker()
+        qt_stats = qt.stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        qt.reset_for_job()
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Cancelled after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")
@@ -857,6 +870,11 @@ async def run_pipeline(
         _log_activity(job_id, "alert", f"Pipeline failed: {str(exc)[:200]}")
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
+        qt = get_quota_tracker()
+        qt_stats = qt.stats
+        api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
+        api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        qt.reset_for_job()
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
             _log_activity(job_id, "clock", f"Failed after {elapsed:.1f}s — API cost so far: ${est_cost:.4f}")

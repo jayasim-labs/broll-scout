@@ -289,12 +289,16 @@ def _is_portrait_aspect_ratio_9_16(width: int, height: int, tolerance: float) ->
 # Dispatchers — all searches go through the local yt-dlp companion agent
 # ---------------------------------------------------------------------------
 
+from app.utils.quota_tracker import get_quota_tracker as _get_quota_tracker
+
+
 async def _dispatch_search(
     query: str,
     max_results: int = 5,
     job_id: str | None = None,
     backend: str = "ytdlp_only",
 ) -> list[dict]:
+    _get_quota_tracker().track_ytdlp_search()
     task_id = await agent_queue.create_task("search", {
         "query": query,
         "max_results": max_results,
@@ -309,6 +313,7 @@ async def _dispatch_channel_search(
     job_id: str | None = None,
     backend: str = "ytdlp_only",
 ) -> list[dict]:
+    _get_quota_tracker().track_ytdlp_search()
     task_id = await agent_queue.create_task("channel_search", {
         "channel_id": channel_id,
         "query": query,
@@ -322,6 +327,7 @@ async def _dispatch_video_details(
     job_id: str | None = None,
     backend: str = "ytdlp_only",
 ) -> list[dict]:
+    _get_quota_tracker().track_ytdlp_details(len(video_ids))
     task_id = await agent_queue.create_task("video_details", {
         "video_ids": video_ids,
     }, job_id=job_id)

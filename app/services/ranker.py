@@ -76,7 +76,7 @@ class RankerService:
         except ValueError:
             shot_intent = ShotIntent.LITERAL
 
-        top_n = int(cfg.get("top_results_per_shot", 2)) if shot else int(cfg.get("top_results_per_segment", 2))
+        top_n = int(cfg.get("top_results_per_shot", 5)) if shot else int(cfg.get("top_results_per_segment", 5))
         min_subs = int(cfg.get("prefer_min_subscribers", 0))
         negative_kw = segment.negative_keywords or []
         ranking_key_terms = (shot.key_terms if shot and shot.key_terms else segment.key_terms)
