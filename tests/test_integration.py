@@ -32,7 +32,7 @@ SAMPLE_SCRIPT = (
 MOCK_YOUTUBE_SEARCH_RESULT = [
     {
         "video_id": "dQw4w9WgXcQ",
-        "title": "Test Documentary",
+        "title": "The Evolution of Technology Documentary",
         "channel_id": "UCtest123456789012345",
         "channel_name": "Test Channel",
         "channel_title": "Test Channel",
@@ -47,7 +47,7 @@ MOCK_YOUTUBE_SEARCH_RESULT = [
 MOCK_VIDEO_DETAILS = [
     {
         "video_id": "dQw4w9WgXcQ",
-        "title": "Test Documentary",
+        "title": "The Evolution of Technology Documentary",
         "channel_id": "UCtest123456789012345",
         "channel_name": "Test Channel",
         "channel_subscribers": 50000,

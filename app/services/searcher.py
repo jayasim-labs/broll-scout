@@ -155,6 +155,85 @@ def contextualize_query(query: str, script_context: ScriptContext) -> str:
     return f"{anchor_keywords[0]} {query}"
 
 
+_TITLE_FILTER_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "be", "been", "with", "from", "by", "as",
+    "its", "it", "this", "that", "how", "what", "why", "who", "when",
+    "not", "no", "has", "have", "had", "will", "would", "could", "should",
+    "full", "part", "episode", "season", "official", "video", "clip",
+})
+
+
+def _build_relevance_words(
+    shot: BRollShot, segment: Segment, script_context: Optional[ScriptContext]
+) -> set[str]:
+    """Build a set of lowercase relevance words from shot + segment + script context.
+
+    A video title must contain at least one of these words to be considered
+    potentially relevant.  This is intentionally broad — the goal is only to
+    reject complete garbage (e.g. "Dry Clean tutorial" for a football query).
+    """
+    raw_words: list[str] = []
+
+    # From the shot
+    raw_words.extend(shot.key_terms or [])
+    raw_words.extend(shot.visual_need.split())
+    for q in (shot.search_queries or []):
+        raw_words.extend(q.split())
+
+    # From the segment
+    raw_words.extend(segment.key_terms or [])
+
+    # From the script context
+    if script_context:
+        raw_words.extend(script_context.script_topic.split())
+        raw_words.extend(script_context.context_keywords or [])
+
+    words = set()
+    for w in raw_words:
+        # Split multi-word terms (e.g. "World Cup" → "world", "cup")
+        sub_tokens = w.lower().split()
+        for token in sub_tokens:
+            cleaned = re.sub(r"[^a-zA-Z0-9\u0900-\u097F\u0B80-\u0BFF]", "", token)
+            if len(cleaned) > 2 and cleaned not in _TITLE_FILTER_STOPWORDS and cleaned not in _GENERIC_WORDS:
+                words.add(cleaned)
+
+    return words
+
+
+def _text_relevance_hits(text: str, relevance_words: set[str]) -> int:
+    """Count how many relevance words appear in the given text."""
+    text_lower = text.lower()
+    hits = 0
+    for rw in relevance_words:
+        if " " in rw and rw in text_lower:
+            hits += 1
+
+    text_tokens = set(
+        re.sub(r"[^a-zA-Z0-9\u0900-\u097F\u0B80-\u0BFF]", "", w.lower())
+        for w in text.split()
+    )
+    hits += len(text_tokens & relevance_words)
+    return hits
+
+
+def _title_has_relevance(title: str, relevance_words: set[str], description: str = "") -> bool:
+    """Check if a video's title or description has enough overlap with relevance words.
+
+    Title check: 1+ word match → pass (lenient — titles are short).
+    Description check (fallback): 2+ word matches → pass (stricter since
+    descriptions are longer and more likely to have incidental matches).
+    """
+    if _text_relevance_hits(title, relevance_words) >= 1:
+        return True
+
+    if description:
+        if _text_relevance_hits(description, relevance_words) >= 2:
+            return True
+
+    return False
+
+
 def _is_indian_topic(script_context: Optional[ScriptContext]) -> bool:
     """Detect if the script relates to Indian topics for multilingual search."""
     if not script_context:
@@ -421,11 +500,19 @@ class SearcherService:
         old_tier2_names = self._get("preferred_channels_tier2") or []
         tier2_name_lower = {name.lower() for name in old_tier2_names}
 
+        # Build relevance words for title pre-filter (segment-level, no shot)
+        dummy_shot = BRollShot(
+            shot_id="", visual_need=segment.summary or segment.title,
+            search_queries=segment.search_queries, key_terms=segment.key_terms,
+        )
+        seg_relevance_words = _build_relevance_words(dummy_shot, segment, script_context)
+
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
         blocked_count = 0
         duration_filtered = 0
         shorts_aspect_filtered = 0
+        title_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -454,6 +541,12 @@ class SearcherService:
                 blocked_count += 1
                 continue
 
+            video_desc = v.get("description", "")
+            if seg_relevance_words and not _title_has_relevance(video_title, seg_relevance_words, video_desc):
+                title_filtered += 1
+                logger.debug("Title-filtered %s: \"%s\" (no relevance words)", vid, video_title[:60])
+                continue
+
             candidate = CandidateVideo(
                 video_id=vid,
                 video_url=f"https://www.youtube.com/watch?v={vid}",
@@ -476,6 +569,8 @@ class SearcherService:
             filter_notes.append(f"{duration_filtered} too short/long")
         if shorts_aspect_filtered:
             filter_notes.append(f"{shorts_aspect_filtered} ~9:16 shorts-shaped")
+        if title_filtered:
+            filter_notes.append(f"{title_filtered} off-topic by title")
         if blocked_count:
             filter_notes.append(f"{blocked_count} from blocked channels")
         filter_text = f" (removed {', '.join(filter_notes)})" if filter_notes else ""
@@ -598,9 +693,15 @@ class SearcherService:
                 if len(word) > 3 and word not in {"about", "this", "that", "with", "from", "they", "their", "these", "those", "have", "been", "will", "would", "could"}:
                     exclusion_words.add(word)
 
+        # Build relevance words from the shot + segment + script for title pre-filtering.
+        # This cheap check prevents wasting Whisper time on totally off-topic videos
+        # (e.g. "Dry Clean" or "Where Winds Meet" game tips for a football query).
+        relevance_words = _build_relevance_words(shot, segment, script_context)
+
         candidates: list[CandidateVideo] = []
         seen_ids: set[str] = set()
         shorts_aspect_filtered = 0
+        title_filtered = 0
 
         for v in video_details:
             vid = v.get("video_id", "")
@@ -622,6 +723,12 @@ class SearcherService:
             ch_name = v.get("channel_name", "")
             video_title = v.get("title") or v.get("video_title", "")
             if self._is_blocked(ch_id, ch_name, blocked_ids, blocked_names):
+                continue
+
+            video_desc = v.get("description", "")
+            if relevance_words and not _title_has_relevance(video_title, relevance_words, video_desc):
+                title_filtered += 1
+                logger.debug("Title-filtered %s: \"%s\" (no relevance words)", vid, video_title[:60])
                 continue
 
             candidates.append(CandidateVideo(
@@ -648,8 +755,13 @@ class SearcherService:
 
             candidates.sort(key=lambda c: (_exclusion_score(c), -c.view_count))
 
-        aspect_note = f", {shorts_aspect_filtered} ~9:16 excluded" if shorts_aspect_filtered else ""
-        await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"{aspect_note}", depth=3)
+        filter_notes = []
+        if shorts_aspect_filtered:
+            filter_notes.append(f"{shorts_aspect_filtered} ~9:16 excluded")
+        if title_filtered:
+            filter_notes.append(f"{title_filtered} off-topic by title")
+        filter_text = f" ({', '.join(filter_notes)})" if filter_notes else ""
+        await _emit("check", f"    {len(candidates)} candidates for \"{short_need}\"{filter_text}", depth=3)
         return candidates[:max_candidates]
 
     async def search_batch(
