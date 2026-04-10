@@ -63,7 +63,6 @@ def _get_anchor_keywords(script_context: ScriptContext) -> list[str]:
     if script_context.context_keywords:
         return script_context.context_keywords
 
-    # Legacy fallback: extract from script_topic
     topic = script_context.script_topic
     for sep in (" and ", " — ", " - ", ": "):
         if sep in topic:
@@ -73,36 +72,84 @@ def _get_anchor_keywords(script_context: ScriptContext) -> list[str]:
     return words[:5] if words else topic.split()[:1]
 
 
+def _is_broad_topic(script_context: ScriptContext) -> bool:
+    """Detect scripts that cover many sub-topics (history surveys, evolution of X, etc.).
+
+    Broad-topic scripts should use the general topic as anchor, not a niche
+    keyword like 'Cuju' which only applies to one sub-section.
+    """
+    topic = script_context.script_topic.lower()
+    broad_signals = [
+        "history", "evolution", "origin", "journey", "story of",
+        "rise and fall", "how", "complete guide", "everything about",
+        "from", "timeline",
+    ]
+    return any(s in topic for s in broad_signals)
+
+
+def _get_broad_topic_anchor(script_context: ScriptContext) -> str:
+    """Extract the core subject from script_topic for broad scripts.
+
+    E.g. 'History and Evolution of Football' → 'Football'
+    """
+    topic = script_context.script_topic
+    for pattern in [
+        r"(?:History|Evolution|Origin|Journey|Rise|Story)\s+(?:and\s+\w+\s+)?(?:of|behind)\s+(.+)",
+        r"(?:How|The)\s+(.+?)(?:\s+(?:Changed|Evolved|Started|Began|Works?))?$",
+    ]:
+        m = re.search(pattern, topic, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    words = [w for w in topic.split() if w.lower() not in _GENERIC_WORDS and len(w) > 2]
+    return " ".join(words[:2]) if words else topic.split()[-1]
+
+
 def _query_contains_anchor(query: str, anchor_keywords: list[str], top_n: int = 3) -> bool:
     """Check if the query already contains at least one of the top-N anchor keywords."""
     if not anchor_keywords:
         return True
     query_lower = query.lower()
     for kw in anchor_keywords[:top_n]:
-        # Multi-word keywords: check as substring. Single words: word boundary.
         kw_lower = kw.lower()
-        if " " in kw_lower:
-            if kw_lower in query_lower:
-                return True
-        else:
-            if kw_lower in query_lower:
-                return True
+        if kw_lower in query_lower:
+            return True
     return False
 
 
 def contextualize_query(query: str, script_context: ScriptContext) -> str:
     """Ensure every search query is anchored to the script's core subject.
 
-    Uses ranked context_keywords from the script. The top keyword (position 0)
-    is the primary anchor — the single most distinctive identifier.
-    If the query already contains one of the top-3 keywords, it's considered
-    anchored. Otherwise, prepend the #1 keyword.
+    Strategy varies by script type:
+    - Narrow scripts (e.g. 'Jeffrey Epstein'): prepend the #1 distinctive
+      keyword when the query drifts — keeps results on-topic.
+    - Broad scripts (e.g. 'History of Football'): use the general subject
+      ('Football') as anchor instead of a niche keyword ('Cuju') that only
+      applies to one sub-section.  Also check more of the keyword list
+      (top-8 instead of top-3) before deciding the query needs anchoring.
     """
     if not script_context or not script_context.script_topic:
         return query
+
     anchor_keywords = _get_anchor_keywords(script_context)
     if not anchor_keywords:
         return query
+
+    broad = _is_broad_topic(script_context)
+
+    if broad:
+        anchor = _get_broad_topic_anchor(script_context)
+        # For broad scripts, the query is anchored if it contains:
+        # 1. the broad topic word itself (e.g. "football"), OR
+        # 2. any of the top-8 context keywords
+        anchor_lower = anchor.lower()
+        query_lower = query.lower()
+        if anchor_lower in query_lower:
+            return query
+        if _query_contains_anchor(query, anchor_keywords, top_n=min(12, len(anchor_keywords))):
+            return query
+        return f"{anchor} {query}"
+
+    # Narrow script: prepend the #1 keyword if none of top-3 present
     if _query_contains_anchor(query, anchor_keywords, top_n=3):
         return query
     return f"{anchor_keywords[0]} {query}"

@@ -57,7 +57,7 @@ DEFAULTS = {
     # Drop ~9:16 portrait (typical YouTube Shorts); other vertical ratios (4:5, etc.) still allowed
     "filter_9_16_shorts": True,
     "shorts_9_16_aspect_tolerance": 0.06,
-    "prefer_min_subscribers": 10000,
+    "prefer_min_subscribers": 5000,
     "recency_full_score_years": 2,
     "recency_mid_score_years": 4,
 

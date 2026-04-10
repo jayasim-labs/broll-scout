@@ -547,10 +547,11 @@ async def run_pipeline(
         match_elapsed = round(time.time() - match_start, 1)
         _log_activity(job_id, "check", f"Matching done in {match_elapsed}s — {matches_with_result} clips from {total_match_pairs} pairs", depth=1, group="match")
 
-        # Rank per shot, pick best clip, assemble segment results
+        # Rank per shot, keep top clips per shot, assemble segment results
         # Session-level dedup: track used (video_id, timestamp_bucket) across all shots
         used_timestamps: Dict[str, set] = {}
         all_segment_results: Dict[str, List[RankedResult]] = {}
+        keep_per_shot = int(pipeline_cfg.get("top_results_per_shot", 2))
 
         for seg in active_segments:
             seg_ranked: List[RankedResult] = []
@@ -566,15 +567,17 @@ async def run_pipeline(
                 )
                 short_need = shot.visual_need[:55]
                 if ranked:
-                    best = ranked[0]
-                    # Record used timestamp for dedup
-                    if best.start_time_seconds is not None:
-                        bucket = best.start_time_seconds // 30
-                        used_timestamps.setdefault(best.video_id, set()).add(bucket)
+                    kept = ranked[:keep_per_shot]
+                    for r in kept:
+                        if r.start_time_seconds is not None:
+                            bucket = r.start_time_seconds // 30
+                            used_timestamps.setdefault(r.video_id, set()).add(bucket)
+                    best = kept[0]
                     vf_label = f" vf={best.visual_fit:.0%}" if best.visual_fit > 0 else ""
                     tf_label = f" tf={best.topical_fit:.0%}" if best.topical_fit > 0 else ""
-                    _log_activity(job_id, "check", f"✓ \"{short_need}\" → \"{best.video_title[:50]}\" ({best.relevance_score:.0%}{vf_label}{tf_label})", depth=2, group=seg_group)
-                    seg_ranked.extend(ranked[:1])
+                    extra = f" (+{len(kept)-1} alt)" if len(kept) > 1 else ""
+                    _log_activity(job_id, "check", f"✓ \"{short_need}\" → \"{best.video_title[:50]}\" ({best.relevance_score:.0%}{vf_label}{tf_label}){extra}", depth=2, group=seg_group)
+                    seg_ranked.extend(kept)
                 else:
                     _log_activity(job_id, "alert", f"✗ No clip for \"{short_need}\"", depth=2, group=seg_group)
 
