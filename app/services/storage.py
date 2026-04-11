@@ -304,6 +304,33 @@ class StorageService:
             logger.exception("Failed to list jobs")
             return []
 
+    async def list_jobs_for_project(self, project_id: str) -> List[JobSummary]:
+        """Return all jobs belonging to a specific project, newest first."""
+        try:
+            items = await self._scan_all(
+                "jobs",
+                FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
+                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category",
+                ExpressionAttributeNames={"#st": "status"},
+            )
+            items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return [
+                JobSummary(
+                    job_id=i.get("job_id", ""),
+                    status=JobStatus(i.get("status", "processing")),
+                    created_at=i.get("created_at", ""),
+                    segment_count=int(i.get("segment_count", 0)),
+                    result_count=int(i.get("result_count", 0)),
+                    project_id=i.get("project_id"),
+                    title=i.get("title"),
+                    category=i.get("category"),
+                )
+                for i in items
+            ]
+        except ClientError:
+            logger.exception("Failed to list jobs for project %s", project_id)
+            return []
+
     async def store_segments(self, job_id: str, segments: List[Segment]) -> None:
         if not segments:
             return
@@ -544,7 +571,7 @@ class StorageService:
             logger.exception("Failed to get project %s", project_id)
             return None
 
-    async def list_projects(self, limit: int = 50) -> List[ProjectSummary]:
+    async def list_projects(self, limit: int = 200) -> List[ProjectSummary]:
         try:
             items = await self._scan_all("projects")
             items.sort(key=lambda x: x.get("updated_at", ""), reverse=True)

@@ -19,7 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
-import type { ProjectSummary, ProjectWithJobs, JobSummary } from "@/lib/types"
+import type { ProjectSummary, JobSummary } from "@/lib/types"
 import { categoryLabel } from "@/lib/types"
 
 const API = "/api/v1"
@@ -29,7 +29,7 @@ export default function ProjectsPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [expandedProject, setExpandedProject] = useState<ProjectWithJobs | null>(null)
+  const [expandedJobs, setExpandedJobs] = useState<JobSummary[]>([])
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
@@ -65,19 +65,19 @@ export default function ProjectsPage() {
   const toggleExpand = async (projectId: string) => {
     if (expandedId === projectId) {
       setExpandedId(null)
-      setExpandedProject(null)
+      setExpandedJobs([])
       return
     }
     setExpandedId(projectId)
     setLoadingDetail(true)
     try {
-      const resp = await fetch(`${API}/projects/${projectId}`)
+      const resp = await fetch(`${API}/projects/${projectId}/jobs`)
       if (resp.ok) {
         const data = await resp.json()
-        setExpandedProject(data)
+        setExpandedJobs(data.jobs || [])
       }
     } catch {
-      toast.error("Failed to load project details")
+      toast.error("Failed to load project jobs")
     } finally {
       setLoadingDetail(false)
     }
@@ -112,7 +112,7 @@ export default function ProjectsPage() {
         setProjects(prev => prev.filter(p => p.project_id !== projectId))
         if (expandedId === projectId) {
           setExpandedId(null)
-          setExpandedProject(null)
+          setExpandedJobs([])
         }
         toast.success("Project deleted")
       }
@@ -224,7 +224,7 @@ export default function ProjectsPage() {
                 key={project.project_id}
                 project={project}
                 isExpanded={expandedId === project.project_id}
-                expandedDetail={expandedId === project.project_id ? expandedProject : null}
+                expandedJobs={expandedId === project.project_id ? expandedJobs : []}
                 loadingDetail={expandedId === project.project_id && loadingDetail}
                 isRenaming={renamingId === project.project_id}
                 renameValue={renameValue}
@@ -261,7 +261,7 @@ export default function ProjectsPage() {
 function ProjectCard({
   project,
   isExpanded,
-  expandedDetail,
+  expandedJobs,
   loadingDetail,
   isRenaming,
   renameValue,
@@ -275,7 +275,7 @@ function ProjectCard({
 }: {
   project: ProjectSummary
   isExpanded: boolean
-  expandedDetail: ProjectWithJobs | null
+  expandedJobs: JobSummary[]
   loadingDetail: boolean
   isRenaming: boolean
   renameValue: string
@@ -384,7 +384,7 @@ function ProjectCard({
             <div className="flex items-center justify-center py-6">
               <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
-          ) : expandedDetail && expandedDetail.jobs.length > 0 ? (
+          ) : expandedJobs.length > 0 ? (
             <div className="border-t border-border pt-3 space-y-1">
               <div className="grid grid-cols-[auto_1fr_80px_80px_80px_100px_32px] gap-2 px-2 pb-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                 <span />
@@ -395,7 +395,7 @@ function ProjectCard({
                 <span className="text-center">Date</span>
                 <span />
               </div>
-              {expandedDetail.jobs.map((job) => (
+              {expandedJobs.map((job) => (
                 <JobRow key={job.job_id} job={job} onView={() => onViewJob(job.job_id)} />
               ))}
             </div>

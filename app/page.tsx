@@ -233,7 +233,7 @@ export default function HomePage() {
       <Navbar />
 
       <div className="flex max-w-[1600px] mx-auto">
-        <aside className="hidden lg:block w-72 border-r border-border p-4 min-h-[calc(100vh-64px)] sticky top-16">
+        <aside className="hidden lg:block w-72 border-r border-border p-4 max-h-[calc(100vh-64px)] overflow-y-auto sticky top-16">
           <JobHistory
             jobs={jobHistory}
             projects={projects}

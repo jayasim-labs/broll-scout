@@ -571,7 +571,7 @@ async def migrate_channels(
 
 @app.get("/api/v1/projects")
 async def list_projects(
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=200, ge=1, le=500),
     x_api_key: str | None = Header(default=None),
 ):
     _verify_key(x_api_key)
@@ -603,9 +603,7 @@ async def get_project(
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    jobs = await storage.list_jobs(limit=100)
-    project_jobs = [j for j in jobs if j.project_id == project_id]
-    project_jobs.sort(key=lambda j: j.created_at, reverse=True)
+    project_jobs = await storage.list_jobs_for_project(project_id)
 
     return ProjectResponse(
         project_id=proj.get("project_id", ""),
@@ -617,6 +615,18 @@ async def get_project(
         category=proj.get("category"),
         jobs=project_jobs,
     )
+
+
+@app.get("/api/v1/projects/{project_id}/jobs")
+async def list_project_jobs(
+    project_id: str,
+    x_api_key: str | None = Header(default=None),
+):
+    """Lightweight endpoint: returns only jobs for a single project."""
+    _verify_key(x_api_key)
+    storage = get_storage()
+    project_jobs = await storage.list_jobs_for_project(project_id)
+    return JobListResponse(jobs=project_jobs)
 
 
 @app.put("/api/v1/projects/{project_id}")

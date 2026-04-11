@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useCallback } from "react"
 import {
   Clock, CheckCircle, XCircle, Loader2, FileText, Ban,
   FolderOpen, Folder, ChevronRight, ChevronDown, Film,
@@ -16,6 +16,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import type { JobSummary, ProjectSummary } from "@/lib/types"
+
+const API = "/api/v1"
 
 interface JobHistoryProps {
   jobs: JobSummary[]
@@ -41,22 +43,45 @@ export function JobHistory({
   onNewProject,
 }: JobHistoryProps) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  const [projectJobs, setProjectJobs] = useState<Record<string, JobSummary[]>>({})
+  const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set())
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
+  const [visibleCount, setVisibleCount] = useState(20)
 
-  const { projectJobMap, orphanJobs } = useMemo(() => {
-    const map: Record<string, JobSummary[]> = {}
-    const orphans: JobSummary[] = []
-    for (const j of jobs) {
-      if (j.project_id) {
-        if (!map[j.project_id]) map[j.project_id] = []
-        map[j.project_id].push(j)
-      } else {
-        orphans.push(j)
+  // Orphan jobs (no project) — these still come from the global jobs prop
+  const orphanJobs = useMemo(
+    () => jobs.filter(j => !j.project_id),
+    [jobs],
+  )
+
+  // Merge any in-flight processing jobs from the global jobs prop into projectJobs
+  // so newly submitted jobs appear immediately without waiting for a refetch
+  const getProjectJobs = useCallback((projectId: string): JobSummary[] => {
+    const fetched = projectJobs[projectId] || []
+    const fetchedIds = new Set(fetched.map(j => j.job_id))
+    const liveExtras = jobs.filter(
+      j => j.project_id === projectId && !fetchedIds.has(j.job_id)
+    )
+    if (liveExtras.length === 0) return fetched
+    return [...liveExtras, ...fetched]
+  }, [projectJobs, jobs])
+
+  const fetchProjectJobs = useCallback(async (projectId: string) => {
+    setLoadingProjects(prev => new Set(prev).add(projectId))
+    try {
+      const resp = await fetch(`${API}/projects/${projectId}/jobs`)
+      if (resp.ok) {
+        const data = await resp.json()
+        setProjectJobs(prev => ({ ...prev, [projectId]: data.jobs || [] }))
       }
-    }
-    return { projectJobMap: map, orphanJobs: orphans }
-  }, [jobs])
+    } catch { /* silent */ }
+    setLoadingProjects(prev => {
+      const next = new Set(prev)
+      next.delete(projectId)
+      return next
+    })
+  }, [])
 
   // Auto-expand the project that contains the active job or active project
   useEffect(() => {
@@ -75,14 +100,21 @@ export function JobHistory({
         }
         return changed ? next : prev
       })
+      for (const id of idsToExpand) {
+        if (!projectJobs[id]) fetchProjectJobs(id)
+      }
     }
-  }, [activeJobId, activeProjectId, jobs])
+  }, [activeJobId, activeProjectId, jobs, fetchProjectJobs, projectJobs])
 
   const toggleExpand = (projectId: string) => {
     setExpandedProjects(prev => {
       const next = new Set(prev)
-      if (next.has(projectId)) next.delete(projectId)
-      else next.add(projectId)
+      if (next.has(projectId)) {
+        next.delete(projectId)
+      } else {
+        next.add(projectId)
+        if (!projectJobs[projectId]) fetchProjectJobs(projectId)
+      }
       return next
     })
   }
@@ -122,12 +154,21 @@ export function JobHistory({
       )}
 
       <div className="space-y-0.5">
-        {projects.map((project) => {
+        {projects.slice(0, visibleCount).map((project) => {
           const isExpanded = expandedProjects.has(project.project_id)
           const isActive = activeProjectId === project.project_id
-          const projectJobs = projectJobMap[project.project_id] || []
-          const hasProcessing = projectJobs.some(j => j.status === "processing")
-          const liveClipCount = projectJobs.reduce((sum, j) => sum + (j.result_count || 0), 0)
+          const isLoading = loadingProjects.has(project.project_id)
+          const pJobs = getProjectJobs(project.project_id)
+          const hasProcessing = pJobs.some(j => j.status === "processing")
+
+          // Use project summary counts (always accurate from API)
+          // but show live count if we have fetched jobs and they differ
+          const displayJobCount = pJobs.length > 0
+            ? Math.max(pJobs.length, project.job_count)
+            : project.job_count
+          const displayClipCount = pJobs.length > 0
+            ? pJobs.reduce((sum, j) => sum + (j.result_count || 0), 0)
+            : project.total_clips
 
           return (
             <div key={project.project_id}>
@@ -143,7 +184,9 @@ export function JobHistory({
                   className="flex-shrink-0 p-0.5 rounded hover:bg-secondary/80"
                   onClick={() => toggleExpand(project.project_id)}
                 >
-                  {isExpanded ? (
+                  {isLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
+                  ) : isExpanded ? (
                     <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
                   ) : (
                     <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
@@ -178,9 +221,9 @@ export function JobHistory({
                   >
                     <p className="text-xs font-medium truncate">{project.title}</p>
                     <p className="text-[10px] text-muted-foreground">
-                      {projectJobs.length} job{projectJobs.length !== 1 ? "s" : ""}
+                      {displayJobCount} job{displayJobCount !== 1 ? "s" : ""}
                       {" · "}
-                      {liveClipCount} clip{liveClipCount !== 1 ? "s" : ""}
+                      {displayClipCount} clip{displayClipCount !== 1 ? "s" : ""}
                       {hasProcessing && (
                         <Loader2 className="inline w-3 h-3 ml-1 animate-spin text-yellow-500" />
                       )}
@@ -210,21 +253,41 @@ export function JobHistory({
                 </DropdownMenu>
               </div>
 
-              {isExpanded && projectJobs.length > 0 && (
+              {isExpanded && (
                 <div className="ml-5 pl-3 border-l border-border/50 space-y-0.5 mt-0.5">
-                  {projectJobs.map((job) => (
-                    <JobItem
-                      key={job.job_id}
-                      job={job}
-                      isActive={activeJobId === job.job_id}
-                      onSelect={onSelectJob}
-                    />
-                  ))}
+                  {isLoading && pJobs.length === 0 ? (
+                    <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Loading jobs...
+                    </div>
+                  ) : pJobs.length > 0 ? (
+                    pJobs.map((job) => (
+                      <JobItem
+                        key={job.job_id}
+                        job={job}
+                        isActive={activeJobId === job.job_id}
+                        onSelect={onSelectJob}
+                      />
+                    ))
+                  ) : (
+                    <p className="px-2 py-2 text-[10px] text-muted-foreground">No jobs yet</p>
+                  )}
                 </div>
               )}
             </div>
           )
         })}
+
+        {projects.length > visibleCount && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full text-xs text-muted-foreground h-7"
+            onClick={() => setVisibleCount(prev => prev + 20)}
+          >
+            Show {Math.min(20, projects.length - visibleCount)} more project{projects.length - visibleCount > 1 ? "s" : ""}...
+          </Button>
+        )}
       </div>
 
       {orphanJobs.length > 0 && (
