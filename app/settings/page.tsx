@@ -6,7 +6,7 @@ import { Navbar } from "@/components/navbar"
 import {
   Save, RotateCcw, Plus, X, Loader2, Users, Eye, Shield, Tv,
   Film, Zap, Globe, Ban, BookOpen, Settings2, MessageSquare,
-  Search, ExternalLink,
+  Search, ExternalLink, Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -973,6 +973,21 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             onChange={(v) => onChange("top_results_per_shot", v)}
             help="How many final clips to keep per shot for editors to choose from. Higher = more choices but more matching time. Set to 5 to give editors a good selection."
           />
+          <div className="pt-2 border-t">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <Label className="text-sm">Gemini AI Expansion (default)</Label>
+              </div>
+              <Switch
+                checked={!!(settings as Record<string, unknown>).enable_gemini_expansion}
+                onCheckedChange={(v) => onChange("enable_gemini_expansion", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 mt-1.5 leading-relaxed">
+              After GPT-4o generates search queries, Gemini 1.5 Flash analyzes initial YouTube results and suggests 5 additional creative queries per segment — finds more diverse B-roll but takes longer. This sets the default; editors can still override per-job on the Scout page.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

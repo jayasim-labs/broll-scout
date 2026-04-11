@@ -35,12 +35,17 @@ NEXT_PID=""
 cleanup() {
     echo ""
     echo -e "${Y}  Shutting down...${NC}"
+    # Kill Next.js dev server
     if [[ -n "$NEXT_PID" ]] && kill -0 "$NEXT_PID" 2>/dev/null; then
         kill "$NEXT_PID" 2>/dev/null
         wait "$NEXT_PID" 2>/dev/null
     fi
     lsof -ti:3000 2>/dev/null | xargs kill 2>/dev/null || true
-    echo -e "${G}  Done.${NC}"
+    # Kill companion if still running
+    lsof -ti:9876 2>/dev/null | xargs kill 2>/dev/null || true
+    # Stop Ollama server we started
+    pkill -f "ollama serve" 2>/dev/null || true
+    echo -e "${G}  Done. All processes stopped.${NC}"
 }
 trap cleanup EXIT INT TERM
 

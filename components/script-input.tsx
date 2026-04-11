@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { Search, Loader2, Upload, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -31,6 +31,17 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
   )
   const [category, setCategory] = useState<VideoCategory | "">("")
   const [enableGeminiExpansion, setEnableGeminiExpansion] = useState(false)
+
+  useEffect(() => {
+    fetch("/api/v1/settings")
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.settings?.enable_gemini_expansion) {
+          setEnableGeminiExpansion(true)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   const charCount = script.length
   const wordCount = useMemo(() => {

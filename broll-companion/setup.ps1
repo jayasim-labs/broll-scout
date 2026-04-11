@@ -453,6 +453,7 @@ Write-Host ""
 Write-Host "  ----------------------------------------" -ForegroundColor Gray
 Write-Host "  Companion stopped. Cleaning up..." -ForegroundColor Yellow
 
+# Kill Next.js dev server
 if ($npmJob -and -not $npmJob.HasExited) {
     taskkill /f /t /pid $npmJob.Id 2>$null | Out-Null
 }
@@ -463,5 +464,15 @@ if ($port3000) {
         if ($pid -match '^\d+$') { taskkill /f /pid $pid 2>$null | Out-Null }
     }
 }
+# Kill companion if still running
+$port9876 = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":9876 "
+if ($port9876) {
+    foreach ($line in $port9876) {
+        $pid = ($line -split '\s+')[-1]
+        if ($pid -match '^\d+$') { taskkill /f /pid $pid 2>$null | Out-Null }
+    }
+}
+# Stop Ollama server
+Get-Process -Name "ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-Write-Host "  Done." -ForegroundColor Green
+Write-Host "  Done. All processes stopped." -ForegroundColor Green

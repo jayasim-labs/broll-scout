@@ -19,6 +19,7 @@ import atexit
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -198,12 +199,64 @@ def ensure_model_loaded() -> bool:
         return False
 
 
-@atexit.register
-def _cleanup_ollama():
-    """Stop Ollama server if we started it."""
+_cleanup_done = False
+
+def _cleanup():
+    """Unload ALL loaded models from GPU memory and stop Ollama if we started it."""
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+
+    if _ollama_available:
+        # Ask Ollama what's actually loaded in GPU right now
+        loaded_models: list[str] = []
+        try:
+            import urllib.request
+            with urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=3) as resp:
+                ps_data = json.loads(resp.read())
+                loaded_models = [m["name"] for m in ps_data.get("models", [])]
+        except Exception as e:
+            log.debug("Could not query loaded models: %s — falling back to registry", e)
+            loaded_models = [cfg["ollama_name"] for cfg in MATCHER_MODELS.values()]
+
+        for model_name in loaded_models:
+            try:
+                log.info("Unloading %s from GPU memory...", model_name)
+                ollama_client.chat(
+                    model=model_name,
+                    messages=[{"role": "user", "content": ""}],
+                    keep_alive=0,
+                )
+                log.info("Unloaded %s", model_name)
+            except Exception as e:
+                log.warning("Failed to unload %s: %s", model_name, e)
+
+        if not loaded_models:
+            log.info("No models loaded in GPU — nothing to unload")
+
+    # Stop Ollama server if we started it
     if _ollama_process and _ollama_process.poll() is None:
         log.info("Stopping Ollama server (PID: %d)...", _ollama_process.pid)
         _ollama_process.terminate()
+        try:
+            _ollama_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _ollama_process.kill()
+
+    log.info("Companion cleanup complete.")
+
+atexit.register(_cleanup)
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM — clean up and exit."""
+    sig_name = signal.Signals(signum).name
+    log.info("Received %s — shutting down...", sig_name)
+    _cleanup()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 # ---------------------------------------------------------------------------
 # Browser cookie configuration
@@ -317,7 +370,9 @@ def models_status():
             ["ollama", "--version"],
             capture_output=True, text=True, timeout=5,
         )
-        ollama_version = proc.stdout.strip().replace("ollama version ", "")
+        import re as _re
+        _ver_match = _re.search(r'(\d+\.\d+\.\d+)', proc.stdout)
+        ollama_version = _ver_match.group(1) if _ver_match else proc.stdout.strip()
     except Exception:
         pass
 
