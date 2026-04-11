@@ -312,6 +312,7 @@ async def run_pipeline(
                             job_id=job_id,
                             on_whisper_start=_on_whisper_start,
                             whisper_gate=whisper_semaphore,
+                            skip_whisper=True,
                         )
                         fetch_elapsed = round(time.time() - fetch_start, 1)
                         transcript_cache[vid] = t.transcript_text
@@ -372,12 +373,14 @@ async def run_pipeline(
 
         # All searches complete — no more new videos will be queued.
         # Wait for all queued transcript fetches to finish.
-        TRANSCRIPT_FETCH_TIMEOUT = min(900, max(300, len(video_pool) * 4))
+        # Whisper is skipped in this phase (skip_whisper=True), so fetches are fast
+        # (YouTube captions / companion agent only). Timeout is much shorter now.
+        TRANSCRIPT_FETCH_TIMEOUT = min(300, max(120, len(video_pool) * 2))
         total_to_fetch = len(video_pool)
         already_done = len(transcript_cache) + len(failed_fetches)
         remaining = total_to_fetch - already_done
         if remaining > 0:
-            _log_activity(job_id, "clock", f"All searches done! Now waiting for {remaining} remaining transcript fetches (Whisper transcribes ~20s each on your local companion)", depth=1, group="search")
+            _log_activity(job_id, "clock", f"All searches done! Now waiting for {remaining} remaining transcript fetches (captions only — Whisper will run later for unfilled shots)", depth=1, group="search")
         else:
             _log_activity(job_id, "check", f"All {total_to_fetch} transcripts already fetched during search", depth=1, group="search")
 
@@ -657,6 +660,93 @@ async def run_pipeline(
         all_results: List[RankedResult] = []
         for results in all_segment_results.values():
             all_results.extend(results)
+
+        # --- Whisper backfill: targeted transcription for unfilled shots ---
+        # During the fast first pass, Whisper was skipped. Now identify shots
+        # with no results whose candidates had no transcript, and run Whisper
+        # only for those videos. This avoids wasting 8 min/video on videos
+        # that would never be selected while getting transcripts where needed.
+        unfilled_shot_ids: set = set()
+        for seg in active_segments:
+            seg_results = all_segment_results.get(seg.segment_id, [])
+            filled_shots = {r.shot_id for r in seg_results}
+            for s, shot in all_shots:
+                if s.segment_id == seg.segment_id and shot.shot_id not in filled_shots:
+                    unfilled_shot_ids.add(shot.shot_id)
+
+        if unfilled_shot_ids:
+            # Find candidate videos for unfilled shots that had no transcript
+            whisper_candidates: Dict[str, CandidateVideo] = {}
+            for shot_id in unfilled_shot_ids:
+                for cand in shot_candidates.get(shot_id, []):
+                    vid = cand.video_id
+                    if vid not in transcript_cache or transcript_cache.get(vid) is None:
+                        if vid not in failed_fetches and vid in video_pool:
+                            whisper_candidates[vid] = video_pool[vid]
+
+            if whisper_candidates:
+                max_whisper_backfill = min(len(whisper_candidates), 10)
+                sorted_wc = sorted(whisper_candidates.values(), key=lambda c: c.video_duration_seconds or 9999)[:max_whisper_backfill]
+
+                _set_progress(job_id, "matching", 82, f"Running Whisper for {len(sorted_wc)} videos to fill {len(unfilled_shot_ids)} empty shots...")
+                _log_activity(job_id, "clock", f"🎙️ Whisper backfill: transcribing {len(sorted_wc)} short videos (skipped during fast pass) to fill {len(unfilled_shot_ids)} unfilled shots", group="whisper")
+
+                whisper_backfill_count = 0
+                for cand in sorted_wc:
+                    vid = cand.video_id
+                    dur_m = round((cand.video_duration_seconds or 0) / 60, 1)
+                    _log_activity(job_id, "clock", f"🎙️ Whisper backfill: \"{cand.video_title[:45]}\" ({dur_m}m) — https://youtu.be/{vid}", depth=1, group="whisper")
+                    try:
+                        t = await transcriber.get_transcript(
+                            vid,
+                            video_duration_seconds=cand.video_duration_seconds,
+                            job_id=job_id,
+                            skip_whisper=False,
+                        )
+                        if t.transcript_text:
+                            transcript_cache[vid] = t.transcript_text
+                            transcript_sources[vid] = "Whisper (backfill)"
+                            whisper_backfill_count += 1
+                            _log_activity(job_id, "check", f"✅ Whisper done: \"{cand.video_title[:45]}\" — https://youtu.be/{vid}", depth=1, group="whisper")
+
+                            # Re-match this video against its unfilled shots
+                            affected_shots = [
+                                (seg, shot) for seg, shot in all_shots
+                                if shot.shot_id in unfilled_shot_ids and vid in [c.video_id for c in shot_candidates.get(shot.shot_id, [])]
+                            ]
+                            for seg, shot in affected_shots:
+                                try:
+                                    match = await matcher.find_timestamp(
+                                        segment=seg,
+                                        shot=shot,
+                                        candidate=cand,
+                                        transcript_text=t.transcript_text,
+                                        script_context=script_context,
+                                    )
+                                    if match and match.relevance_score > 0.3:
+                                        ranked = ranker.rank_and_filter(
+                                            [match], shot, used_timestamps,
+                                        )
+                                        if ranked:
+                                            seg_results = all_segment_results.get(seg.segment_id, [])
+                                            seg_results.extend(ranked)
+                                            all_segment_results[seg.segment_id] = seg_results
+                                            unfilled_shot_ids.discard(shot.shot_id)
+                                            _log_activity(job_id, "check", f"✓ Whisper match: \"{shot.visual_need[:40]}\" → \"{cand.video_title[:40]}\" ({match.relevance_score:.0%})", depth=2, group="whisper")
+                                except Exception:
+                                    logger.warning("Whisper backfill match failed for %s / %s", vid, shot.shot_id)
+                        else:
+                            failed_fetches.add(vid)
+                    except Exception:
+                        logger.warning("Whisper backfill failed for %s", vid)
+                        failed_fetches.add(vid)
+
+                if whisper_backfill_count:
+                    _log_activity(job_id, "check", f"Whisper backfill: {whisper_backfill_count}/{len(sorted_wc)} videos transcribed, filled some empty shots", group="whisper")
+                    # Rebuild all_results after backfill matches
+                    all_results = []
+                    for results in all_segment_results.values():
+                        all_results.extend(results)
 
         # --- Re-search pass: failure-mode-aware, 2-attempt cap ---
         from app.models.schemas import AuditStatus, Scarcity, ShotIntent

@@ -65,10 +65,7 @@ export function AgentStatusBadge() {
 
   async function checkCompanion() {
     try {
-      const [healthResp, modelsResp] = await Promise.all([
-        fetch(`${COMPANION_URL}/health`, { mode: "cors" }),
-        fetch(`${COMPANION_URL}/models/status`, { mode: "cors" }).catch(() => null),
-      ])
+      const healthResp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
       const data: CompanionHealth = await healthResp.json()
       if (data.status === "ok" || data.ytdlp_ok) {
         setState("connected")
@@ -76,9 +73,6 @@ export function AgentStatusBadge() {
           data.ytdlp_ok = true
         }
         setHealth(data)
-        if (modelsResp?.ok) {
-          setModelsStatus(await modelsResp.json())
-        }
       } else {
         setState("disconnected")
         setHealth(null)
@@ -89,6 +83,13 @@ export function AgentStatusBadge() {
       setHealth(null)
       setModelsStatus(null)
     }
+  }
+
+  async function fetchModelsOnce() {
+    try {
+      const resp = await fetch(`${COMPANION_URL}/models/status`, { mode: "cors" })
+      if (resp.ok) setModelsStatus(await resp.json())
+    } catch { /* silent */ }
   }
 
   if (state === "checking") return null
@@ -104,7 +105,11 @@ export function AgentStatusBadge() {
   return (
     <div className="relative" data-agent-panel>
       <button
-        onClick={() => setShowPanel(!showPanel)}
+        onClick={() => {
+          const willOpen = !showPanel
+          setShowPanel(willOpen)
+          if (willOpen && !modelsStatus) fetchModelsOnce()
+        }}
         className={cn(
           "flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full transition-colors",
           state === "connected"

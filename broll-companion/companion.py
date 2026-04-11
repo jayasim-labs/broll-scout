@@ -451,9 +451,20 @@ def health():
     return jsonify(result)
 
 
+_models_cache: dict = {}
+_models_cache_ts: float = 0
+_MODELS_CACHE_TTL = 30  # seconds — avoid spawning subprocesses on every poll
+
+
 @app.route("/models/status")
 def models_status():
     """Return installation/readiness status for all registered matcher models."""
+    global _models_cache, _models_cache_ts
+
+    now = time.time()
+    if _models_cache and (now - _models_cache_ts) < _MODELS_CACHE_TTL:
+        return jsonify(_models_cache)
+
     ollama_running = False
     installed_names: list[str] = []
     ollama_version = "unknown"
@@ -501,17 +512,22 @@ def models_status():
             "min_ollama_version": min_ver,
         }
 
-    return jsonify({
+    result = {
         "ollama_version": ollama_version,
         "ollama_running": ollama_running,
         "active_model": MATCHER_MODEL,
         "models": model_statuses,
-    })
+    }
+    _models_cache = result
+    _models_cache_ts = time.time()
+    return jsonify(result)
 
 
 @app.route("/models/pull", methods=["POST"])
 def models_pull():
     """Pull (download) a model from the MATCHER_MODELS registry via Ollama."""
+    global _models_cache_ts
+    _models_cache_ts = 0  # invalidate cache
     data = request.json or {}
     model_key = data.get("model", "")
 
@@ -553,7 +569,8 @@ def models_pull():
 @app.route("/models/switch", methods=["POST"])
 def models_switch():
     """Switch the active matcher model. Unloads old model, warms new one."""
-    global MATCHER_MODEL, _ollama_model_ready
+    global MATCHER_MODEL, _ollama_model_ready, _models_cache_ts
+    _models_cache_ts = 0  # invalidate cache
     data = request.json or {}
     new_model = data.get("model", "")
 

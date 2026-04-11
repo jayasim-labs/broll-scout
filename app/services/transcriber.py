@@ -33,8 +33,10 @@ class TranscriberService:
         job_id: str | None = None,
         on_whisper_start=None,
         whisper_gate: asyncio.Semaphore | None = None,
+        skip_whisper: bool = False,
     ) -> Transcript:
-        """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper flag."""
+        """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper.
+        If skip_whisper=True, returns NONE instead of waiting for Whisper (used in the fast first pass)."""
         from app.services.storage import get_storage
         storage = get_storage()
 
@@ -106,6 +108,10 @@ class TranscriberService:
             logger.info("Direct YouTube caption fetch failed for %s", video_id)
 
         # Last resort: Whisper transcription via local companion
+        if skip_whisper:
+            logger.info("[transcript] Skipping Whisper for %s (fast pass — will retry later if needed)", video_id)
+            return no_transcript
+
         max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60
         effective_duration = video_duration_seconds or 300
         agent_up = agent_queue.is_agent_available()
