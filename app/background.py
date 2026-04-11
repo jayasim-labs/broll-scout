@@ -16,6 +16,7 @@ from app.services.settings_service import get_settings_service
 from app.services.storage import get_storage
 from app.services.transcriber import TranscriberService
 from app.services.translator import TranslatorService
+from app.utils import agent_queue
 from app.utils.cost_tracker import get_cost_tracker
 from app.utils.quota_tracker import get_quota_tracker
 from app.services.usage_service import get_usage_service
