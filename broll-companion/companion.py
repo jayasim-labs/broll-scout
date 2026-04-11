@@ -651,13 +651,14 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
         "--download-sections", f"*{start_ts}-{end_ts}",
         "--force-keyframes-at-cuts",
         "--merge-output-format", "mp4",
+        "--concurrent-fragments", "4",
         "--no-playlist", "--no-warnings",
         "-o", output_path,
     ]
 
     log.info("Clip download: %s [%s – %s]", video_id, start_ts, end_ts)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode == 0 and os.path.exists(output_path):
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
             log.info("Clip saved: %s (%.1f MB)", output_path, file_size_mb)
@@ -673,7 +674,7 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
             return {"status": "error", "message": proc.stderr[:500] or "Download failed"}
     except subprocess.TimeoutExpired:
         log.warning("Clip download timed out for %s", video_id)
-        return {"status": "error", "message": "Download timed out (3 min limit)"}
+        return {"status": "error", "message": "Download timed out (5 min limit)"}
     except Exception as e:
         log.error("Clip download error: %s", e)
         return {"status": "error", "message": str(e)}
