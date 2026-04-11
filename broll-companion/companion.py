@@ -201,6 +201,28 @@ def ensure_model_loaded() -> bool:
 
 _cleanup_done = False
 
+def _unload_model(model_name: str) -> bool:
+    """Unload a single model from GPU via Ollama REST API (no Python client needed)."""
+    import urllib.request
+    try:
+        body = json.dumps({
+            "model": model_name,
+            "keep_alive": 0,
+        }).encode()
+        req = urllib.request.Request(
+            "http://127.0.0.1:11434/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+        log.info("Unloaded %s from GPU memory", model_name)
+        return True
+    except Exception as e:
+        log.warning("Failed to unload %s: %s", model_name, e)
+        return False
+
+
 def _cleanup():
     """Unload ALL loaded models from GPU memory and stop Ollama if we started it."""
     global _cleanup_done
@@ -209,31 +231,35 @@ def _cleanup():
     _cleanup_done = True
 
     if _ollama_available:
-        # Ask Ollama what's actually loaded in GPU right now
+        import urllib.request
+
+        # Query what's actually loaded in GPU
         loaded_models: list[str] = []
         try:
-            import urllib.request
             with urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=3) as resp:
                 ps_data = json.loads(resp.read())
                 loaded_models = [m["name"] for m in ps_data.get("models", [])]
         except Exception as e:
-            log.debug("Could not query loaded models: %s — falling back to registry", e)
-            loaded_models = [cfg["ollama_name"] for cfg in MATCHER_MODELS.values()]
+            log.debug("Could not query /api/ps: %s", e)
 
-        for model_name in loaded_models:
-            try:
-                log.info("Unloading %s from GPU memory...", model_name)
-                ollama_client.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": ""}],
-                    keep_alive=0,
-                )
-                log.info("Unloaded %s", model_name)
-            except Exception as e:
-                log.warning("Failed to unload %s: %s", model_name, e)
+        # Also include active model + all installed models from registry
+        must_unload = set(loaded_models)
+        must_unload.add(MATCHER_MODEL)
+        installed_names: list[str] = []
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as resp:
+                tags_data = json.loads(resp.read())
+                installed_names = [m["name"] for m in tags_data.get("models", [])]
+        except Exception:
+            pass
+        for cfg in MATCHER_MODELS.values():
+            name = cfg["ollama_name"]
+            if any(name in iname for iname in installed_names):
+                must_unload.add(name)
 
-        if not loaded_models:
-            log.info("No models loaded in GPU — nothing to unload")
+        log.info("Cleanup: unloading models from GPU: %s", ", ".join(sorted(must_unload)))
+        for model_name in must_unload:
+            _unload_model(model_name)
 
     # Stop Ollama server if we started it
     if _ollama_process and _ollama_process.poll() is None:
@@ -810,40 +836,71 @@ def ollama_match_timestamp(payload: dict) -> dict:
         ],
     }
 
-    start_t = time.time()
-    try:
-        response = ollama_client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are the Viral B-Roll Extractor. Return JSON only. /nothink"},
-                {"role": "user", "content": prompt},
-            ],
-            format=schema,
-            options={
-                "temperature": 0,
-                "num_ctx": num_ctx,
-                "num_predict": num_predict,
-            },
-            keep_alive=-1,
-        )
-        elapsed_ms = int((time.time() - start_t) * 1000)
-        result = json.loads(response["message"]["content"])
-        result["matcher_source"] = "local"
-        result["matcher_model"] = model
-        result["matcher_latency_ms"] = elapsed_ms
-        prompt_words = len(prompt.split())
-        log.info("Local match done in %dms (model=%s, confidence=%.2f, prompt=%d words)",
-                 elapsed_ms, model, result.get("confidence_score", 0), prompt_words)
-        return result
-    except Exception as e:
-        elapsed_ms = int((time.time() - start_t) * 1000)
-        log.error("Ollama match failed after %dms: %s", elapsed_ms, e)
-        return {
-            "start_time_seconds": 0, "end_time_seconds": 0,
-            "excerpt": "", "confidence_score": 0.0,
-            "relevance_note": f"Local model error: {str(e)[:100]}",
-            "the_hook": "", "matcher_source": "local_error",
-        }
+    messages = [
+        {"role": "system", "content": "You are the Viral B-Roll Extractor. Return JSON only. /nothink"},
+        {"role": "user", "content": prompt},
+    ]
+    opts = {"temperature": 0, "num_ctx": num_ctx, "num_predict": num_predict}
+    prompt_words = len(prompt.split())
+
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        start_t = time.time()
+        try:
+            response = ollama_client.chat(
+                model=model, messages=messages, format=schema,
+                options=opts, keep_alive=-1,
+            )
+            elapsed_ms = int((time.time() - start_t) * 1000)
+            content = response.get("message", {}).get("content", "").strip()
+
+            if not content:
+                log.warning("Ollama returned empty response in %dms (model=%s, attempt=%d/%d, prompt=%d words)",
+                            elapsed_ms, model, attempt, max_attempts, prompt_words)
+                if attempt < max_attempts:
+                    continue
+                return {
+                    "start_time_seconds": 0, "end_time_seconds": 0,
+                    "excerpt": "", "confidence_score": 0.0,
+                    "relevance_note": "Model returned empty response after retries",
+                    "the_hook": "", "matcher_source": "local_empty",
+                }
+
+            result = json.loads(content)
+            result["matcher_source"] = "local"
+            result["matcher_model"] = model
+            result["matcher_latency_ms"] = elapsed_ms
+            log.info("Local match done in %dms (model=%s, confidence=%.2f, prompt=%d words%s)",
+                     elapsed_ms, model, result.get("confidence_score", 0), prompt_words,
+                     f", retry={attempt}" if attempt > 1 else "")
+            return result
+
+        except json.JSONDecodeError as e:
+            elapsed_ms = int((time.time() - start_t) * 1000)
+            raw = response.get("message", {}).get("content", "")[:200] if 'response' in dir() else ""
+            log.warning("Ollama returned invalid JSON in %dms (model=%s, attempt=%d/%d): %s | raw: %s",
+                        elapsed_ms, model, attempt, max_attempts, e, raw)
+            if attempt < max_attempts:
+                continue
+            return {
+                "start_time_seconds": 0, "end_time_seconds": 0,
+                "excerpt": "", "confidence_score": 0.0,
+                "relevance_note": f"Model returned invalid JSON: {str(e)[:80]}",
+                "the_hook": "", "matcher_source": "local_error",
+            }
+
+        except Exception as e:
+            elapsed_ms = int((time.time() - start_t) * 1000)
+            log.error("Ollama match failed after %dms (model=%s, attempt=%d/%d): %s",
+                      elapsed_ms, model, attempt, max_attempts, e)
+            if attempt < max_attempts:
+                continue
+            return {
+                "start_time_seconds": 0, "end_time_seconds": 0,
+                "excerpt": "", "confidence_score": 0.0,
+                "relevance_note": f"Local model error: {str(e)[:100]}",
+                "the_hook": "", "matcher_source": "local_error",
+            }
 
 
 def ollama_lightweight_llm(payload: dict) -> dict:
