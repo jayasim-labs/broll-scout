@@ -32,6 +32,7 @@ lsof -ti:9876 2>/dev/null | xargs kill 2>/dev/null || true
 sleep 0.5
 
 NEXT_PID=""
+COMPANION_PID=""
 cleanup() {
     echo ""
     echo -e "${Y}  Shutting down...${NC}"
@@ -41,9 +42,19 @@ cleanup() {
         wait "$NEXT_PID" 2>/dev/null
     fi
     lsof -ti:3000 2>/dev/null | xargs kill 2>/dev/null || true
-    # Kill companion if still running
-    lsof -ti:9876 2>/dev/null | xargs kill 2>/dev/null || true
-    # Stop Ollama server we started
+    # Gracefully stop companion FIRST so it can unload models from GPU while Ollama is still running
+    if [[ -n "$COMPANION_PID" ]] && kill -0 "$COMPANION_PID" 2>/dev/null; then
+        kill -TERM "$COMPANION_PID" 2>/dev/null
+        for i in {1..10}; do
+            kill -0 "$COMPANION_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$COMPANION_PID" 2>/dev/null || true
+    else
+        lsof -ti:9876 2>/dev/null | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+    # Now stop Ollama server after companion has unloaded models
     pkill -f "ollama serve" 2>/dev/null || true
     echo -e "${G}  Done. All processes stopped.${NC}"
 }
@@ -374,9 +385,11 @@ echo ""
 echo -e "  ${G}Starting companion server...${NC}"
 echo ""
 
-# ─── Run companion in foreground ──────────────────────────────────────
+# ─── Run companion ────────────────────────────────────────────────────
 if [[ ! -f "$COMPANION_PY" ]]; then
     fail "companion.py not found at $COMPANION_PY"
     exit 1
 fi
-python "$COMPANION_PY"
+python "$COMPANION_PY" &
+COMPANION_PID=$!
+wait "$COMPANION_PID" 2>/dev/null

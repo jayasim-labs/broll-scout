@@ -122,14 +122,15 @@ Do the following in one response:
        * Each entry should be a proper noun, specific name, or highly specific concept — the kind of word that narrows YouTube results to THIS script's topic
 
 3. Break the English translation into segments based on narrative shifts.
-   MANDATORY SEGMENT COUNT RULE: You MUST produce at least 1 segment per 3 minutes of script.
-   A 30-minute script → minimum 10 segments (aim for 12-18).
-   A 40-minute script → minimum 13 segments (aim for 15-22).
-   A 50-minute script → minimum 16 segments (aim for 18-25).
+   MANDATORY SEGMENT COUNT RULE: You MUST produce at least 1 segment per 2 minutes of script.
+   A 20-minute script → minimum 10 segments (aim for 12-15).
+   A 30-minute script → minimum 15 segments (aim for 16-22).
+   A 40-minute script → minimum 20 segments (aim for 22-28).
+   A 50-minute script → minimum 25 segments (aim for 26-35).
    If your output has fewer segments than the minimum, you have merged too aggressively — go back and split.
    Each distinct subtopic, event, era, location, or concept shift MUST be its own segment.
    Do NOT merge "Origin of X" + "Evolution of X" + "Modern X" into one segment — those are 3 separate segments.
-   Segments should typically be 90-180 seconds each. Any segment over 200 seconds should be split unless it truly covers only one narrow topic.
+   Segments should typically be 60-150 seconds each. Any segment over 180 seconds should be split unless it truly covers only one narrow topic.
    Each segment gets independent YouTube searches, so more segments = better search coverage for editors.
 
 4. For each segment, return:
