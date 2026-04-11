@@ -650,6 +650,41 @@ class StorageService:
             except Exception:
                 logger.debug("Failed to store audit record for %s", rec.get("result_id"))
 
+    # ── Search cache (DynamoDB with TTL) ──────────────────────────────
+
+    async def get_search_cache(self, cache_key: str) -> Optional[list[dict]]:
+        """Retrieve cached search results. Returns None on miss or expiry."""
+        import json as _json
+        try:
+            resp = await self._run(
+                self._table("search_cache").get_item,
+                Key={"cache_key": cache_key},
+            )
+            item = resp.get("Item")
+            if not item:
+                return None
+            return _json.loads(item["results"])
+        except Exception:
+            logger.debug("Search cache read error for %s", cache_key[:60], exc_info=True)
+            return None
+
+    async def put_search_cache(self, cache_key: str, results: list[dict], ttl_seconds: int = 7 * 24 * 3600) -> None:
+        """Store search results with a DynamoDB TTL for auto-expiry."""
+        import json as _json
+        import time as _time
+        try:
+            await self._run(
+                self._table("search_cache").put_item,
+                Item={
+                    "cache_key": cache_key,
+                    "results": _json.dumps(results),
+                    "created_at": datetime.utcnow().isoformat(),
+                    "expires_at": int(_time.time()) + ttl_seconds,
+                },
+            )
+        except Exception:
+            logger.debug("Search cache write error for %s", cache_key[:60], exc_info=True)
+
 
 _storage: Optional[StorageService] = None
 

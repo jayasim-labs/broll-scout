@@ -52,6 +52,35 @@ class TranscriberService:
         except Exception:
             logger.exception("Cache lookup failed for %s", video_id)
 
+        # Prefer companion agent (has browser cookies + residential IP) over
+        # server-side youtube-transcript-api (anonymous from datacenter IP).
+        # This avoids YouTube bot detection and IP blocking.
+        agent_available = agent_queue.is_agent_available()
+
+        if agent_available:
+            try:
+                agent_result = await self._fetch_via_agent(video_id, job_id=job_id)
+                if agent_result:
+                    await storage.store_transcript(
+                        video_id=video_id,
+                        transcript_text=agent_result["text"],
+                        source=agent_result["source"],
+                        language="en",
+                        duration=video_duration_seconds,
+                    )
+                    return Transcript(
+                        video_id=video_id,
+                        transcript_text=agent_result["text"],
+                        transcript_source=agent_result["source"],
+                        language="en",
+                        video_duration_seconds=video_duration_seconds,
+                    )
+                else:
+                    logger.info("[transcript] Agent returned nothing for %s — trying server-side", video_id)
+            except Exception:
+                logger.info("[transcript] Agent failed for %s — trying server-side", video_id)
+
+        # Server-side fallback: only used when companion agent is unavailable or failed
         try:
             transcript_data, source = self._fetch_youtube_captions(video_id)
             if transcript_data is not None:
@@ -72,31 +101,7 @@ class TranscriberService:
         except (TranscriptsDisabled, NoTranscriptFound):
             logger.info("No YouTube captions available for %s (direct)", video_id)
         except Exception:
-            logger.info("Direct YouTube caption fetch failed for %s — trying agent", video_id)
-
-        # Fallback: fetch transcript via local companion agent
-        try:
-            logger.warning("[transcript] Trying agent captions for %s", video_id)
-            agent_result = await self._fetch_via_agent(video_id, job_id=job_id)
-            if agent_result:
-                await storage.store_transcript(
-                    video_id=video_id,
-                    transcript_text=agent_result["text"],
-                    source=agent_result["source"],
-                    language="en",
-                    duration=video_duration_seconds,
-                )
-                return Transcript(
-                    video_id=video_id,
-                    transcript_text=agent_result["text"],
-                    transcript_source=agent_result["source"],
-                    language="en",
-                    video_duration_seconds=video_duration_seconds,
-                )
-            else:
-                logger.warning("[transcript] Agent captions returned nothing for %s", video_id)
-        except Exception:
-            logger.warning("[transcript] Agent captions failed for %s", video_id)
+            logger.info("Direct YouTube caption fetch failed for %s", video_id)
 
         # Last resort: Whisper transcription via local companion
         max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60
@@ -171,6 +176,8 @@ class TranscriberService:
         source_map = {
             "youtube_captions": TranscriptSource.YOUTUBE_MANUAL,
             "youtube_auto_captions": TranscriptSource.YOUTUBE_AUTO,
+            "youtube_captions_ytdlp": TranscriptSource.YOUTUBE_MANUAL,
+            "youtube_auto_captions_ytdlp": TranscriptSource.YOUTUBE_AUTO,
         }
         source = source_map.get(source_str, TranscriptSource.YOUTUBE_MANUAL)
         return {"text": transcript_text, "source": source}

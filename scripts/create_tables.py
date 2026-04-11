@@ -105,6 +105,26 @@ def main():
         attr_defs=[{"AttributeName": "period", "AttributeType": "S"}],
     )
 
+    create_table(client, "search_cache",
+        key_schema=[{"AttributeName": "cache_key", "KeyType": "HASH"}],
+        attr_defs=[{"AttributeName": "cache_key", "AttributeType": "S"}],
+    )
+
+    # Enable TTL on search_cache so DynamoDB auto-deletes expired items
+    full_cache_name = f"{PREFIX}search_cache"
+    try:
+        client.update_time_to_live(
+            TableName=full_cache_name,
+            TimeToLiveSpecification={"Enabled": True, "AttributeName": "expires_at"},
+        )
+        print(f"  Enabled TTL on {full_cache_name} (attribute: expires_at)")
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "ValidationException" and "already enabled" in str(e).lower():
+            print(f"  TTL already enabled on {full_cache_name}")
+        else:
+            print(f"  Warning: Could not enable TTL on {full_cache_name}: {e}")
+
     print("\nAll tables created successfully!")
 
 

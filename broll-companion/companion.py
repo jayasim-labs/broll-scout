@@ -16,12 +16,15 @@ Prerequisites:
 """
 
 import atexit
+import glob as globmod_top
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +56,33 @@ log = logging.getLogger("companion")
 
 YTDLP_TIMEOUT = 60
 _executor = ThreadPoolExecutor(max_workers=4)
+
+# ---------------------------------------------------------------------------
+# YouTube request throttle — limits yt-dlp calls to avoid bot detection.
+# Token-bucket: allows short bursts but enforces avg rate over time.
+# ---------------------------------------------------------------------------
+import random as _random
+
+_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "2.5"))  # req/sec avg
+_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "4"))       # max burst
+_yt_tokens = float(_YT_BURST_SIZE)
+_yt_last_refill = time.time()
+_yt_lock = threading.Lock()
+
+
+def _yt_throttle() -> None:
+    """Block until a token is available. Adds small jitter to look human."""
+    global _yt_tokens, _yt_last_refill
+    while True:
+        with _yt_lock:
+            now = time.time()
+            elapsed = now - _yt_last_refill
+            _yt_tokens = min(_YT_BURST_SIZE, _yt_tokens + elapsed * _YT_RATE_LIMIT)
+            _yt_last_refill = now
+            if _yt_tokens >= 1.0:
+                _yt_tokens -= 1.0
+                break
+        time.sleep(0.1 + _random.uniform(0.05, 0.2))
 
 _abort_lock = threading.Lock()
 _task_aborts: dict[str, threading.Event] = {}
@@ -270,6 +300,13 @@ def _cleanup():
         except subprocess.TimeoutExpired:
             _ollama_process.kill()
 
+    # Clean up cookie jar temp directory
+    if _cookie_jar_dir:
+        try:
+            _cookie_jar_dir.cleanup()
+        except Exception:
+            pass
+
     log.info("Companion cleanup complete.")
 
 atexit.register(_cleanup)
@@ -290,11 +327,13 @@ signal.signal(signal.SIGTERM, _signal_handler)
 COOKIE_BROWSER = os.environ.get("BROLL_COOKIE_BROWSER", "none")
 _cookie_args: list[str] = []
 _cookie_status: str = "untested"
+_cookie_jar_path: str | None = None
+_cookie_jar_dir: tempfile.TemporaryDirectory | None = None
 
 
 def _detect_cookie_support() -> None:
-    """Test if yt-dlp can read cookies from the configured browser."""
-    global _cookie_args, _cookie_status
+    """Test if yt-dlp can read cookies from the configured browser and export a cookie jar."""
+    global _cookie_args, _cookie_status, _cookie_jar_path, _cookie_jar_dir
 
     if COOKIE_BROWSER.lower() == "none":
         _cookie_status = "disabled"
@@ -318,6 +357,7 @@ def _detect_cookie_support() -> None:
             _cookie_args = ["--cookies-from-browser", COOKIE_BROWSER]
             _cookie_status = f"active ({COOKIE_BROWSER})"
             log.info("Cookie extraction enabled: --cookies-from-browser %s", COOKIE_BROWSER)
+            _export_cookie_jar()
         else:
             _cookie_status = f"failed ({COOKIE_BROWSER})"
             log.warning(
@@ -334,6 +374,33 @@ def _detect_cookie_support() -> None:
     except Exception as e:
         _cookie_status = f"error: {e}"
         log.warning("Cookie detection error: %s — running without cookies", e)
+
+
+def _export_cookie_jar() -> None:
+    """Export browser cookies to a Netscape cookie jar file via yt-dlp.
+
+    This jar is used by fetch_transcript's yt-dlp fallback so that
+    subtitle requests are authenticated (avoids YouTube bot detection).
+    """
+    global _cookie_jar_path, _cookie_jar_dir
+    try:
+        _cookie_jar_dir = tempfile.TemporaryDirectory(prefix="broll_cookies_")
+        jar_path = os.path.join(_cookie_jar_dir.name, "cookies.txt")
+        proc = subprocess.run(
+            ["yt-dlp", "--cookies-from-browser", COOKIE_BROWSER,
+             "--cookies", jar_path,
+             "--skip-download", "--no-warnings",
+             "--flat-playlist", "--playlist-end", "1",
+             "ytsearch1:test"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if os.path.isfile(jar_path) and os.path.getsize(jar_path) > 100:
+            _cookie_jar_path = jar_path
+            log.info("Cookie jar exported to %s (%d bytes)", jar_path, os.path.getsize(jar_path))
+        else:
+            log.warning("Cookie jar export produced no usable file")
+    except Exception as e:
+        log.warning("Cookie jar export failed: %s — yt-dlp fallback will use --cookies-from-browser directly", e)
 
 
 @app.route("/health")
@@ -537,7 +604,7 @@ def models_switch():
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     """View or change cookie browser at runtime."""
-    global COOKIE_BROWSER, _cookie_args, _cookie_status
+    global COOKIE_BROWSER, _cookie_args, _cookie_status, _cookie_jar_path, _cookie_jar_dir
 
     if request.method == "POST":
         body = request.json or {}
@@ -546,13 +613,17 @@ def settings():
             COOKIE_BROWSER = new_browser  # noqa: F841 — intentional global reassign
             _cookie_args = []
             _cookie_status = "untested"
+            if _cookie_jar_dir:
+                _cookie_jar_dir.cleanup()
+                _cookie_jar_dir = None
+            _cookie_jar_path = None
             _detect_cookie_support()
         return jsonify({"cookie_browser": COOKIE_BROWSER, "cookie_status": _cookie_status})
 
     return jsonify({
         "cookie_browser": COOKIE_BROWSER,
         "cookie_status": _cookie_status,
-        "cookie_args": _cookie_args,
+        "cookie_jar_active": _cookie_jar_path is not None,
     })
 
 
@@ -646,18 +717,18 @@ def ytdlp_channel_search(channel_id: str, query: str, max_results: int = 5) -> l
 
 
 def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
-    results = []
-    for vid in video_ids:
-        cmd = [
-            "yt-dlp", f"https://www.youtube.com/watch?v={vid}",
-            "--dump-json", "--no-download", "--no-warnings",
-        ]
-        r = _run_ytdlp(cmd)
-        results.extend(r)
+    if not video_ids:
+        return []
+    # Batch: pass all URLs in a single yt-dlp invocation
+    urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
+    cmd = ["yt-dlp", *urls, "--dump-json", "--no-download", "--no-warnings"]
+    results = _run_ytdlp(cmd, timeout=max(YTDLP_TIMEOUT, len(video_ids) * 8))
     return results
 
 
-def _run_ytdlp(cmd: list[str], timeout: int | None = None) -> list[dict]:
+def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True) -> list[dict]:
+    if throttle:
+        _yt_throttle()
     full_cmd = cmd[:1] + _cookie_args + cmd[1:]
     results = []
     t = timeout or YTDLP_TIMEOUT
@@ -683,52 +754,201 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None) -> list[dict]:
 
 
 def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[dict]:
-    """Fetch transcript using youtube-transcript-api (runs locally, not blocked by YouTube)."""
+    """Fetch transcript: try youtube-transcript-api first, fall back to yt-dlp with cookies."""
     languages = languages or ["en"]
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        api = YouTubeTranscriptApi()
 
+    # --- Attempt 1: youtube-transcript-api (fast, no auth needed for most videos) ---
+    try:
+        result = _fetch_transcript_api(video_id, languages)
+        if result and result[0].get("transcript"):
+            return result
+        log.info("youtube-transcript-api returned no transcript for %s — trying yt-dlp fallback", video_id)
+    except Exception as e:
+        log.info("youtube-transcript-api failed for %s: %s — trying yt-dlp fallback", video_id, e)
+
+    # --- Attempt 2: yt-dlp with cookies (authenticated, bypasses bot detection) ---
+    if _cookie_args:
         try:
-            fetched = api.fetch(video_id, languages=languages)
-            entries = fetched.to_raw_data()
+            result = _fetch_transcript_ytdlp(video_id, languages)
+            if result and result[0].get("transcript"):
+                return result
+        except Exception as e:
+            log.warning("yt-dlp subtitle fallback failed for %s: %s", video_id, e)
+
+    return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+
+def _fetch_transcript_api(video_id: str, languages: list[str]) -> list[dict]:
+    """Primary transcript fetcher using youtube-transcript-api."""
+    from youtube_transcript_api import YouTubeTranscriptApi
+    api = YouTubeTranscriptApi()
+
+    try:
+        fetched = api.fetch(video_id, languages=languages)
+        entries = fetched.to_raw_data()
+        source = "youtube_captions"
+    except Exception:
+        transcript_list = api.list(video_id)
+        try:
+            manual = transcript_list.find_manually_created_transcript(languages)
+            entries = manual.fetch().to_raw_data()
             source = "youtube_captions"
         except Exception:
-            transcript_list = api.list(video_id)
             try:
-                manual = transcript_list.find_manually_created_transcript(languages)
-                entries = manual.fetch().to_raw_data()
-                source = "youtube_captions"
+                auto = transcript_list.find_generated_transcript(languages)
+                entries = auto.fetch().to_raw_data()
+                source = "youtube_auto_captions"
             except Exception:
-                try:
-                    auto = transcript_list.find_generated_transcript(languages)
-                    entries = auto.fetch().to_raw_data()
-                    source = "youtube_auto_captions"
-                except Exception:
-                    for t in transcript_list:
-                        if not t.is_generated:
-                            entries = t.fetch().to_raw_data()
-                            source = "youtube_captions"
-                            break
-                    else:
-                        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+                for t in transcript_list:
+                    if not t.is_generated:
+                        entries = t.fetch().to_raw_data()
+                        source = "youtube_captions"
+                        break
+                else:
+                    return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
-        lines = []
-        for entry in entries:
-            start = int(entry.get("start", 0))
-            duration = entry.get("duration", 0)
-            end = int(start + duration) if duration else start
-            s_min, s_sec = start // 60, start % 60
-            e_min, e_sec = end // 60, end % 60
-            text = entry.get("text", "").strip()
-            if text:
-                lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
+    return [{"video_id": video_id, "transcript": _format_entries(entries), "source": source}]
 
-        return [{"video_id": video_id, "transcript": "\n".join(lines), "source": source}]
 
-    except Exception as e:
-        log.warning("Transcript fetch failed for %s: %s", video_id, e)
-        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
+    """Fallback transcript fetcher using yt-dlp with browser cookies.
+
+    Uses your authenticated YouTube session so requests aren't treated as bot traffic.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    lang_str = ",".join(languages)
+
+    with tempfile.TemporaryDirectory(prefix="broll_subs_") as tmpdir:
+        sub_file_base = os.path.join(tmpdir, "subs")
+        cmd = [
+            "yt-dlp", *_cookie_args, url,
+            "--write-subs", "--write-auto-subs",
+            "--sub-langs", lang_str,
+            "--sub-format", "json3",
+            "--skip-download",
+            "--no-playlist", "--no-warnings",
+            "-o", sub_file_base,
+        ]
+
+        _yt_throttle()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
+                        video_id, proc.returncode, proc.stderr[:200].strip())
+            cmd_vtt = [
+                "yt-dlp", *_cookie_args, url,
+                "--write-subs", "--write-auto-subs",
+                "--sub-langs", lang_str,
+                "--sub-format", "vtt",
+                "--skip-download",
+                "--no-playlist", "--no-warnings",
+                "-o", sub_file_base,
+            ]
+            _yt_throttle()
+            proc = subprocess.run(cmd_vtt, capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+        sub_files = globmod_top.glob(os.path.join(tmpdir, "subs*"))
+        if not sub_files:
+            return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+        sub_path = sub_files[0]
+        source = "youtube_auto_captions" if ".auto." in os.path.basename(sub_path) else "youtube_captions"
+        source += "_ytdlp"
+
+        if sub_path.endswith(".json3"):
+            return _parse_json3_subs(video_id, sub_path, source)
+        else:
+            return _parse_vtt_subs(video_id, sub_path, source)
+
+
+def _parse_json3_subs(video_id: str, path: str, source: str) -> list[dict]:
+    """Parse YouTube json3 subtitle format into our timestamped transcript format."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    events = data.get("events", [])
+    lines = []
+    for ev in events:
+        start_ms = ev.get("tStartMs", 0)
+        duration_ms = ev.get("dDurationMs", 0)
+        segs = ev.get("segs", [])
+        text = "".join(s.get("utf8", "") for s in segs).strip()
+        text = text.replace("\n", " ")
+        if not text:
+            continue
+        start = start_ms // 1000
+        end = (start_ms + duration_ms) // 1000
+        s_min, s_sec = start // 60, start % 60
+        e_min, e_sec = end // 60, end % 60
+        lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
+
+    transcript = "\n".join(lines)
+    if transcript:
+        log.info("yt-dlp json3 subtitles: %d lines for %s", len(lines), video_id)
+    return [{"video_id": video_id, "transcript": transcript or None, "source": source}]
+
+
+def _parse_vtt_subs(video_id: str, path: str, source: str) -> list[dict]:
+    """Parse WebVTT subtitle format into our timestamped transcript format."""
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    timestamp_re = re.compile(
+        r"(\d{2}):(\d{2}):(\d{2})\.\d+ --> (\d{2}):(\d{2}):(\d{2})\.\d+"
+    )
+    lines = []
+    current_start = current_end = None
+    text_buf: list[str] = []
+
+    for line in content.split("\n"):
+        m = timestamp_re.match(line.strip())
+        if m:
+            if text_buf and current_start is not None:
+                text = " ".join(text_buf).strip()
+                if text and text not in ("", "&nbsp;"):
+                    lines.append(f"[{current_start // 60}:{current_start % 60:02d} → {current_end // 60}:{current_end % 60:02d}] {text}")
+                text_buf = []
+            h1, m1, s1, h2, m2, s2 = (int(x) for x in m.groups())
+            current_start = h1 * 3600 + m1 * 60 + s1
+            current_end = h2 * 3600 + m2 * 60 + s2
+        elif line.strip() and not line.strip().isdigit() and "WEBVTT" not in line:
+            clean = re.sub(r"<[^>]+>", "", line.strip())
+            if clean:
+                text_buf.append(clean)
+
+    if text_buf and current_start is not None:
+        text = " ".join(text_buf).strip()
+        if text:
+            lines.append(f"[{current_start // 60}:{current_start % 60:02d} → {current_end // 60}:{current_end % 60:02d}] {text}")
+
+    seen = set()
+    deduped = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            deduped.append(line)
+
+    transcript = "\n".join(deduped)
+    if transcript:
+        log.info("yt-dlp vtt subtitles: %d lines for %s", len(deduped), video_id)
+    return [{"video_id": video_id, "transcript": transcript or None, "source": source}]
+
+
+def _format_entries(entries: list[dict]) -> str:
+    """Format raw transcript entries into timestamped text."""
+    lines = []
+    for entry in entries:
+        start = int(entry.get("start", 0))
+        duration = entry.get("duration", 0)
+        end = int(start + duration) if duration else start
+        s_min, s_sec = start // 60, start % 60
+        e_min, e_sec = end // 60, end % 60
+        text = entry.get("text", "").strip()
+        if text:
+            lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
+    return "\n".join(lines)
 
 
 def whisper_transcribe(
@@ -753,6 +973,7 @@ def whisper_transcribe(
         ]
         try:
             log.info("Whisper: downloading audio for %s", video_id)
+            _yt_throttle()
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
             audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
             if proc.returncode != 0 or not audio_files:
@@ -972,6 +1193,7 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
     ]
 
     log.info("Clip download: %s [%s – %s]", video_id, start_ts, end_ts)
+    _yt_throttle()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode == 0 and os.path.exists(output_path):

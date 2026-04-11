@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import random
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -333,11 +334,21 @@ async def run_pipeline(
             for i in range(NUM_FETCH_WORKERS)
         ]
 
-        # Run all searches concurrently — new videos are queued for fetching immediately
-        await asyncio.gather(
-            *[_search_one_shot(seg, shot) for seg, shot in all_shots],
-            return_exceptions=True,
-        )
+        # Run searches with staggered dispatch — shuffle order and add small delays
+        # between launches to avoid burst patterns that trigger YouTube bot detection.
+        # The search_semaphore (5) still limits concurrency; this just spreads out start times.
+        shuffled_shots = list(all_shots)
+        random.shuffle(shuffled_shots)
+
+        async def _staggered_search():
+            tasks = []
+            for i, (seg, shot) in enumerate(shuffled_shots):
+                tasks.append(asyncio.create_task(_search_one_shot(seg, shot)))
+                if i < len(shuffled_shots) - 1:
+                    await asyncio.sleep(random.uniform(0.3, 1.2))
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        await _staggered_search()
 
         # All searches complete — no more new videos will be queued.
         # Wait for all queued transcript fetches to finish.

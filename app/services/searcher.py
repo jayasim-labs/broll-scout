@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from typing import Optional
@@ -16,9 +17,12 @@ logger = logging.getLogger(__name__)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
-# In-memory search cache with 7-day TTL
-_search_cache: dict[str, tuple[float, list[dict]]] = {}
+# Persistent search cache (DynamoDB) with 7-day TTL
 SEARCH_CACHE_TTL = 7 * 24 * 3600
+
+# In-memory LRU to avoid DynamoDB round-trips for hot keys within the same process
+_mem_cache: dict[str, tuple[float, list[dict]]] = {}
+_MEM_CACHE_MAX = 500
 
 INDIAN_GEO_KEYWORDS = {
     "india", "indian", "tamil", "tamil nadu", "chennai", "mumbai", "delhi",
@@ -257,17 +261,35 @@ def _cached_search_key(query: str, max_results: int) -> str:
     return f"{query}::{max_results}"
 
 
-def _get_cached_search(key: str) -> Optional[list[dict]]:
-    entry = _search_cache.get(key)
-    if entry and (time.time() - entry[0]) < SEARCH_CACHE_TTL:
-        return entry[1]
-    if entry:
-        del _search_cache[key]
+async def _get_cached_search_async(key: str) -> Optional[list[dict]]:
+    """Check in-memory cache, then fall back to DynamoDB."""
+    mem = _mem_cache.get(key)
+    if mem and (time.time() - mem[0]) < SEARCH_CACHE_TTL:
+        return mem[1]
+    if mem:
+        del _mem_cache[key]
+    try:
+        from app.services.storage import get_storage
+        results = await get_storage().get_search_cache(key)
+        if results is not None:
+            _mem_cache[key] = (time.time(), results)
+            return results
+    except Exception:
+        logger.debug("DynamoDB cache read error for %s", key[:60], exc_info=True)
     return None
 
 
-def _set_cached_search(key: str, results: list[dict]) -> None:
-    _search_cache[key] = (time.time(), results)
+async def _set_cached_search_async(key: str, results: list[dict]) -> None:
+    """Write to in-memory cache and DynamoDB."""
+    _mem_cache[key] = (time.time(), results)
+    if len(_mem_cache) > _MEM_CACHE_MAX:
+        oldest_key = min(_mem_cache, key=lambda k: _mem_cache[k][0])
+        del _mem_cache[oldest_key]
+    try:
+        from app.services.storage import get_storage
+        await get_storage().put_search_cache(key, results, ttl_seconds=SEARCH_CACHE_TTL)
+    except Exception:
+        logger.debug("DynamoDB cache write error for %s", key[:60], exc_info=True)
 
 
 def _is_portrait_aspect_ratio_9_16(width: int, height: int, tolerance: float) -> bool:
@@ -831,7 +853,9 @@ class SearcherService:
         emit=None,
     ) -> list[dict]:
         all_results: list[dict] = []
-        for ch_id in channel_ids:
+        for i, ch_id in enumerate(channel_ids):
+            if i > 0:
+                await asyncio.sleep(random.uniform(0.4, 1.0))
             try:
                 if emit:
                     url = f"https://www.youtube.com/channel/{ch_id}/search?query={query}"
@@ -859,14 +883,18 @@ class SearcherService:
         emit=None,
     ) -> list[dict]:
         all_results: list[dict] = []
+        uncached_count = 0
         for q in queries:
             cache_key = _cached_search_key(q, max_results)
-            cached = _get_cached_search(cache_key)
+            cached = await _get_cached_search_async(cache_key)
             if cached is not None:
                 all_results.extend(cached)
                 if emit:
                     await emit("check", f"→ {len(cached)} cached results for \"{q[:50]}\"", 3)
                 continue
+            if uncached_count > 0:
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+            uncached_count += 1
             try:
                 if emit:
                     await emit("terminal", f"▸ yt-dlp \"ytsearch{max_results}:{q}\" --dump-json --flat-playlist", 3)
@@ -874,7 +902,7 @@ class SearcherService:
                     query=q, max_results=max_results, job_id=job_id, backend=backend,
                 )
                 found = [r for r in results if r.get("video_id")]
-                _set_cached_search(cache_key, found)
+                await _set_cached_search_async(cache_key, found)
                 all_results.extend(found)
                 if emit:
                     await emit("check", f"→ {len(found)} results for \"{q[:50]}\"", 3)
@@ -917,7 +945,7 @@ class SearcherService:
             await emit("sparkles", f"Gemini suggested: {queries_preview}{'…' if len(expanded_queries) > 3 else ''}", 3)
 
         all_results: list[dict] = []
-        for q in expanded_queries:
+        for i, q in enumerate(expanded_queries):
             try:
                 if emit:
                     await emit("terminal", f"▸ yt-dlp \"ytsearch{max_results}:{q}\" --dump-json --flat-playlist", 3)
@@ -930,6 +958,8 @@ class SearcherService:
                     await emit("check", f"→ {len(found)} results for \"{q[:50]}\"", 3)
             except Exception:
                 logger.warning("Expanded query search failed for: %s", q)
+            if i < len(expanded_queries) - 1:
+                await asyncio.sleep(random.uniform(0.5, 1.5))
         return all_results
 
     async def _call_gemini(
