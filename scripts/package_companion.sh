@@ -16,8 +16,6 @@ cp "$PROJECT_DIR/broll-companion/companion.py"            "$DIST_DIR/broll-compa
 cp "$PROJECT_DIR/broll-companion/requirements.txt"        "$DIST_DIR/broll-companion/"
 cp "$PROJECT_DIR/broll-companion/setup.bat"               "$DIST_DIR/broll-companion/"
 cp "$PROJECT_DIR/broll-companion/setup.ps1"               "$DIST_DIR/broll-companion/"
-cp "$PROJECT_DIR/broll-companion/start-companion.bat"     "$DIST_DIR/broll-companion/"
-cp "$PROJECT_DIR/broll-companion/start-companion.ps1"     "$DIST_DIR/broll-companion/"
 cp "$PROJECT_DIR/broll-companion/stop.bat"                "$DIST_DIR/broll-companion/"
 cp "$PROJECT_DIR/broll-companion/update.bat"              "$DIST_DIR/broll-companion/"
 

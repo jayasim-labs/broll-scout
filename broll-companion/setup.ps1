@@ -1,20 +1,47 @@
-# B-Roll Scout - Full Editor Setup (PowerShell)
-# Called by setup.bat. Installs BOTH the Next.js web app AND the Python companion.
+# B-Roll Scout - Smart setup + launcher for Windows editors
+# First run:  installs prerequisites (~20 min), then launches
+# Every run:  skips what's already installed (~5 sec), then launches
+# Called by setup.bat (double-click to run).
 # ASCII-only to avoid UTF-8 parsing bugs in Windows PowerShell 5.1
 
 $ErrorActionPreference = "Stop"
 $CompanionDir = $PSScriptRoot
 $ProjectRoot = (Resolve-Path (Join-Path $CompanionDir "..")).Path
 $VenvDir = Join-Path $CompanionDir ".venv"
+$ActivateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
+$CompanionPy = Join-Path $CompanionDir "companion.py"
+
+$firstRun = $false
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  B-Roll Scout - Editor Setup" -ForegroundColor Cyan
+Write-Host "  B-Roll Scout" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# --- 1. Check Node.js ---
-Write-Host "[1/8] Checking Node.js..." -ForegroundColor Yellow
+# --- Cleanup old instances ---
+Write-Host "  Cleaning up old instances..." -ForegroundColor Gray
+$port3000 = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+if ($port3000) {
+    foreach ($line in $port3000) {
+        $pid = ($line -split '\s+')[-1]
+        if ($pid -match '^\d+$') { taskkill /f /pid $pid 2>$null | Out-Null }
+    }
+}
+$port9876 = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":9876 "
+if ($port9876) {
+    foreach ($line in $port9876) {
+        $pid = ($line -split '\s+')[-1]
+        if ($pid -match '^\d+$') { taskkill /f /pid $pid 2>$null | Out-Null }
+    }
+}
+
+# ===================================================================
+# PREREQUISITES - each section skips if already satisfied
+# ===================================================================
+
+# --- 1. Node.js ---
+Write-Host "[1/8] Node.js..." -ForegroundColor Yellow
 
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
@@ -31,9 +58,9 @@ if ($major -lt 18) {
     Write-Host "  OK - Node.js $nodeVer" -ForegroundColor Green
 }
 
-# --- 2. Check Python ---
+# --- 2. Python ---
 Write-Host ""
-Write-Host "[2/8] Checking Python..." -ForegroundColor Yellow
+Write-Host "[2/8] Python..." -ForegroundColor Yellow
 
 $pythonCmd = $null
 $pythonExe = Get-Command python -ErrorAction SilentlyContinue
@@ -57,6 +84,7 @@ if (-not $pythonCmd) {
 if (-not $pythonCmd) {
     $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     if ($wingetCmd) {
+        $firstRun = $true
         Write-Host "  Python not found. Installing via winget (1-2 min)..." -ForegroundColor Yellow
         winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
         Write-Host ""
@@ -69,9 +97,9 @@ if (-not $pythonCmd) {
     exit 1
 }
 
-# --- 3. Check yt-dlp and ffmpeg ---
+# --- 3. yt-dlp and ffmpeg ---
 Write-Host ""
-Write-Host "[3/8] Checking yt-dlp and ffmpeg..." -ForegroundColor Yellow
+Write-Host "[3/8] yt-dlp & ffmpeg..." -ForegroundColor Yellow
 
 $ytdlp = Get-Command yt-dlp -ErrorAction SilentlyContinue
 $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -79,6 +107,7 @@ $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
 if (-not $ytdlp -or -not $ffmpeg) {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
+        $firstRun = $true
         Write-Host "  Installing missing tools via winget..." -ForegroundColor White
         if (-not $ytdlp) {
             winget install --id yt-dlp.yt-dlp --accept-source-agreements --accept-package-agreements 2>$null
@@ -93,31 +122,39 @@ if (-not $ytdlp -or -not $ffmpeg) {
         if (-not $ffmpeg) { Write-Host "  ffmpeg not found. Install from: https://ffmpeg.org/download.html" -ForegroundColor Yellow }
     }
 } else {
-    Write-Host "  OK - yt-dlp and ffmpeg are installed" -ForegroundColor Green
+    Write-Host "  OK - yt-dlp and ffmpeg installed" -ForegroundColor Green
 }
 
-# --- 4. npm install ---
+# --- 4. npm packages ---
 Write-Host ""
-Write-Host "[4/8] Installing npm dependencies..." -ForegroundColor Yellow
+Write-Host "[4/8] npm packages..." -ForegroundColor Yellow
 
 Set-Location $ProjectRoot
-npm install --legacy-peer-deps
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  npm install failed. Fix errors above and re-run setup.bat." -ForegroundColor Red
-    exit 1
+$nodeModules = Join-Path $ProjectRoot "node_modules"
+if (Test-Path (Join-Path $nodeModules ".package-lock.json")) {
+    Write-Host "  OK - node_modules present" -ForegroundColor Green
+} else {
+    $firstRun = $true
+    Write-Host "  Running npm install (first time)..." -ForegroundColor White
+    npm install --legacy-peer-deps
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  npm install failed. Fix errors above and re-run setup.bat." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  OK - npm dependencies installed" -ForegroundColor Green
 }
-Write-Host "  OK - npm dependencies installed" -ForegroundColor Green
 
 # --- 5. Environment file ---
 Write-Host ""
-Write-Host "[5/8] Setting up environment (.env.local)..." -ForegroundColor Yellow
+Write-Host "[5/8] Environment (.env.local)..." -ForegroundColor Yellow
 
 $envLocal = Join-Path $ProjectRoot ".env.local"
 $envExample = Join-Path $ProjectRoot ".env.example"
 
 if (Test-Path $envLocal) {
-    Write-Host "  .env.local already exists (keeping your keys)" -ForegroundColor Green
+    Write-Host "  OK - .env.local exists" -ForegroundColor Green
 } elseif (Test-Path $envExample) {
+    $firstRun = $true
     Copy-Item $envExample $envLocal
     $secret = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
     $raw = Get-Content $envLocal -Raw
@@ -126,12 +163,13 @@ if (Test-Path $envLocal) {
     [System.IO.File]::WriteAllText($envLocal, $updated, $utf8NoBom)
     Write-Host "  OK - Created .env.local" -ForegroundColor Green
 } else {
-    Write-Host "  .env.example not found. Creating minimal .env.local..." -ForegroundColor Yellow
+    $firstRun = $true
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($envLocal, "BACKEND_URL=https://broll.jayasim.com`nBACKEND_API_KEY=zQCtPzOz1LU2rDK-vtzzcWey18yO1ZgqyU4cCloWwZE`n", $utf8NoBom)
+    Write-Host "  OK - Created minimal .env.local" -ForegroundColor Green
 }
 
-# Always ensure BACKEND_URL points to production API
+# Ensure BACKEND_URL points to production
 $envContent = Get-Content $envLocal -Raw
 if ($envContent -match 'BACKEND_URL=http://localhost') {
     $envContent = $envContent -replace 'BACKEND_URL=http://localhost:\d+', 'BACKEND_URL=https://broll.jayasim.com'
@@ -140,90 +178,81 @@ if ($envContent -match 'BACKEND_URL=http://localhost') {
     Write-Host "  Fixed BACKEND_URL -> https://broll.jayasim.com" -ForegroundColor Cyan
 } elseif ($envContent -notmatch 'BACKEND_URL=') {
     Add-Content $envLocal "`nBACKEND_URL=https://broll.jayasim.com"
-    Write-Host "  Added BACKEND_URL=https://broll.jayasim.com" -ForegroundColor Cyan
 }
-# Ensure BACKEND_API_KEY is present
 $envContent = Get-Content $envLocal -Raw
 if ($envContent -notmatch 'BACKEND_API_KEY=') {
     Add-Content $envLocal "`nBACKEND_API_KEY=zQCtPzOz1LU2rDK-vtzzcWey18yO1ZgqyU4cCloWwZE"
-    Write-Host "  Added BACKEND_API_KEY" -ForegroundColor Cyan
 }
-Write-Host "  OK - Backend: broll.jayasim.com" -ForegroundColor Green
 
 # --- 6. Python companion venv + packages ---
 Write-Host ""
-Write-Host "[6/8] Setting up Python companion..." -ForegroundColor Yellow
+Write-Host "[6/8] Python companion..." -ForegroundColor Yellow
 
-$activateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
-
-if (Test-Path $activateScript) {
-    Write-Host "  OK - Virtual environment already exists" -ForegroundColor Green
+if (Test-Path $ActivateScript) {
+    & $ActivateScript
+    $flaskCheck = python -c "import flask" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  OK - Virtual environment ready" -ForegroundColor Green
+    } else {
+        Write-Host "  Dependencies missing. Reinstalling..." -ForegroundColor Yellow
+        & python -m pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
+        Write-Host "  OK - Companion packages reinstalled" -ForegroundColor Green
+    }
 } else {
+    $firstRun = $true
     Write-Host "  Creating virtual environment..." -ForegroundColor White
     & $pythonCmd -m venv $VenvDir
-    if (-not (Test-Path $activateScript)) {
+    if (-not (Test-Path $ActivateScript)) {
         Write-Host "  ERROR: Failed to create virtual environment." -ForegroundColor Red
         exit 1
     }
-    Write-Host "  OK - Virtual environment created" -ForegroundColor Green
-}
+    & $ActivateScript
+    Write-Host "  Upgrading pip..." -ForegroundColor White
+    & python -m pip install --upgrade pip --quiet 2>$null
+    Write-Host "  Installing companion packages..." -ForegroundColor White
+    & python -m pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ERROR: Companion package installation failed." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  OK - Companion packages installed" -ForegroundColor Green
 
-Write-Host "  Activating environment..." -ForegroundColor White
-& $activateScript
-
-Write-Host "  Upgrading pip..." -ForegroundColor White
-& python -m pip install --upgrade pip --quiet 2>$null
-
-Write-Host "  Installing flask, flask-cors, yt-dlp, youtube-transcript-api, ollama..." -ForegroundColor White
-& python -m pip install flask flask-cors yt-dlp youtube-transcript-api ollama --quiet
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  ERROR: Companion package installation failed." -ForegroundColor Red
-    exit 1
-}
-Write-Host "  OK - Companion packages installed" -ForegroundColor Green
-
-Write-Host "  Installing Whisper AI (optional, speech-to-text)..." -ForegroundColor White
-& python -m pip install openai-whisper --quiet 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
-} else {
-    Write-Host "  OK - Whisper installed" -ForegroundColor Green
-    $modelFile = Join-Path $env:USERPROFILE ".cache\whisper\base.pt"
-    if ((Test-Path $modelFile) -and (Get-Item $modelFile).Length -gt 70000000) {
-        Write-Host "  OK - Whisper model already downloaded" -ForegroundColor Green
+    Write-Host "  Installing Whisper AI (speech-to-text)..." -ForegroundColor White
+    & python -m pip install openai-whisper --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
     } else {
-        Write-Host "  Skipping model pre-download. Will download on first use." -ForegroundColor Gray
+        Write-Host "  OK - Whisper installed" -ForegroundColor Green
     }
 }
 
-# --- 7. Install Ollama (local LLM for timestamp matching) ---
+# Update yt-dlp (quick, always do this)
+Write-Host "  Updating yt-dlp..." -ForegroundColor Gray
+& python -m pip install --upgrade yt-dlp --quiet 2>$null
+Write-Host "  OK - yt-dlp up to date" -ForegroundColor Green
+
+# --- 7. Ollama ---
 Write-Host ""
-Write-Host "[7/8] Setting up Ollama (local LLM, free timestamp matching)..." -ForegroundColor Yellow
+Write-Host "[7/8] Ollama..." -ForegroundColor Yellow
 
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if (-not $ollamaCmd) {
+    $firstRun = $true
     Write-Host "  Ollama not found. Downloading installer..." -ForegroundColor White
     $ollamaInstaller = Join-Path $env:TEMP "ollama-setup.exe"
     try {
         Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaInstaller -TimeoutSec 120
-        Write-Host "  Running Ollama installer (this may take a minute)..." -ForegroundColor White
+        Write-Host "  Running Ollama installer..." -ForegroundColor White
         Write-Host "  If an Ollama window opens, you can close it - setup will continue." -ForegroundColor Gray
         $installerProc = Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -PassThru -ErrorAction Stop
-
-        # Wait up to 90 seconds for the installer to finish
         $waited = 0
         while (-not $installerProc.HasExited -and $waited -lt 90) {
-            Start-Sleep -Seconds 2
-            $waited += 2
-            # Check if ollama.exe appeared on disk (installer done even if GUI still open)
+            Start-Sleep -Seconds 2; $waited += 2
             $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
             if (Test-Path $ollamaExe) { break }
         }
-
-        # Close the Ollama GUI app if it launched (it blocks the installer process)
         Get-Process -Name "Ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
-
         Remove-Item $ollamaInstaller -ErrorAction SilentlyContinue
         $env:PATH = "$env:LOCALAPPDATA\Programs\Ollama;$env:PATH"
         $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
@@ -235,13 +264,12 @@ if (-not $ollamaCmd) {
     } catch {
         Write-Host "  Could not install Ollama automatically: $_" -ForegroundColor Yellow
         Write-Host "  Install manually from: https://ollama.com/download" -ForegroundColor White
-        Write-Host "  Timestamp matching will use GPT-4o-mini (API) as fallback." -ForegroundColor Gray
     }
 } else {
-    Write-Host "  OK - Ollama already installed" -ForegroundColor Green
+    Write-Host "  OK - Ollama installed" -ForegroundColor Green
 }
 
-# Ensure Ollama >= 0.20.0 (required for Gemma 4 models)
+# Ensure Ollama >= 0.20.0 (required for Gemma 4)
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaCmd) {
     $minOllama = [version]"0.20.0"
@@ -250,7 +278,6 @@ if ($ollamaCmd) {
         if ($verOutput -match '(\d+\.\d+\.\d+)') {
             $currentVer = [version]$Matches[1]
             if ($currentVer -lt $minOllama) {
-                Write-Host ""
                 Write-Host "  Ollama $currentVer is too old for Gemma 4 (needs $minOllama+). Updating..." -ForegroundColor Yellow
                 $ollamaInstaller = Join-Path $env:TEMP "ollama-update.exe"
                 try {
@@ -273,80 +300,168 @@ if ($ollamaCmd) {
                     Write-Host "  Update manually from: https://ollama.com/download" -ForegroundColor White
                 }
             } else {
-                Write-Host "  OK - Ollama $currentVer (meets Gemma 4 requirement)" -ForegroundColor Green
+                Write-Host "  OK - Ollama $currentVer (Gemma 4 compatible)" -ForegroundColor Green
             }
         }
     } catch {}
 }
 
+# Start Ollama server with parallel=3
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaCmd) {
-    # Ensure Ollama server is running before pulling
+    Write-Host "  Starting Ollama (OLLAMA_NUM_PARALLEL=3)..." -ForegroundColor Gray
+    Get-Process -Name "ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    $env:OLLAMA_NUM_PARALLEL = "3"
+    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
+
     $ollamaRunning = $false
-    try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2; $ollamaRunning = $true } catch {}
-    if (-not $ollamaRunning) {
-        Write-Host "  Starting Ollama server..." -ForegroundColor Gray
-        Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
-        for ($i = 0; $i -lt 10; $i++) {
-            Start-Sleep -Seconds 1
-            try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2; $ollamaRunning = $true; break } catch {}
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 1
+        try {
+            $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+            Write-Host "  OK - Ollama running (parallel=3)" -ForegroundColor Green
+            $ollamaRunning = $true
+            break
+        } catch {}
+    }
+
+    # Pull models if missing (skips if already pulled)
+    if ($ollamaRunning) {
+        $installed = & ollama list 2>$null | Out-String
+        if ($installed -match "qwen3:8b") {
+            Write-Host "  OK - Qwen3 8B ready" -ForegroundColor Green
+        } else {
+            $firstRun = $true
+            Write-Host "  Pulling Qwen3 8B model (~5GB, one-time download)..." -ForegroundColor White
+            & ollama pull qwen3:8b
+            if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Qwen3 8B model ready" -ForegroundColor Green }
+            else { Write-Host "  NOTE: Qwen3 pull failed. Run 'ollama pull qwen3:8b' later." -ForegroundColor Yellow }
         }
-    }
 
-    Write-Host "  Pulling Qwen3 8B model (~5GB, one-time download)..." -ForegroundColor White
-    Write-Host "  This may take several minutes on first run." -ForegroundColor Gray
-    & ollama pull qwen3:8b
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  OK - Qwen3 8B model ready" -ForegroundColor Green
-    } else {
-        Write-Host "  NOTE: Model pull failed. You can run 'ollama pull qwen3:8b' later." -ForegroundColor Yellow
-        Write-Host "  Timestamp matching will use GPT-4o-mini (API) as fallback." -ForegroundColor Gray
-    }
+        if ($installed -match "gemma4:26b") {
+            Write-Host "  OK - Gemma 4 26B ready" -ForegroundColor Green
+        } else {
+            $firstRun = $true
+            Write-Host "  Pulling Gemma 4 26B MoE model (~18GB, one-time download)..." -ForegroundColor White
+            Write-Host "  This may take 10-20 minutes on first run." -ForegroundColor Gray
+            & ollama pull gemma4:26b
+            if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Gemma 4 26B MoE model ready" -ForegroundColor Green }
+            else { Write-Host "  NOTE: Gemma 4 pull failed. Pull from Settings or run: ollama pull gemma4:26b" -ForegroundColor Yellow }
+        }
 
-    Write-Host ""
-    Write-Host "  Pulling Gemma 4 26B MoE model (~18GB, one-time download)..." -ForegroundColor White
-    Write-Host "  This is the high-quality matcher. May take 10-20 minutes on first run." -ForegroundColor Gray
-    & ollama pull gemma4:26b
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  OK - Gemma 4 26B MoE model ready" -ForegroundColor Green
-    } else {
-        Write-Host "  NOTE: Gemma 4 pull failed. Pull later from Settings or run: ollama pull gemma4:26b" -ForegroundColor Yellow
+        Write-Host "  Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page." -ForegroundColor Cyan
     }
-
-    Write-Host ""
-    Write-Host "  Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page." -ForegroundColor Cyan
+} else {
+    Write-Host "  WARNING: Ollama not found - install from https://ollama.com" -ForegroundColor Yellow
 }
 
 # --- 8. Desktop shortcut ---
 Write-Host ""
-Write-Host "  Creating desktop shortcut..." -ForegroundColor Yellow
-try {
-    $WshShell = New-Object -ComObject WScript.Shell
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "B-Roll Scout.lnk"
-    $shortcut = $WshShell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = Join-Path $CompanionDir "start-companion.bat"
-    $shortcut.WorkingDirectory = $CompanionDir
-    $shortcut.Description = "Start B-Roll Scout"
-    $shortcut.Save()
-    Write-Host "  OK - 'B-Roll Scout' shortcut on Desktop" -ForegroundColor Green
-} catch {
-    Write-Host "  Could not create shortcut: $_" -ForegroundColor Yellow
+Write-Host "[8/8] Desktop shortcut..." -ForegroundColor Yellow
+
+$shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "B-Roll Scout.lnk"
+if (-not (Test-Path $shortcutPath) -or $firstRun) {
+    try {
+        $WshShell = New-Object -ComObject WScript.Shell
+        $shortcut = $WshShell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = Join-Path $CompanionDir "setup.bat"
+        $shortcut.WorkingDirectory = $CompanionDir
+        $shortcut.Description = "Start B-Roll Scout"
+        $shortcut.Save()
+        Write-Host "  OK - 'B-Roll Scout' shortcut on Desktop" -ForegroundColor Green
+    } catch {
+        Write-Host "  Could not create shortcut: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  OK - Desktop shortcut exists" -ForegroundColor Green
 }
 
-# --- Done ---
+# Cookie extraction
+if (-not $env:BROLL_COOKIE_BROWSER) {
+    $env:BROLL_COOKIE_BROWSER = "chrome"
+}
+
+# ===================================================================
+# LAUNCH
+# ===================================================================
+
 Write-Host ""
-Write-Host "========================================" -ForegroundColor Green
-Write-Host "  Setup complete!" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "  Starting B-Roll Scout now..." -ForegroundColor White
-Write-Host "  Next time, double-click 'B-Roll Scout' on your Desktop." -ForegroundColor White
+if ($firstRun) {
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Host "  Setup complete! Launching..." -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor Green
+} else {
+    Write-Host "  All checks passed." -ForegroundColor Green
+}
 Write-Host ""
 
-$startScript = Join-Path $CompanionDir "start-companion.ps1"
-if (Test-Path $startScript) {
-    & $startScript
+# --- Start Next.js dev server in background ---
+Write-Host "  Starting web app on http://localhost:3000 ..." -ForegroundColor White
+
+$nextBin = Join-Path $ProjectRoot "node_modules\.bin\next.cmd"
+if (-not (Test-Path $nextBin)) {
+    Write-Host "  next.cmd not found. Running npm install..." -ForegroundColor Yellow
+    Set-Location $ProjectRoot
+    npm install --legacy-peer-deps
+}
+
+$cmdArgs = '/c cd /d "' + $ProjectRoot + '" & npx next dev'
+$npmJob = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Minimized -PassThru
+
+Write-Host "  Waiting for web app to start..." -ForegroundColor Gray
+$ready = $false
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    $check = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+    if ($check) { $ready = $true; break }
+}
+
+if ($ready) {
+    Write-Host "  OK - Web app running on http://localhost:3000" -ForegroundColor Green
+    Start-Process "http://localhost:3000"
 } else {
-    Write-Host "  ERROR: start-companion.ps1 not found at $startScript" -ForegroundColor Red
+    Write-Host "  WARNING: Web app may still be starting. Check the minimized window." -ForegroundColor Yellow
+}
+
+# --- Info ---
+Write-Host ""
+Write-Host "  Companion:  http://127.0.0.1:9876" -ForegroundColor White
+Write-Host "  Web app:    http://localhost:3000" -ForegroundColor White
+Write-Host "  ----------------------------------------" -ForegroundColor Gray
+Write-Host "  Keep this window open. Press Ctrl+C to stop." -ForegroundColor White
+Write-Host ""
+Write-Host "  Starting companion server..." -ForegroundColor Green
+Write-Host ""
+
+# --- Run companion in foreground ---
+if (-not (Test-Path $CompanionPy)) {
+    Write-Host "  ERROR: companion.py not found at $CompanionPy" -ForegroundColor Red
     exit 1
 }
+
+try {
+    python $CompanionPy
+} catch {
+    Write-Host ""
+    $errMsg = $_.ToString()
+    Write-Host "  ERROR: companion.py crashed: $errMsg" -ForegroundColor Red
+}
+
+# --- Cleanup ---
+Write-Host ""
+Write-Host "  ----------------------------------------" -ForegroundColor Gray
+Write-Host "  Companion stopped. Cleaning up..." -ForegroundColor Yellow
+
+if ($npmJob -and -not $npmJob.HasExited) {
+    taskkill /f /t /pid $npmJob.Id 2>$null | Out-Null
+}
+$port3000 = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
+if ($port3000) {
+    foreach ($line in $port3000) {
+        $pid = ($line -split '\s+')[-1]
+        if ($pid -match '^\d+$') { taskkill /f /pid $pid 2>$null | Out-Null }
+    }
+}
+
+Write-Host "  Done." -ForegroundColor Green

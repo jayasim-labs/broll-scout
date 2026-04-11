@@ -486,10 +486,8 @@ BRoll Scout/
 ├── broll-companion/
 │   ├── companion.py             # Flask: yt-dlp, transcripts, Whisper, Ollama, clips
 │   ├── requirements.txt         # Python dependencies
-│   ├── setup.bat / setup.ps1    # Windows one-click setup
-│   ├── setup.sh / setup.command # macOS one-click setup
-│   ├── start-companion.bat/.ps1 # Windows daily launcher
-│   ├── start-companion.sh/.command # macOS daily launcher
+│   ├── setup.bat / setup.ps1    # Windows: install + launch (smart — skips what's installed)
+│   ├── setup.sh / setup.command # macOS: install + launch (smart — skips what's installed)
 │   ├── stop.bat                 # Force-kill all processes (Windows)
 │   └── update.bat               # Update yt-dlp and packages (Windows)
 ├── scripts/
