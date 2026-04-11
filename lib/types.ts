@@ -350,6 +350,7 @@ export interface PipelineSettings {
   lightweight_model: string
   confidence_threshold: number
   whisper_model: string
+  whisper_concurrency: number
   whisper_max_video_duration_min: number
 
   // Video filtering & ranking

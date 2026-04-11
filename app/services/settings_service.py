@@ -538,6 +538,12 @@ class SettingsService:
         if key == "whisper_model":
             return value in ("large-v3-turbo", "large-v3", "small", "base")
 
+        if key == "whisper_concurrency":
+            try:
+                return 1 <= int(value) <= 6
+            except (TypeError, ValueError):
+                return False
+
         if key == "preferred_channels_tier1" and isinstance(value, list):
             for ch in value:
                 if isinstance(ch, str) and not ch.startswith("UC"):

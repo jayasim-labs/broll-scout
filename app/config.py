@@ -51,6 +51,7 @@ DEFAULTS = {
     "top_results_per_shot": 5,
     "top_results_per_segment": 5,
     "whisper_model": "large-v3-turbo",
+    "whisper_concurrency": 2,
     "whisper_max_video_duration_min": 60,
     "avg_whisper_processing_sec": 45,
     "transcript_excerpt_max_words": 200,

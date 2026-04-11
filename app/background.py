@@ -223,7 +223,8 @@ async def run_pipeline(
         transcript_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         search_semaphore = asyncio.Semaphore(5)
         transcript_semaphore = asyncio.Semaphore(max(5, pipeline_cfg.get("max_concurrent_candidates", 3)))
-        whisper_semaphore = asyncio.Semaphore(1)  # only 1 Whisper at a time — they're GPU/CPU heavy
+        whisper_concurrency = int(pipeline_cfg.get("whisper_concurrency", 2))
+        whisper_semaphore = asyncio.Semaphore(whisper_concurrency)
         whisper_queue_count = 0
         whisper_queue_lock = asyncio.Lock()
 
@@ -312,7 +313,6 @@ async def run_pipeline(
                             job_id=job_id,
                             on_whisper_start=_on_whisper_start,
                             whisper_gate=whisper_semaphore,
-                            skip_whisper=True,
                         )
                         fetch_elapsed = round(time.time() - fetch_start, 1)
                         transcript_cache[vid] = t.transcript_text
@@ -372,36 +372,56 @@ async def run_pipeline(
         await _staggered_search()
 
         # All searches complete — no more new videos will be queued.
-        # Wait for all queued transcript fetches to finish.
-        # Whisper is skipped in this phase (skip_whisper=True), so fetches are fast
-        # (YouTube captions / companion agent only). Timeout is much shorter now.
-        TRANSCRIPT_FETCH_TIMEOUT = min(300, max(120, len(video_pool) * 2))
+        # Wait for all queued transcript fetches to finish, including Whisper.
+        # For long-form scripts with many candidates needing Whisper (~8 min each),
+        # this can take hours — that's expected and acceptable for production use.
         total_to_fetch = len(video_pool)
         already_done = len(transcript_cache) + len(failed_fetches)
+        whisper_needing = total_to_fetch - already_done
+        # Generous timeout: assume worst case all remaining need Whisper at ~10 min each,
+        # divided by concurrency, plus buffer. Minimum 10 min, max 8 hours.
+        estimated_whisper_sec = (whisper_needing * 600) // max(whisper_concurrency, 1)
+        TRANSCRIPT_FETCH_TIMEOUT = min(8 * 3600, max(600, estimated_whisper_sec + 300))
         remaining = total_to_fetch - already_done
         if remaining > 0:
-            _log_activity(job_id, "clock", f"All searches done! Now waiting for {remaining} remaining transcript fetches (captions only — Whisper will run later for unfilled shots)", depth=1, group="search")
+            est_min = round(estimated_whisper_sec / 60)
+            _log_activity(job_id, "clock", f"All searches done! Fetching {remaining} remaining transcripts (captions + Whisper ×{whisper_concurrency} concurrent, est. up to ~{est_min}m)", depth=1, group="search")
         else:
             _log_activity(job_id, "check", f"All {total_to_fetch} transcripts already fetched during search", depth=1, group="search")
 
         async def _transcript_progress_reporter():
-            """Periodically log transcript fetch progress so the UI doesn't appear stuck."""
+            """Periodically log transcript fetch progress with rate and ETA."""
             last_count = len(transcript_cache) + len(failed_fetches)
+            phase_start = time.time()
+            last_log_time = phase_start
             while True:
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
                 done_now = len(transcript_cache) + len(failed_fetches)
                 pending_now = total_to_fetch - done_now
                 if pending_now <= 0:
                     break
+                elapsed_min = round((time.time() - phase_start) / 60, 1)
+                whisper_count = sum(1 for s in transcript_sources.values() if "Whisper" in s)
+                caption_count = done_now - whisper_count - len(failed_fetches)
+                rate = done_now / max(elapsed_min, 0.1)
+                eta_min = round(pending_now / max(rate, 0.01), 0) if rate > 0.1 else "?"
+                pct = 40 + int(15 * done_now / max(total_to_fetch, 1))
                 if done_now != last_count:
-                    whisper_count = sum(1 for s in transcript_sources.values() if "Whisper" in s)
-                    _log_activity(job_id, "clock", f"Transcripts: {done_now}/{total_to_fetch} done ({pending_now} remaining, {whisper_count} via Whisper so far)", depth=1, group="search")
-                    _set_progress(job_id, "searching", 40 + int(15 * done_now / max(total_to_fetch, 1)),
-                                  f"Fetching transcripts: {done_now}/{total_to_fetch} ({pending_now} remaining)")
+                    _log_activity(
+                        job_id, "clock",
+                        f"Transcripts: {done_now}/{total_to_fetch} "
+                        f"({caption_count} captions, {whisper_count} Whisper, {len(failed_fetches)} failed) "
+                        f"— {elapsed_min}m elapsed, ~{eta_min}m remaining",
+                        depth=1, group="search",
+                    )
+                    _set_progress(job_id, "searching", pct,
+                                  f"Fetching transcripts: {done_now}/{total_to_fetch} ({pending_now} remaining, ~{eta_min}m ETA)")
                     last_count = done_now
-                else:
-                    _set_progress(job_id, "searching", 40 + int(15 * done_now / max(total_to_fetch, 1)),
-                                  f"Waiting for Whisper transcription... ({pending_now} videos remaining)")
+                    last_log_time = time.time()
+                elif (time.time() - last_log_time) > 120:
+                    _set_progress(job_id, "searching", pct,
+                                  f"Whisper transcribing... {done_now}/{total_to_fetch} done, {pending_now} queued ({elapsed_min}m elapsed)")
+                    last_log_time = time.time()
 
         progress_reporter = asyncio.create_task(_transcript_progress_reporter())
 
@@ -419,7 +439,8 @@ async def run_pipeline(
                 "Job %s: transcript fetch timed out after %ds — %d/%d fetched, %d still pending",
                 job_id, TRANSCRIPT_FETCH_TIMEOUT, fetched_count, total_to_fetch, pending_count,
             )
-            _log_activity(job_id, "alert", f"Transcript fetch timed out after {TRANSCRIPT_FETCH_TIMEOUT // 60}m — proceeding with {fetched_count} of {total_to_fetch} transcripts", depth=1, group="search")
+            whisper_done = sum(1 for s in transcript_sources.values() if "Whisper" in s)
+            _log_activity(job_id, "alert", f"Transcript phase reached {TRANSCRIPT_FETCH_TIMEOUT // 60}m limit — proceeding with {fetched_count}/{total_to_fetch} transcripts ({whisper_done} via Whisper, {pending_count} still pending)", depth=1, group="search")
         finally:
             progress_reporter.cancel()
             try:
@@ -458,7 +479,7 @@ async def run_pipeline(
         source_counts: dict[str, int] = {}
         for src in transcript_sources.values():
             source_counts[src] = source_counts.get(src, 0) + 1
-        whisper_ok = source_counts.get("Whisper base (local)", 0)
+        whisper_ok = sum(v for k, v in source_counts.items() if "Whisper" in k)
         cache_hits = source_counts.get("DynamoDB cache", 0)
         yt_manual = source_counts.get("YouTube manual captions", 0)
         yt_auto = source_counts.get("YouTube auto-captions", 0)
@@ -660,93 +681,6 @@ async def run_pipeline(
         all_results: List[RankedResult] = []
         for results in all_segment_results.values():
             all_results.extend(results)
-
-        # --- Whisper backfill: targeted transcription for unfilled shots ---
-        # During the fast first pass, Whisper was skipped. Now identify shots
-        # with no results whose candidates had no transcript, and run Whisper
-        # only for those videos. This avoids wasting 8 min/video on videos
-        # that would never be selected while getting transcripts where needed.
-        unfilled_shot_ids: set = set()
-        for seg in active_segments:
-            seg_results = all_segment_results.get(seg.segment_id, [])
-            filled_shots = {r.shot_id for r in seg_results}
-            for s, shot in all_shots:
-                if s.segment_id == seg.segment_id and shot.shot_id not in filled_shots:
-                    unfilled_shot_ids.add(shot.shot_id)
-
-        if unfilled_shot_ids:
-            # Find candidate videos for unfilled shots that had no transcript
-            whisper_candidates: Dict[str, CandidateVideo] = {}
-            for shot_id in unfilled_shot_ids:
-                for cand in shot_candidates.get(shot_id, []):
-                    vid = cand.video_id
-                    if vid not in transcript_cache or transcript_cache.get(vid) is None:
-                        if vid not in failed_fetches and vid in video_pool:
-                            whisper_candidates[vid] = video_pool[vid]
-
-            if whisper_candidates:
-                max_whisper_backfill = min(len(whisper_candidates), 10)
-                sorted_wc = sorted(whisper_candidates.values(), key=lambda c: c.video_duration_seconds or 9999)[:max_whisper_backfill]
-
-                _set_progress(job_id, "matching", 82, f"Running Whisper for {len(sorted_wc)} videos to fill {len(unfilled_shot_ids)} empty shots...")
-                _log_activity(job_id, "clock", f"🎙️ Whisper backfill: transcribing {len(sorted_wc)} short videos (skipped during fast pass) to fill {len(unfilled_shot_ids)} unfilled shots", group="whisper")
-
-                whisper_backfill_count = 0
-                for cand in sorted_wc:
-                    vid = cand.video_id
-                    dur_m = round((cand.video_duration_seconds or 0) / 60, 1)
-                    _log_activity(job_id, "clock", f"🎙️ Whisper backfill: \"{cand.video_title[:45]}\" ({dur_m}m) — https://youtu.be/{vid}", depth=1, group="whisper")
-                    try:
-                        t = await transcriber.get_transcript(
-                            vid,
-                            video_duration_seconds=cand.video_duration_seconds,
-                            job_id=job_id,
-                            skip_whisper=False,
-                        )
-                        if t.transcript_text:
-                            transcript_cache[vid] = t.transcript_text
-                            transcript_sources[vid] = "Whisper (backfill)"
-                            whisper_backfill_count += 1
-                            _log_activity(job_id, "check", f"✅ Whisper done: \"{cand.video_title[:45]}\" — https://youtu.be/{vid}", depth=1, group="whisper")
-
-                            # Re-match this video against its unfilled shots
-                            affected_shots = [
-                                (seg, shot) for seg, shot in all_shots
-                                if shot.shot_id in unfilled_shot_ids and vid in [c.video_id for c in shot_candidates.get(shot.shot_id, [])]
-                            ]
-                            for seg, shot in affected_shots:
-                                try:
-                                    match = await matcher.find_timestamp(
-                                        segment=seg,
-                                        shot=shot,
-                                        candidate=cand,
-                                        transcript_text=t.transcript_text,
-                                        script_context=script_context,
-                                    )
-                                    if match and match.relevance_score > 0.3:
-                                        ranked = ranker.rank_and_filter(
-                                            [match], shot, used_timestamps,
-                                        )
-                                        if ranked:
-                                            seg_results = all_segment_results.get(seg.segment_id, [])
-                                            seg_results.extend(ranked)
-                                            all_segment_results[seg.segment_id] = seg_results
-                                            unfilled_shot_ids.discard(shot.shot_id)
-                                            _log_activity(job_id, "check", f"✓ Whisper match: \"{shot.visual_need[:40]}\" → \"{cand.video_title[:40]}\" ({match.relevance_score:.0%})", depth=2, group="whisper")
-                                except Exception:
-                                    logger.warning("Whisper backfill match failed for %s / %s", vid, shot.shot_id)
-                        else:
-                            failed_fetches.add(vid)
-                    except Exception:
-                        logger.warning("Whisper backfill failed for %s", vid)
-                        failed_fetches.add(vid)
-
-                if whisper_backfill_count:
-                    _log_activity(job_id, "check", f"Whisper backfill: {whisper_backfill_count}/{len(sorted_wc)} videos transcribed, filled some empty shots", group="whisper")
-                    # Rebuild all_results after backfill matches
-                    all_results = []
-                    for results in all_segment_results.values():
-                        all_results.extend(results)
 
         # --- Re-search pass: failure-mode-aware, 2-attempt cap ---
         from app.models.schemas import AuditStatus, Scarcity, ShotIntent

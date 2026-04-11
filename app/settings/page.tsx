@@ -1138,6 +1138,11 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             </p>
           </div>
           <SliderSetting
+            label="Whisper concurrency" value={settings.whisper_concurrency ?? 2} min={1} max={6}
+            onChange={(v) => onChange("whisper_concurrency", v)}
+            help="Number of videos transcribed by Whisper simultaneously. M4 Mac: 2 recommended. Windows with 4090/5090: 3-4 recommended. Higher uses more GPU memory but finishes faster."
+          />
+          <SliderSetting
             label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120}
             onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min"
             help="Videos longer than this are skipped for Whisper transcription (too slow/large to download audio locally). Only applies when no YouTube captions exist."
