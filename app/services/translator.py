@@ -122,11 +122,11 @@ Do the following in one response:
        * Each entry should be a proper noun, specific name, or highly specific concept — the kind of word that narrows YouTube results to THIS script's topic
 
 3. Break the English translation into segments based on NATURAL narrative shifts.
-   Do NOT force one segment per minute. Some sections naturally run 2-3 minutes
-   on the same theme — keep them as one segment. Other sections may shift
-   topics every 30 seconds — split those.
-   Typical range: 15-25 segments for a 30-minute script.
-   Let the script's own rhythm dictate the splits.
+   PREFER GRANULAR SPLITS: each distinct subtopic, event, era, or location should be its OWN segment.
+   Do NOT merge multiple distinct topics into one long segment just to keep segment count low.
+   A 30-minute script typically has 12-20 segments; a 50-minute script typically has 15-25 segments.
+   When in doubt, SPLIT into more segments rather than fewer — each segment gets independent YouTube searches, so more segments = better search coverage.
+   Only merge if the content is truly one continuous theme with no clear narrative shift.
 
 4. For each segment, return:
    - segment_id (format: seg_001, seg_002, ...)
@@ -144,7 +144,7 @@ Do the following in one response:
        * 1 clip: a very brief single concept (rare — most segments benefit from 2+).
        * 2-3 clips: the STANDARD for most segments — a location PLUS a historical event PLUS a contextual visual. Each shot must be a genuinely different visual need.
        * 4+ clips: for segments covering multiple distinct events, locations, or concepts in sequence. This is COMMON for documentary content — don't hesitate to use it.
-       AIM HIGH on broll_count — editors would rather have 40 diverse shots to choose from than 20 generic ones. When in doubt, add another shot with a different visual angle on the same topic. A 30-minute script typically needs 30-45 total B-roll shots.
+       AIM HIGH on broll_count — editors would rather have 40 diverse shots to choose from than 20 generic ones. When in doubt, add another shot with a different visual angle on the same topic. A 30-minute script typically needs 30-45 total B-roll shots across 12-20 segments. Do NOT reduce segment count to increase per-segment broll_count — keep segments granular AND give each one 2-4 shots.
    - broll_note: if broll_count is 0, explain why (e.g., "Host on camera — no B-roll needed"). Otherwise null.
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
