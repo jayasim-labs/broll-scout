@@ -194,6 +194,25 @@ else
     fi
 fi
 
+# Ensure Ollama >= 0.20.0 (required for Gemma 4 models)
+MIN_OLLAMA="0.20.0"
+if command -v ollama &>/dev/null; then
+    CURRENT_VER=$(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$CURRENT_VER" ]; then
+        # Compare versions: returns 0 if current >= min
+        if ! printf '%s\n%s\n' "$MIN_OLLAMA" "$CURRENT_VER" | sort -V | head -1 | grep -qx "$MIN_OLLAMA"; then
+            echo ""
+            echo -e "  ${Y}Ollama $CURRENT_VER is too old for Gemma 4 (needs $MIN_OLLAMA+). Upgrading...${NC}"
+            if brew upgrade ollama 2>/dev/null; then
+                ok "Ollama upgraded to $(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            else
+                warn "Auto-upgrade failed. Update Ollama manually: brew upgrade ollama"
+                echo "  Or download from: https://ollama.com/download"
+            fi
+        fi
+    fi
+fi
+
 if command -v ollama &>/dev/null; then
     # Start Ollama if not running
     if ! curl -s http://127.0.0.1:11434/api/tags &>/dev/null; then

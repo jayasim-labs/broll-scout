@@ -87,6 +87,7 @@ MATCHER_MODELS = {
         "num_predict": 1024,
         "min_vram_gb": 18,
         "pull_size_gb": 18,
+        "min_ollama_version": "0.20.0",
     },
     "gemma4:e4b": {
         "ollama_name": "gemma4:e4b",
@@ -95,6 +96,7 @@ MATCHER_MODELS = {
         "num_predict": 1024,
         "min_vram_gb": 10,
         "pull_size_gb": 9.6,
+        "min_ollama_version": "0.20.0",
     },
     "qwen3:4b": {
         "ollama_name": "qwen3:4b",
@@ -326,15 +328,29 @@ def models_status():
     except Exception:
         pass
 
+    def _version_tuple(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.split(".")[:3])
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
     model_statuses = {}
     for key, cfg in MATCHER_MODELS.items():
         installed = _is_model_installed(key, installed_names)
+        min_ver = cfg.get("min_ollama_version")
+        ollama_outdated = (
+            min_ver is not None
+            and ollama_version != "unknown"
+            and _version_tuple(ollama_version) < _version_tuple(min_ver)
+        )
         model_statuses[key] = {
             "installed": installed,
             "ready": installed and ollama_running,
             "display_name": cfg["display_name"],
             "min_vram_gb": cfg["min_vram_gb"],
             "pull_size_gb": cfg["pull_size_gb"],
+            "ollama_outdated": ollama_outdated,
+            "min_ollama_version": min_ver,
         }
 
     return jsonify({
@@ -368,8 +384,14 @@ def models_pull():
             log.info("Model %s pulled successfully", model_name)
             return jsonify({"status": "ok", "model": model_key})
         else:
-            log.warning("Model pull failed for %s: %s", model_name, proc.stderr[:500])
-            return jsonify({"error": proc.stderr[:500] or "Pull failed"}), 500
+            stderr = proc.stderr[:500]
+            log.warning("Model pull failed for %s: %s", model_name, stderr)
+            if "412" in stderr or "newer version" in stderr.lower():
+                return jsonify({
+                    "error": "Ollama is outdated. Update it at https://ollama.com/download then retry.",
+                    "update_required": True,
+                }), 500
+            return jsonify({"error": stderr or "Pull failed"}), 500
     except subprocess.TimeoutExpired:
         log.warning("Model pull timed out for %s (30 min limit)", model_name)
         return jsonify({"error": "Pull timed out (30 min limit)"}), 500

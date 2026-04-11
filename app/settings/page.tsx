@@ -706,6 +706,8 @@ interface ModelStatus {
   display_name: string
   min_vram_gb: number
   pull_size_gb: number
+  ollama_outdated?: boolean
+  min_ollama_version?: string | null
 }
 
 interface ModelsStatusResponse {
@@ -821,6 +823,7 @@ function ModelSelector({ currentModel, onSelect }: { currentModel: string; onSel
         const isReady = ms?.ready ?? false
         const isInstalled = ms?.installed ?? false
         const isPulling = pulling === key
+        const isOllamaOutdated = ms?.ollama_outdated ?? false
 
         return (
           <label
@@ -852,8 +855,21 @@ function ModelSelector({ currentModel, onSelect }: { currentModel: string; onSel
                     meta.badge === "Default" ? "bg-blue-500/10 text-blue-500" : "bg-purple-500/10 text-purple-500",
                   )}>{meta.badge}</span>
                 )}
+                {isOllamaOutdated && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-500/10 text-red-500">
+                    Ollama outdated
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-muted-foreground/70 mt-0.5">{meta.subtitle}</p>
+              {isOllamaOutdated && !isInstalled && (
+                <p className="text-[11px] text-red-400 mt-1">
+                  Requires Ollama {ms?.min_ollama_version}+. Current: {statuses?.ollama_version}.{" "}
+                  <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="underline hover:text-red-300">
+                    Update Ollama
+                  </a>
+                </p>
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0 mt-0.5">
@@ -870,6 +886,15 @@ function ModelSelector({ currentModel, onSelect }: { currentModel: string; onSel
                 <span className="flex items-center gap-1 text-xs text-yellow-500">
                   <span className="w-2 h-2 rounded-full bg-yellow-500" /> Installed (Ollama down)
                 </span>
+              ) : isOllamaOutdated ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1 border-red-500/30 text-red-400"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); window.open("https://ollama.com/download", "_blank") }}
+                >
+                  Update Ollama
+                </Button>
               ) : (
                 <Button
                   variant="outline"

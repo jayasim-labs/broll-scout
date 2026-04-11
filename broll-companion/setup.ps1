@@ -241,6 +241,44 @@ if (-not $ollamaCmd) {
     Write-Host "  OK - Ollama already installed" -ForegroundColor Green
 }
 
+# Ensure Ollama >= 0.20.0 (required for Gemma 4 models)
+$ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+if ($ollamaCmd) {
+    $minOllama = [version]"0.20.0"
+    try {
+        $verOutput = & ollama --version 2>&1
+        if ($verOutput -match '(\d+\.\d+\.\d+)') {
+            $currentVer = [version]$Matches[1]
+            if ($currentVer -lt $minOllama) {
+                Write-Host ""
+                Write-Host "  Ollama $currentVer is too old for Gemma 4 (needs $minOllama+). Updating..." -ForegroundColor Yellow
+                $ollamaInstaller = Join-Path $env:TEMP "ollama-update.exe"
+                try {
+                    Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaInstaller -TimeoutSec 120
+                    $updateProc = Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -PassThru -ErrorAction Stop
+                    $waited = 0
+                    while (-not $updateProc.HasExited -and $waited -lt 90) {
+                        Start-Sleep -Seconds 2; $waited += 2
+                        $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+                        if (Test-Path $ollamaExe) { break }
+                    }
+                    Get-Process -Name "Ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 1
+                    Remove-Item $ollamaInstaller -ErrorAction SilentlyContinue
+                    $env:PATH = "$env:LOCALAPPDATA\Programs\Ollama;$env:PATH"
+                    $newVer = & ollama --version 2>&1
+                    Write-Host "  OK - Ollama updated ($newVer)" -ForegroundColor Green
+                } catch {
+                    Write-Host "  Auto-update failed: $_" -ForegroundColor Yellow
+                    Write-Host "  Update manually from: https://ollama.com/download" -ForegroundColor White
+                }
+            } else {
+                Write-Host "  OK - Ollama $currentVer (meets Gemma 4 requirement)" -ForegroundColor Green
+            }
+        }
+    } catch {}
+}
+
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaCmd) {
     # Ensure Ollama server is running before pulling

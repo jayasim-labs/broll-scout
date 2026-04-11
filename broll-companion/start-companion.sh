@@ -74,6 +74,21 @@ fi
 
 # ─── Start Ollama with parallel=3 ────────────────────────────────────
 if command -v ollama &>/dev/null; then
+    # Ensure Ollama >= 0.20.0 (required for Gemma 4 models)
+    MIN_OLLAMA="0.20.0"
+    CURRENT_VER=$(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$CURRENT_VER" ]; then
+        if ! printf '%s\n%s\n' "$MIN_OLLAMA" "$CURRENT_VER" | sort -V | head -1 | grep -qx "$MIN_OLLAMA"; then
+            echo -e "  ${Y}Ollama $CURRENT_VER is too old for Gemma 4 (needs $MIN_OLLAMA+). Upgrading...${NC}"
+            if brew upgrade ollama 2>/dev/null; then
+                echo -e "  ${G}✓ Ollama upgraded to $(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)${NC}"
+            else
+                echo -e "  ${Y}⚠ Auto-upgrade failed. Run: brew upgrade ollama${NC}"
+                echo -e "  ${Y}  Or download from: https://ollama.com/download${NC}"
+            fi
+        fi
+    fi
+
     echo -e "${DIM}  Restarting Ollama (OLLAMA_NUM_PARALLEL=3)...${NC}"
     pkill -f "ollama serve" 2>/dev/null || true
     sleep 1
