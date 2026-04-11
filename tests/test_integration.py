@@ -1589,8 +1589,19 @@ class TestTranslatorPromptQuality:
 
     @pytest.mark.asyncio
     async def test_translator_no_retry_on_low_shots(self):
-        """The translator should NOT retry when shot count is below script duration."""
+        """The translator should NOT retry when shot count is low but segment count is adequate."""
         from app.services.translator import TranslatorService
+
+        def _make_seg(i, dur=150):
+            return {
+                "segment_id": f"seg_{i:03d}", "title": f"Seg {i}", "summary": "S",
+                "visual_need": "v", "emotional_tone": "calm",
+                "key_terms": ["test"], "search_queries": ["test"],
+                "estimated_duration_seconds": dur, "broll_count": 1,
+                "broll_shots": [
+                    {"shot_id": f"seg_{i:03d}_shot_1", "visual_need": "v1", "search_queries": ["q1"], "key_terms": ["k1"]},
+                ],
+            }
 
         mock_response = {
             "english_translation": "Test translation",
@@ -1601,24 +1612,12 @@ class TestTranslatorPromptQuality:
                 "temporal_scope": "modern",
                 "exclusion_context": "none",
             },
-            "segments": [
-                {
-                    "segment_id": "seg_001", "title": "Seg 1", "summary": "S",
-                    "visual_need": "v", "emotional_tone": "calm",
-                    "key_terms": ["test"], "search_queries": ["test"],
-                    "estimated_duration_seconds": 300, "broll_count": 3,
-                    "broll_shots": [
-                        {"shot_id": "seg_001_shot_1", "visual_need": "v1", "search_queries": ["q1"], "key_terms": ["k1"]},
-                        {"shot_id": "seg_001_shot_2", "visual_need": "v2", "search_queries": ["q2"], "key_terms": ["k2"]},
-                        {"shot_id": "seg_001_shot_3", "visual_need": "v3", "search_queries": ["q3"], "key_terms": ["k3"]},
-                    ],
-                },
-            ],
+            "segments": [_make_seg(i) for i in range(1, 18)],
             "segment_summary": {
-                "total_segments": 1,
-                "total_broll_shots": 3,
+                "total_segments": 17,
+                "total_broll_shots": 17,
                 "segments_needing_no_broll": 0,
-                "coverage_note": "3 shots for 1 segment. Adequate for content.",
+                "coverage_note": "17 shots for 17 segments.",
             },
         }
 
@@ -1633,13 +1632,12 @@ class TestTranslatorPromptQuality:
         with patch.object(TranslatorService, "_call_openai", mock_call_openai):
             ts = TranslatorService()
             ts.api_key = "fake"
-            # 4926 words → ~49 minutes, but only 3 shots — should NOT retry
+            # 4926 words → ~49 minutes, 17 segments (above min of 16) but only 1 shot each — should NOT retry
             big_script = " ".join(["word"] * 4926)
             segments, translation, ctx = await ts.translate_and_segment(big_script)
 
         assert call_count["n"] == 1  # Only one call, no retry
-        assert len(segments) == 1
-        assert segments[0].broll_count == 3
+        assert len(segments) == 17
 
 
 # ---------------------------------------------------------------------------

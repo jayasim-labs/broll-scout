@@ -121,12 +121,16 @@ Do the following in one response:
        * NEVER include generic words like "elite", "network", "secret", "mystery", "story", "documentary", "footage", "investigation" — these match thousands of unrelated videos
        * Each entry should be a proper noun, specific name, or highly specific concept — the kind of word that narrows YouTube results to THIS script's topic
 
-3. Break the English translation into segments based on NATURAL narrative shifts.
-   PREFER GRANULAR SPLITS: each distinct subtopic, event, era, or location should be its OWN segment.
-   Do NOT merge multiple distinct topics into one long segment just to keep segment count low.
-   A 30-minute script typically has 12-20 segments; a 50-minute script typically has 15-25 segments.
-   When in doubt, SPLIT into more segments rather than fewer — each segment gets independent YouTube searches, so more segments = better search coverage.
-   Only merge if the content is truly one continuous theme with no clear narrative shift.
+3. Break the English translation into segments based on narrative shifts.
+   MANDATORY SEGMENT COUNT RULE: You MUST produce at least 1 segment per 3 minutes of script.
+   A 30-minute script → minimum 10 segments (aim for 12-18).
+   A 40-minute script → minimum 13 segments (aim for 15-22).
+   A 50-minute script → minimum 16 segments (aim for 18-25).
+   If your output has fewer segments than the minimum, you have merged too aggressively — go back and split.
+   Each distinct subtopic, event, era, location, or concept shift MUST be its own segment.
+   Do NOT merge "Origin of X" + "Evolution of X" + "Modern X" into one segment — those are 3 separate segments.
+   Segments should typically be 90-180 seconds each. Any segment over 200 seconds should be split unless it truly covers only one narrow topic.
+   Each segment gets independent YouTube searches, so more segments = better search coverage for editors.
 
 4. For each segment, return:
    - segment_id (format: seg_001, seg_002, ...)
@@ -279,6 +283,28 @@ class TranslatorService:
         await _emit("check", f"GPT-4o finished translating your script")
 
         segments_raw = data.get("segments", [])
+
+        min_expected_segments = max(5, int(estimated_minutes / 3))
+        if len(segments_raw) < min_expected_segments:
+            logger.warning(
+                "GPT-4o returned only %d segments for a %d-min script (expected at least %d). "
+                "Retrying with stronger segmentation guidance.",
+                len(segments_raw), estimated_minutes, min_expected_segments,
+            )
+            await _emit("alert", f"GPT-4o returned only {len(segments_raw)} segments for a {estimated_minutes}-min script — retrying with stronger guidance for at least {min_expected_segments} segments")
+            retry_msg = (
+                f"You returned {len(segments_raw)} segments for a {estimated_minutes}-minute script. "
+                f"That is too few — you MUST produce at least {min_expected_segments} segments. "
+                f"Each distinct subtopic, event, concept, or narrative shift needs its own segment. "
+                f"Split any segment over 150 seconds into smaller parts. "
+                f"Return the corrected full JSON with more granular segments."
+            )
+            messages.append({"role": "assistant", "content": json.dumps(data)})
+            messages.append({"role": "user", "content": retry_msg})
+            data = await self._call_openai(messages, translation_model)
+            segments_raw = data.get("segments", [])
+            await _emit("check", f"Retry produced {len(segments_raw)} segments")
+
         summary = data.get("segment_summary", {})
         total_shots = summary.get("total_broll_shots", 0)
         if not total_shots:
