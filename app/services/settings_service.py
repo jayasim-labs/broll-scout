@@ -535,6 +535,9 @@ class SettingsService:
             except (TypeError, ValueError):
                 return False
 
+        if key == "whisper_model":
+            return value in ("large-v3-turbo", "large-v3", "small", "base")
+
         if key == "preferred_channels_tier1" and isinstance(value, list):
             for ch in value:
                 if isinstance(ch, str) and not ch.startswith("UC"):

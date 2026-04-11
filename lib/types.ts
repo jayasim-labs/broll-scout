@@ -349,6 +349,7 @@ export interface PipelineSettings {
   confident_fallback_enabled: boolean
   lightweight_model: string
   confidence_threshold: number
+  whisper_model: string
   whisper_max_video_duration_min: number
 
   // Video filtering & ranking

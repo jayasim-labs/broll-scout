@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -31,6 +32,7 @@ class TranscriberService:
         video_duration_seconds: int = 0,
         job_id: str | None = None,
         on_whisper_start=None,
+        whisper_gate: asyncio.Semaphore | None = None,
     ) -> Transcript:
         """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper flag."""
         from app.services.storage import get_storage
@@ -112,15 +114,24 @@ class TranscriberService:
                     video_id, effective_duration, max_whisper_duration, agent_up, whisper_queue_depth)
         if effective_duration <= max_whisper_duration:
             try:
-                logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
                 if on_whisper_start:
                     try:
                         await on_whisper_start(video_id, effective_duration)
                     except Exception:
                         pass
-                whisper_result = await self._whisper_via_agent(
-                    video_id, effective_duration, job_id=job_id,
-                )
+
+                if whisper_gate:
+                    logger.info("[transcript] Whisper waiting for gate for %s", video_id)
+                    await whisper_gate.acquire()
+                try:
+                    logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
+                    whisper_result = await self._whisper_via_agent(
+                        video_id, effective_duration, job_id=job_id,
+                    )
+                finally:
+                    if whisper_gate:
+                        whisper_gate.release()
+
                 if whisper_result:
                     await storage.store_transcript(
                         video_id=video_id,
@@ -191,9 +202,11 @@ class TranscriberService:
             return None
 
         max_dur_min = self._get("whisper_max_video_duration_min", 60)
+        whisper_model = self._get("whisper_model", "large-v3-turbo")
         task_id = await agent_queue.create_task("whisper", {
             "video_id": video_id,
             "max_duration_min": max_dur_min,
+            "whisper_model": whisper_model,
         }, job_id=job_id)
         queue_depth = agent_queue.pending_task_count("whisper")
         avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 45)

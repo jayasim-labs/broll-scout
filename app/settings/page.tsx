@@ -1122,6 +1122,21 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
             onChange={(v) => onChange("confidence_threshold", v)}
             help="Minimum confidence score (0.0–1.0) from the AI to include a clip. Lower = more results but some may be less relevant. Higher = stricter, fewer but more accurate clips. Clips below threshold are still kept if no better alternatives exist for a scene."
           />
+          <div>
+            <Label className="text-sm">Whisper transcription model</Label>
+            <Select value={settings.whisper_model || "large-v3-turbo"} onValueChange={(v) => onChange("whisper_model", v)}>
+              <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="large-v3-turbo">large-v3-turbo (recommended — fast + accurate)</SelectItem>
+                <SelectItem value="large-v3">large-v3 (highest accuracy, 4× slower)</SelectItem>
+                <SelectItem value="small">small (lightweight, lower accuracy)</SelectItem>
+                <SelectItem value="base">base (minimal, CPU-friendly)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground/70 mt-1">
+              Used when no YouTube captions exist. Runs locally via the companion app. large-v3-turbo gives near-identical accuracy to large-v3 at 8× the speed. Requires GPU (MPS on Mac, CUDA on Windows) for large models — falls back to CPU &quot;base&quot; if unavailable.
+            </p>
+          </div>
           <SliderSetting
             label="Max video length for Whisper" value={settings.whisper_max_video_duration_min} min={10} max={120}
             onChange={(v) => onChange("whisper_max_video_duration_min", v)} unit=" min"

@@ -669,6 +669,7 @@ def execute():
                 payload["video_id"],
                 payload.get("max_duration_min", 60),
                 abort_event=ev,
+                whisper_model=payload.get("whisper_model", "large-v3-turbo"),
             )
         finally:
             if task_id:
@@ -955,6 +956,7 @@ def whisper_transcribe(
     video_id: str,
     max_duration_min: int = 60,
     abort_event: threading.Event | None = None,
+    whisper_model: str = "large-v3-turbo",
 ) -> list[dict]:
     """Download audio via yt-dlp, transcribe with OpenAI Whisper locally."""
     import tempfile
@@ -996,13 +998,43 @@ def whisper_transcribe(
             return [{"video_id": video_id, "transcript": None, "source": "whisper_not_installed"}]
 
         try:
-            log.info("Whisper: transcribing %s with base model...", video_id)
-            model = whisper.load_model("base")
-            result = model.transcribe(audio_path, language="en")
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda"
+                fp16 = True
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+                fp16 = False
+            else:
+                device = "cpu"
+                fp16 = False
+        except ImportError:
+            device, fp16 = "cpu", False
+
+        # Large models need GPU; downgrade gracefully on CPU
+        model_size = whisper_model
+        if device == "cpu" and model_size in ("large-v3", "large-v3-turbo"):
+            log.warning("Whisper: no GPU available — downgrading %s → base for CPU", model_size)
+            model_size = "base"
+
+        try:
+            log.info("Whisper: transcribing %s with %s model on %s...", video_id, model_size, device.upper())
+            model = whisper.load_model(model_size, device=device)
+            result = model.transcribe(audio_path, language="en", fp16=fp16)
             log.info("Whisper: transcription complete for %s (%d segments)", video_id, len(result.get("segments", [])))
         except Exception as e:
-            log.error("Whisper transcription failed for %s: %s", video_id, e)
-            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+            if device != "cpu":
+                log.warning("Whisper %s failed on %s: %s — falling back to CPU base model", model_size, device, e)
+                try:
+                    model = whisper.load_model("base", device="cpu")
+                    result = model.transcribe(audio_path, language="en", fp16=False)
+                    log.info("Whisper: CPU fallback complete for %s (%d segments)", video_id, len(result.get("segments", [])))
+                except Exception as e2:
+                    log.error("Whisper CPU fallback also failed for %s: %s", video_id, e2)
+                    return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+            else:
+                log.error("Whisper transcription failed for %s: %s", video_id, e)
+                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
 
         segments = result.get("segments", [])
         lines = []
@@ -1273,6 +1305,18 @@ if __name__ == "__main__":
             log.warning("Timestamp matching will fall back to GPT-4o-mini via API")
     else:
         log.warning("Ollama not available — timestamp matching will use GPT-4o-mini via API")
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            log.info("Whisper engine: CUDA GPU (%s) — large models supported, fp16", gpu_name)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            log.info("Whisper engine: Apple Metal GPU (MPS) — large models supported")
+        else:
+            log.info("Whisper engine: CPU only — large models will be downgraded to 'base'")
+    except ImportError:
+        log.info("Whisper engine: CPU only (PyTorch not found) — large models will be downgraded to 'base'")
 
     log.info("CORS allowed origins: %s", _default_cors)
     log.info("Keep this running while your B-Roll Scout tab is open in the browser")

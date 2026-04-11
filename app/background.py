@@ -222,6 +222,9 @@ async def run_pipeline(
         transcript_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         search_semaphore = asyncio.Semaphore(5)
         transcript_semaphore = asyncio.Semaphore(max(5, pipeline_cfg.get("max_concurrent_candidates", 3)))
+        whisper_semaphore = asyncio.Semaphore(1)  # only 1 Whisper at a time — they're GPU/CPU heavy
+        whisper_queue_count = 0
+        whisper_queue_lock = asyncio.Lock()
 
         shots_searched = 0
         transcripts_fetched = 0
@@ -286,8 +289,13 @@ async def run_pipeline(
                     dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
 
                     async def _on_whisper_start(v_id: str, dur_s: int):
+                        nonlocal whisper_queue_count
                         dur_m = round(dur_s / 60, 1)
-                        _log_activity(job_id, "clock", f"🎙️ Whisper starting for \"{short_title}\" ({dur_m}m video) — downloading audio + transcribing locally — {yt_link}", depth=2, group="search")
+                        async with whisper_queue_lock:
+                            whisper_queue_count += 1
+                            pos = whisper_queue_count
+                        queue_label = f" (queued #{pos})" if pos > 1 else ""
+                        _log_activity(job_id, "clock", f"🎙️ Whisper{queue_label} for \"{short_title}\" ({dur_m}m video) — downloading audio + transcribing locally — {yt_link}", depth=2, group="search")
 
                     try:
                         fetch_start = time.time()
@@ -296,6 +304,7 @@ async def run_pipeline(
                             video_duration_seconds=cand.video_duration_seconds,
                             job_id=job_id,
                             on_whisper_start=_on_whisper_start,
+                            whisper_gate=whisper_semaphore,
                         )
                         fetch_elapsed = round(time.time() - fetch_start, 1)
                         transcript_cache[vid] = t.transcript_text

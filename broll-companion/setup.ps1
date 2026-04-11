@@ -218,11 +218,31 @@ if (Test-Path $ActivateScript) {
     Write-Host "  OK - Companion packages installed" -ForegroundColor Green
 
     Write-Host "  Installing Whisper AI (speech-to-text)..." -ForegroundColor White
+    # Install CUDA-enabled PyTorch first if NVIDIA GPU is available
+    $hasNvidia = $false
+    try {
+        $nvidiaOut = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null
+        if ($LASTEXITCODE -eq 0 -and $nvidiaOut) {
+            $hasNvidia = $true
+            Write-Host "  NVIDIA GPU detected: $($nvidiaOut.Trim()) — installing CUDA PyTorch..." -ForegroundColor Cyan
+            & python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  OK - PyTorch with CUDA installed (GPU-accelerated Whisper)" -ForegroundColor Green
+            } else {
+                Write-Host "  NOTE: CUDA PyTorch install failed, Whisper will use CPU" -ForegroundColor Yellow
+            }
+        }
+    } catch { }
+
     & python -m pip install openai-whisper --quiet 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
     } else {
-        Write-Host "  OK - Whisper installed" -ForegroundColor Green
+        if ($hasNvidia) {
+            Write-Host "  OK - Whisper installed (CUDA GPU accelerated)" -ForegroundColor Green
+        } else {
+            Write-Host "  OK - Whisper installed (CPU mode)" -ForegroundColor Green
+        }
     }
 }
 
