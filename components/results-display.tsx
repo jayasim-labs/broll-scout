@@ -809,10 +809,22 @@ function ExpandShotButton({ jobId, segment, onRefreshJob }: { jobId: string; seg
                 {r.the_hook && (
                   <p className="text-[10px] text-primary/80 italic mt-0.5 line-clamp-2">&quot;{r.the_hook}&quot;</p>
                 )}
-                <div className="flex items-center gap-2 mt-1">
+                <div className="flex items-center gap-2 mt-1 flex-wrap">
                   {r.relevance_score > 0 && (
                     <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", scoreColor(r.relevance_score))}>
                       {Math.round(r.relevance_score * 100)}% match
+                    </Badge>
+                  )}
+                  {r.matcher_source && (
+                    <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border",
+                      r.matcher_source.includes("gemma") || r.matcher_source.includes("Gemma") ? "border-purple-500/40 text-purple-400" :
+                      r.matcher_source.includes("gpt") || r.matcher_source.includes("GPT") ? "border-yellow-500/40 text-yellow-400" :
+                      "border-green-500/40 text-green-400"
+                    )}>
+                      {r.matcher_source.includes("gemma") || r.matcher_source.includes("Gemma") ? "Gemma4" :
+                       r.matcher_source.includes("gpt") || r.matcher_source.includes("GPT") ? "GPT-4o-mini" :
+                       r.matcher_source.includes("Ollama") ? r.matcher_source.replace("Ollama/", "") :
+                       r.matcher_source}
                     </Badge>
                   )}
                   {r.start_time_seconds != null && r.end_time_seconds != null && (
@@ -1066,6 +1078,18 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
             <Badge variant="outline" className="text-xs">
               {result.source_flag.replace(/_/g, ' ')}
             </Badge>
+            {result.matcher_source && (
+              <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0 border",
+                result.matcher_source.includes("Gemma") || result.matcher_source.includes("gemma") ? "border-purple-500/40 text-purple-400" :
+                result.matcher_source.includes("gpt") || result.matcher_source.includes("GPT") ? "border-yellow-500/40 text-yellow-400" :
+                "border-green-500/40 text-green-400"
+              )}>
+                {result.matcher_source.includes("gemma") || result.matcher_source.includes("Gemma") ? "Gemma4" :
+                 result.matcher_source.includes("gpt") || result.matcher_source.includes("GPT") ? "GPT-4o-mini" :
+                 result.matcher_source.includes("Ollama") ? result.matcher_source.replace("Ollama/", "") :
+                 result.matcher_source}
+              </Badge>
+            )}
             {result.visual_fit > 0 && (
               <TooltipProvider delayDuration={200}>
                 <Tooltip>
@@ -1124,6 +1148,25 @@ function ResultCard({ result, jobId }: { result: RankedResult; jobId: string }) 
 
           {result.the_hook && !result.match_reasoning && (
             <p className="text-xs text-primary italic line-clamp-1">&quot;{result.the_hook}&quot;</p>
+          )}
+
+          {result.ab_matcher_source && result.ab_confidence_score != null && (
+            <div className="mt-1 p-2 rounded border border-purple-500/20 bg-purple-500/5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-medium text-purple-400">A/B comparison: {result.ab_matcher_source.replace("Ollama/", "")}</span>
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0 border-purple-500/40 text-purple-400">
+                  {Math.round(result.ab_confidence_score * 100)}% confidence
+                </Badge>
+              </div>
+              {result.ab_start_time_seconds != null && result.ab_end_time_seconds != null && (
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Timestamps: {formatTime(result.ab_start_time_seconds)} – {formatTime(result.ab_end_time_seconds)}
+                </p>
+              )}
+              {result.ab_match_reasoning && (
+                <p className="text-[10px] text-muted-foreground/70 italic mt-0.5 line-clamp-2">{result.ab_match_reasoning}</p>
+              )}
+            </div>
           )}
 
           {/* Action buttons */}

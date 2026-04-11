@@ -71,6 +71,49 @@ def _unregister_abort(task_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Ollama (local LLM) configuration
 # ---------------------------------------------------------------------------
+MATCHER_MODELS = {
+    "qwen3:8b": {
+        "ollama_name": "qwen3:8b",
+        "display_name": "Qwen3 8B (Fast, Default)",
+        "num_ctx": 32768,
+        "num_predict": 512,
+        "min_vram_gb": 6,
+        "pull_size_gb": 5,
+    },
+    "gemma4:26b": {
+        "ollama_name": "gemma4:26b",
+        "display_name": "Gemma 4 26B MoE (Quality)",
+        "num_ctx": 262144,
+        "num_predict": 1024,
+        "min_vram_gb": 18,
+        "pull_size_gb": 18,
+    },
+    "gemma4:e4b": {
+        "ollama_name": "gemma4:e4b",
+        "display_name": "Gemma 4 E4B (Balanced)",
+        "num_ctx": 131072,
+        "num_predict": 1024,
+        "min_vram_gb": 10,
+        "pull_size_gb": 9.6,
+    },
+    "qwen3:4b": {
+        "ollama_name": "qwen3:4b",
+        "display_name": "Qwen3 4B (Faster, Less Accurate)",
+        "num_ctx": 32768,
+        "num_predict": 512,
+        "min_vram_gb": 3,
+        "pull_size_gb": 2.5,
+    },
+    "llama3.3:8b": {
+        "ollama_name": "llama3.3:8b",
+        "display_name": "Llama 3.3 8B",
+        "num_ctx": 32768,
+        "num_predict": 512,
+        "min_vram_gb": 5,
+        "pull_size_gb": 4.7,
+    },
+}
+
 MATCHER_MODEL = os.environ.get("BROLL_MATCHER_MODEL", "qwen3:8b")
 _ollama_process = None
 _ollama_server_ready = False
@@ -120,16 +163,21 @@ def ensure_ollama_running() -> bool:
         return False
 
 
+def _is_model_installed(model_key: str, installed_names: list[str]) -> bool:
+    """Check if a model from MATCHER_MODELS is installed by matching its base name prefix."""
+    base_name = model_key.split(":")[0]
+    return any(base_name in m for m in installed_names)
+
+
 def ensure_model_loaded() -> bool:
-    """Check if the matcher model is pulled locally, then warm it up."""
+    """Check if the current MATCHER_MODEL is pulled locally, then warm it up."""
     global _ollama_model_ready
     if not _ollama_available or not _ollama_server_ready:
         return False
     try:
         models = ollama_client.list()
         model_names = [m.model for m in models.models]
-        base_name = MATCHER_MODEL.split(":")[0]
-        if any(base_name in m for m in model_names):
+        if _is_model_installed(MATCHER_MODEL, model_names):
             _ollama_model_ready = True
             log.info("Model %s found — warming up (loading into GPU memory)...", MATCHER_MODEL)
             try:
@@ -250,8 +298,137 @@ def health():
     result["ollama_server"] = "running" if _ollama_server_ready else "not running"
     result["matcher_model"] = MATCHER_MODEL
     result["model_loaded"] = _ollama_model_ready
+    result["matcher_models"] = list(MATCHER_MODELS.keys())
 
     return jsonify(result)
+
+
+@app.route("/models/status")
+def models_status():
+    """Return installation/readiness status for all registered matcher models."""
+    ollama_running = False
+    installed_names: list[str] = []
+    ollama_version = "unknown"
+
+    try:
+        proc = subprocess.run(
+            ["ollama", "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        ollama_version = proc.stdout.strip().replace("ollama version ", "")
+    except Exception:
+        pass
+
+    try:
+        models = ollama_client.list()
+        installed_names = [m.model for m in models.models]
+        ollama_running = True
+    except Exception:
+        pass
+
+    model_statuses = {}
+    for key, cfg in MATCHER_MODELS.items():
+        installed = _is_model_installed(key, installed_names)
+        model_statuses[key] = {
+            "installed": installed,
+            "ready": installed and ollama_running,
+            "display_name": cfg["display_name"],
+            "min_vram_gb": cfg["min_vram_gb"],
+            "pull_size_gb": cfg["pull_size_gb"],
+        }
+
+    return jsonify({
+        "ollama_version": ollama_version,
+        "ollama_running": ollama_running,
+        "active_model": MATCHER_MODEL,
+        "models": model_statuses,
+    })
+
+
+@app.route("/models/pull", methods=["POST"])
+def models_pull():
+    """Pull (download) a model from the MATCHER_MODELS registry via Ollama."""
+    data = request.json or {}
+    model_key = data.get("model", "")
+
+    if model_key not in MATCHER_MODELS:
+        return jsonify({
+            "error": f"Unknown model: {model_key}. Available: {list(MATCHER_MODELS.keys())}",
+        }), 400
+
+    model_name = MATCHER_MODELS[model_key]["ollama_name"]
+    log.info("Pulling model %s — this may take a while...", model_name)
+
+    try:
+        proc = subprocess.run(
+            ["ollama", "pull", model_name],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode == 0:
+            log.info("Model %s pulled successfully", model_name)
+            return jsonify({"status": "ok", "model": model_key})
+        else:
+            log.warning("Model pull failed for %s: %s", model_name, proc.stderr[:500])
+            return jsonify({"error": proc.stderr[:500] or "Pull failed"}), 500
+    except subprocess.TimeoutExpired:
+        log.warning("Model pull timed out for %s (30 min limit)", model_name)
+        return jsonify({"error": "Pull timed out (30 min limit)"}), 500
+    except FileNotFoundError:
+        return jsonify({"error": "ollama binary not found"}), 500
+    except Exception as e:
+        log.error("Model pull error for %s: %s", model_name, e)
+        return jsonify({"error": str(e)[:200]}), 500
+
+
+@app.route("/models/switch", methods=["POST"])
+def models_switch():
+    """Switch the active matcher model. Unloads old model, warms new one."""
+    global MATCHER_MODEL, _ollama_model_ready
+    data = request.json or {}
+    new_model = data.get("model", "")
+
+    if new_model not in MATCHER_MODELS:
+        return jsonify({
+            "error": f"Unknown model: {new_model}. Available: {list(MATCHER_MODELS.keys())}",
+        }), 400
+
+    try:
+        models = ollama_client.list()
+        installed_names = [m.model for m in models.models]
+    except Exception:
+        return jsonify({"error": "Cannot reach Ollama server"}), 503
+
+    if not _is_model_installed(new_model, installed_names):
+        return jsonify({
+            "error": f"Model {new_model} is not installed. Pull it first via /models/pull.",
+        }), 400
+
+    old_model = MATCHER_MODEL
+    MATCHER_MODEL = new_model
+
+    try:
+        ollama_client.chat(
+            model=old_model,
+            messages=[{"role": "user", "content": ""}],
+            keep_alive=0,
+        )
+        log.info("Unloaded previous model %s from memory", old_model)
+    except Exception:
+        log.debug("Could not unload previous model %s (may already be unloaded)", old_model)
+
+    try:
+        ollama_client.chat(
+            model=new_model,
+            messages=[{"role": "user", "content": "hello"}],
+            keep_alive=-1,
+        )
+        _ollama_model_ready = True
+        log.info("Switched to model %s and warmed up", new_model)
+    except Exception as e:
+        _ollama_model_ready = True
+        log.warning("Model %s switched but warm-up failed: %s — first call will be slower", new_model, e)
+
+    return jsonify({"status": "ok", "active_model": MATCHER_MODEL})
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -535,6 +712,10 @@ def ollama_match_timestamp(payload: dict) -> dict:
     model = payload.get("model", MATCHER_MODEL)
     prompt = payload.get("prompt", "")
 
+    model_config = MATCHER_MODELS.get(model, {})
+    num_ctx = model_config.get("num_ctx", 32768)
+    num_predict = model_config.get("num_predict", 512)
+
     schema = {
         "type": "object",
         "properties": {
@@ -563,8 +744,8 @@ def ollama_match_timestamp(payload: dict) -> dict:
             format=schema,
             options={
                 "temperature": 0,
-                "num_ctx": 32768,
-                "num_predict": 512,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
             },
             keep_alive=-1,
         )

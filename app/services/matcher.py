@@ -122,10 +122,16 @@ class MatcherService:
             )
 
         special_instructions = self._get("special_instructions", "")
-        max_words = 12000
+        matcher_model = self._get("matcher_model", "qwen3:8b")
+        max_words = self._transcript_word_limit(matcher_model)
         words = transcript_text.split()
         if len(words) > max_words:
-            transcript_text = " ".join(words[:max_words])
+            half = max_words // 2
+            transcript_text = (
+                " ".join(words[:half])
+                + "\n\n[... transcript truncated ...]\n\n"
+                + " ".join(words[-half:])
+            )
 
         ctx = script_context or ScriptContext()
         video_duration = video_metadata.get("video_duration_seconds", 0) or 0
@@ -241,7 +247,7 @@ class MatcherService:
         if len(excerpt_words) > max_excerpt:
             excerpt = " ".join(excerpt_words[:max_excerpt])
 
-        return MatchResult(
+        result = MatchResult(
             start_time_seconds=parsed.get("start_time_seconds"),
             end_time_seconds=parsed.get("end_time_seconds"),
             transcript_excerpt=excerpt or None,
@@ -257,6 +263,41 @@ class MatcherService:
             context_mismatch_reason=None,
             matcher_source=actual_source,
         )
+
+        if self._get("ab_test_mode", False):
+            ab_model = self._get("ab_test_model_b", "gemma4:26b")
+            if ab_model != matcher_model:
+                result = await self._run_ab_match(result, prompt, ab_model, job_id)
+
+        return result
+
+    async def _run_ab_match(
+        self, primary: MatchResult, prompt: str, ab_model: str, job_id: str | None,
+    ) -> MatchResult:
+        """Run model B for A/B comparison and attach results to primary."""
+        try:
+            if not agent_queue.is_agent_available():
+                return primary
+            task_id = await agent_queue.create_task("match_timestamp", {
+                "prompt": prompt,
+                "model": ab_model,
+            }, job_id=job_id)
+            results = await agent_queue.wait_for_result(task_id, timeout=300)
+            if results:
+                ab_parsed = results[0]
+                if ab_parsed.get("matcher_source") not in ("local_unavailable", "local_error"):
+                    primary.ab_matcher_source = f"Ollama/{ab_model}"
+                    primary.ab_confidence_score = float(ab_parsed.get("confidence_score", 0))
+                    primary.ab_start_time_seconds = ab_parsed.get("start_time_seconds")
+                    primary.ab_end_time_seconds = ab_parsed.get("end_time_seconds")
+                    primary.ab_match_reasoning = ab_parsed.get("match_reasoning") or ab_parsed.get("relevance_note")
+                    logger.info(
+                        "A/B match: model_b=%s confidence=%.2f",
+                        ab_model, primary.ab_confidence_score or 0,
+                    )
+        except Exception:
+            logger.warning("A/B model B match failed for %s", ab_model)
+        return primary
 
     def validate_context_match(
         self, match: MatchResult, video_duration_seconds: int
@@ -305,6 +346,15 @@ class MatcherService:
         }
         w_vis, w_top = weights.get(shot_intent, (0.5, 0.5))
         return w_vis * visual_fit + w_top * topical_fit
+
+    @staticmethod
+    def _transcript_word_limit(model: str) -> int:
+        """Max transcript words based on model context window (leaves room for prompt + response)."""
+        LIMITS = {
+            "gemma4:26b": 40000,
+            "gemma4:e4b": 40000,
+        }
+        return LIMITS.get(model, 12000)
 
     # ------------------------------------------------------------------
     # Routing

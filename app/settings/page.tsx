@@ -698,6 +698,202 @@ function SliderSetting({
   )
 }
 
+/* ─── Model Selector (Timestamp Matching Engine) ───────────────────── */
+
+interface ModelStatus {
+  installed: boolean
+  ready: boolean
+  display_name: string
+  min_vram_gb: number
+  pull_size_gb: number
+}
+
+interface ModelsStatusResponse {
+  ollama_version: string
+  ollama_running: boolean
+  active_model: string
+  models: Record<string, ModelStatus>
+}
+
+const MODEL_META: Record<string, { subtitle: string; badge?: string }> = {
+  "qwen3:8b": { subtitle: "~5GB VRAM. Faster inference, good Tamil context understanding.", badge: "Default" },
+  "gemma4:26b": { subtitle: "~18GB VRAM. MoE — activates 4B params/token. Better reasoning, 256K context.", badge: "Quality" },
+  "gemma4:e4b": { subtitle: "~10GB VRAM. Gemma 4 effective 4B variant. 128K context, good balance of speed and quality." },
+  "qwen3:4b": { subtitle: "~3GB VRAM. Faster but less accurate. For low-VRAM machines." },
+  "llama3.3:8b": { subtitle: "~5GB VRAM. Meta's Llama 3.3. Good general-purpose model." },
+}
+
+const COMPANION_URL = "http://127.0.0.1:9876"
+
+function ModelSelector({ currentModel, onSelect }: { currentModel: string; onSelect: (m: string) => void }) {
+  const [statuses, setStatuses] = useState<ModelsStatusResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [pulling, setPulling] = useState<string | null>(null)
+  const [switching, setSwitching] = useState(false)
+  const [companionDown, setCompanionDown] = useState(false)
+
+  const fetchStatuses = useCallback(async () => {
+    try {
+      const resp = await fetch(`${COMPANION_URL}/models/status`, { signal: AbortSignal.timeout(3000) })
+      if (resp.ok) {
+        setStatuses(await resp.json())
+        setCompanionDown(false)
+      } else {
+        setCompanionDown(true)
+      }
+    } catch {
+      setCompanionDown(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchStatuses() }, [fetchStatuses])
+
+  const handlePull = async (modelKey: string) => {
+    setPulling(modelKey)
+    try {
+      const resp = await fetch(`${COMPANION_URL}/models/pull`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelKey }),
+        signal: AbortSignal.timeout(1800000),
+      })
+      if (resp.ok) {
+        toast.success(`${MODEL_META[modelKey]?.subtitle?.split(".")[0] || modelKey} ready!`)
+        await fetchStatuses()
+      } else {
+        const err = await resp.json().catch(() => ({}))
+        toast.error(err.error || "Pull failed")
+      }
+    } catch {
+      toast.error("Pull failed — check companion app")
+    } finally {
+      setPulling(null)
+    }
+  }
+
+  const handleSelect = async (modelKey: string) => {
+    onSelect(modelKey)
+    const ms = statuses?.models[modelKey]
+    if (!ms?.ready) return
+
+    setSwitching(true)
+    try {
+      await fetch(`${COMPANION_URL}/models/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelKey }),
+        signal: AbortSignal.timeout(60000),
+      })
+      toast.success(`Switched to ${statuses?.models[modelKey]?.display_name || modelKey}. Next job will use this model.`)
+      await fetchStatuses()
+    } catch {
+      toast.error("Switch failed — model will be loaded on next job")
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  if (companionDown) {
+    return (
+      <div className="p-3 rounded-md border border-yellow-500/30 bg-yellow-500/5 text-sm text-muted-foreground">
+        Companion app not reachable at {COMPANION_URL}. Start the companion to manage models.
+        <br />
+        <span className="text-xs">Current setting: <code className="text-[10px]">{currentModel}</code></span>
+      </div>
+    )
+  }
+
+  if (loading) {
+    return <div className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Checking companion models...</div>
+  }
+
+  const models = statuses?.models || {}
+  const modelKeys = Object.keys(models).length > 0 ? Object.keys(models) : Object.keys(MODEL_META)
+
+  return (
+    <div className="space-y-2">
+      {modelKeys.map((key) => {
+        const ms = models[key]
+        const meta = MODEL_META[key] || { subtitle: "" }
+        const isSelected = currentModel === key
+        const isReady = ms?.ready ?? false
+        const isInstalled = ms?.installed ?? false
+        const isPulling = pulling === key
+
+        return (
+          <label
+            key={key}
+            className={cn(
+              "flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
+              isSelected ? "border-primary bg-primary/5" : "border-border hover:border-primary/30",
+              !isReady && !isPulling && "opacity-70",
+            )}
+            onClick={(e) => {
+              e.preventDefault()
+              if (isPulling || switching) return
+              handleSelect(key)
+            }}
+          >
+            <div className={cn(
+              "mt-0.5 w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0",
+              isSelected ? "border-primary" : "border-muted-foreground/40",
+            )}>
+              {isSelected && <div className="w-2 h-2 rounded-full bg-primary" />}
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">{ms?.display_name || key}</span>
+                {meta.badge && (
+                  <span className={cn(
+                    "text-[10px] px-1.5 py-0.5 rounded font-medium",
+                    meta.badge === "Default" ? "bg-blue-500/10 text-blue-500" : "bg-purple-500/10 text-purple-500",
+                  )}>{meta.badge}</span>
+                )}
+              </div>
+              <p className="text-[11px] text-muted-foreground/70 mt-0.5">{meta.subtitle}</p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 mt-0.5">
+              {isPulling ? (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Downloading ~{ms?.pull_size_gb || "?"}GB...
+                </span>
+              ) : isReady ? (
+                <span className="flex items-center gap-1 text-xs text-green-500">
+                  <span className="w-2 h-2 rounded-full bg-green-500" /> Ready
+                </span>
+              ) : isInstalled ? (
+                <span className="flex items-center gap-1 text-xs text-yellow-500">
+                  <span className="w-2 h-2 rounded-full bg-yellow-500" /> Installed (Ollama down)
+                </span>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); handlePull(key) }}
+                  disabled={!!pulling}
+                >
+                  <Plus className="w-3 h-3" /> Pull (~{ms?.pull_size_gb || "?"}GB)
+                </Button>
+              )}
+            </div>
+          </label>
+        )
+      })}
+      {switching && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground px-1">
+          <Loader2 className="w-3 h-3 animate-spin" /> Switching model...
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ─── Pipeline Tab ──────────────────────────────────────────────────── */
 
 function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onChange: (k: string, v: unknown) => void }) {
@@ -801,18 +997,41 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
               </div>
             </div>
             <div>
-              <Label className="text-sm">Local LLM model</Label>
-              <Select value={settings.matcher_model || "qwen3:8b"} onValueChange={(v) => onChange("matcher_model", v)}>
-                <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="qwen3:8b">Qwen3 8B (~5GB, recommended)</SelectItem>
-                  <SelectItem value="qwen3:4b">Qwen3 4B (~2.5GB, faster, less accurate)</SelectItem>
-                  <SelectItem value="llama3.3:8b">Llama 3.3 8B (~4.7GB)</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-[11px] text-muted-foreground/70 mt-1">
-                Used when matcher backend is &quot;auto&quot; or &quot;local&quot;. Requires Ollama installed and the model pulled (e.g., <code className="text-[10px]">ollama pull qwen3:8b</code>).
+              <Label className="text-sm">Timestamp Matching Engine</Label>
+              <p className="text-[11px] text-muted-foreground/70 mt-0.5 mb-2">
+                Used when matcher backend is &quot;auto&quot; or &quot;local&quot;. Requires Ollama installed and the model pulled on the companion machine.
               </p>
+              <ModelSelector
+                currentModel={settings.matcher_model || "qwen3:8b"}
+                onSelect={(v) => onChange("matcher_model", v)}
+              />
+              <div className="flex items-center justify-between mt-3 p-2.5 rounded-md border border-purple-500/20 bg-purple-500/5">
+                <div>
+                  <Label className="text-sm">A/B Test Mode</Label>
+                  <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+                    Both the primary model above and a second model will process each candidate. Results show side-by-side comparison so editors can compare quality. This doubles processing time per job.
+                  </p>
+                </div>
+                <Switch
+                  checked={!!(settings as Record<string, unknown>).ab_test_mode}
+                  onCheckedChange={(v) => onChange("ab_test_mode", v)}
+                />
+              </div>
+              {!!(settings as Record<string, unknown>).ab_test_mode && (
+                <div className="mt-2">
+                  <Label className="text-[11px] text-muted-foreground">A/B comparison model</Label>
+                  <Select value={((settings as Record<string, unknown>).ab_test_model_b as string) || "gemma4:26b"} onValueChange={(v) => onChange("ab_test_model_b", v)}>
+                    <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="gemma4:26b">Gemma 4 26B MoE</SelectItem>
+                      <SelectItem value="gemma4:e4b">Gemma 4 E4B</SelectItem>
+                      <SelectItem value="qwen3:8b">Qwen3 8B</SelectItem>
+                      <SelectItem value="qwen3:4b">Qwen3 4B</SelectItem>
+                      <SelectItem value="llama3.3:8b">Llama 3.3 8B</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

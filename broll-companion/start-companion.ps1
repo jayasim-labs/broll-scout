@@ -91,6 +91,20 @@ if ($ollamaPath) {
             break
         } catch {}
     }
+    # Auto-pull required models if missing
+    $installed = & ollama list 2>$null | Out-String
+    if ($installed -notmatch "qwen3:8b") {
+        Write-Host "  Pulling Qwen3 8B (~5GB)..." -ForegroundColor Gray
+        & ollama pull qwen3:8b
+        if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Qwen3 8B ready" -ForegroundColor Green }
+        else { Write-Host "  Qwen3 pull failed" -ForegroundColor Yellow }
+    }
+    if ($installed -notmatch "gemma4:26b") {
+        Write-Host "  Pulling Gemma 4 26B MoE (~18GB, first time only)..." -ForegroundColor Gray
+        & ollama pull gemma4:26b
+        if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Gemma 4 26B ready" -ForegroundColor Green }
+        else { Write-Host "  Gemma 4 pull failed - pull from Settings later" -ForegroundColor Yellow }
+    }
 } else {
     Write-Host "  WARNING: Ollama not found - install from https://ollama.com" -ForegroundColor Yellow
 }

@@ -196,6 +196,12 @@ class RankerService:
                 source_flag=match.source_flag,
                 context_match=match.context_match,
                 context_mismatch_reason=match.context_mismatch_reason,
+                matcher_source=match.matcher_source,
+                ab_matcher_source=match.ab_matcher_source,
+                ab_confidence_score=match.ab_confidence_score,
+                ab_start_time_seconds=match.ab_start_time_seconds,
+                ab_end_time_seconds=match.ab_end_time_seconds,
+                ab_match_reasoning=match.ab_match_reasoning,
             ))
 
         return results

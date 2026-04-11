@@ -44,6 +44,8 @@ DEFAULTS = {
     "matcher_model": "qwen3:8b",
     "api_fallback_enabled": False,
     "confident_fallback_enabled": False,
+    "ab_test_mode": False,
+    "ab_test_model_b": "gemma4:26b",
     "lightweight_model": "gpt-4o-mini",
     "confidence_threshold": 0.15,
     "top_results_per_shot": 5,

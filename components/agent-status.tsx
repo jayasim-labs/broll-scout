@@ -23,11 +23,28 @@ interface CompanionHealth {
   ollama_server?: string
   matcher_model?: string
   model_loaded?: boolean
+  matcher_models?: string[]
+}
+
+interface ModelInfo {
+  installed: boolean
+  ready: boolean
+  display_name: string
+  min_vram_gb: number
+  pull_size_gb: number
+}
+
+interface ModelsStatus {
+  ollama_version: string
+  ollama_running: boolean
+  active_model: string
+  models: Record<string, ModelInfo>
 }
 
 export function AgentStatusBadge() {
   const [state, setState] = useState<AgentState>("checking")
   const [health, setHealth] = useState<CompanionHealth | null>(null)
+  const [modelsStatus, setModelsStatus] = useState<ModelsStatus | null>(null)
   const [showPanel, setShowPanel] = useState(false)
 
   useEffect(() => {
@@ -48,30 +65,41 @@ export function AgentStatusBadge() {
 
   async function checkCompanion() {
     try {
-      const resp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
-      const data: CompanionHealth = await resp.json()
+      const [healthResp, modelsResp] = await Promise.all([
+        fetch(`${COMPANION_URL}/health`, { mode: "cors" }),
+        fetch(`${COMPANION_URL}/models/status`, { mode: "cors" }).catch(() => null),
+      ])
+      const data: CompanionHealth = await healthResp.json()
       if (data.status === "ok" || data.ytdlp_ok) {
         setState("connected")
-        // Back-compat: older companion doesn't send *_ok booleans
         if (data.ytdlp_version && data.ytdlp_ok === undefined) {
           data.ytdlp_ok = true
         }
         setHealth(data)
+        if (modelsResp?.ok) {
+          setModelsStatus(await modelsResp.json())
+        }
       } else {
         setState("disconnected")
         setHealth(null)
+        setModelsStatus(null)
       }
     } catch {
       setState("disconnected")
       setHealth(null)
+      setModelsStatus(null)
     }
   }
 
   if (state === "checking") return null
 
-  const activeCount = health
-    ? [health.ytdlp_ok, health.ffmpeg_ok, health.whisper_ok, health.model_loaded].filter(Boolean).length
+  const installedModelCount = modelsStatus
+    ? Object.values(modelsStatus.models).filter(m => m.ready).length
     : 0
+  const totalAgents = health
+    ? [health.ytdlp_ok, health.ffmpeg_ok, health.whisper_ok].filter(Boolean).length + installedModelCount
+    : 0
+  const totalPossible = 3 + (modelsStatus ? Object.keys(modelsStatus.models).length : 1)
 
   return (
     <div className="relative" data-agent-panel>
@@ -91,7 +119,7 @@ export function AgentStatusBadge() {
         )}
         <span className="hidden sm:inline">
           {state === "connected"
-            ? `Agent · ${activeCount}/4`
+            ? `Agent · ${totalAgents}/${totalPossible}`
             : "No Agent"}
         </span>
         <ChevronDown className={cn("w-3 h-3 transition-transform", showPanel && "rotate-180")} />
@@ -132,18 +160,50 @@ export function AgentStatusBadge() {
                 ok={!!health.whisper_ok}
                 description="Local speech-to-text transcription"
               />
-              <AgentRow
-                name={health.matcher_model?.split(":")[0] || "Qwen3"}
-                detail={
-                  health.model_loaded
-                    ? health.matcher_model || "qwen3:8b"
-                    : health.ollama_server === "running"
-                      ? "Model not pulled"
-                      : "Ollama not running"
-                }
-                ok={!!health.model_loaded}
-                description="Local LLM for timestamp matching ($0)"
-              />
+              {modelsStatus ? (
+                <>
+                  <div className="pt-1 mt-0.5 border-t border-border/50">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-muted-foreground/60">
+                        Matcher models (Ollama {modelsStatus.ollama_version})
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {installedModelCount} ready
+                      </span>
+                    </div>
+                  </div>
+                  {Object.entries(modelsStatus.models).map(([key, m]) => (
+                    <AgentRow
+                      key={key}
+                      name={m.display_name.split(" (")[0]}
+                      detail={
+                        m.ready
+                          ? key === modelsStatus.active_model ? `${key} ★` : key
+                          : m.installed ? "Ollama down" : "Not pulled"
+                      }
+                      ok={m.ready}
+                      description={
+                        key === modelsStatus.active_model
+                          ? "Active matcher · $0 per call"
+                          : `${m.min_vram_gb}GB VRAM · ${m.pull_size_gb}GB download`
+                      }
+                    />
+                  ))}
+                </>
+              ) : (
+                <AgentRow
+                  name={health.matcher_model?.split(":")[0] || "Qwen3"}
+                  detail={
+                    health.model_loaded
+                      ? health.matcher_model || "qwen3:8b"
+                      : health.ollama_server === "running"
+                        ? "Model not pulled"
+                        : "Ollama not running"
+                  }
+                  ok={!!health.model_loaded}
+                  description="Local LLM for timestamp matching ($0)"
+                />
+              )}
               {health.cookie_status && health.cookie_status !== "disabled" && (
                 <div className="pt-1 border-t border-border/50">
                   <div className="flex items-center gap-2 text-[10px] text-muted-foreground">

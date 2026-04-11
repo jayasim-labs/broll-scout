@@ -233,6 +233,11 @@ class MatchResult(BaseModel):
     context_match: bool = True
     context_mismatch_reason: Optional[str] = None
     matcher_source: Optional[str] = None
+    ab_matcher_source: Optional[str] = None
+    ab_confidence_score: Optional[float] = None
+    ab_start_time_seconds: Optional[int] = None
+    ab_end_time_seconds: Optional[int] = None
+    ab_match_reasoning: Optional[str] = None
 
 
 class RankedResult(BaseModel):
@@ -267,6 +272,12 @@ class RankedResult(BaseModel):
     source_flag: TranscriptSource = TranscriptSource.NONE
     context_match: bool = True
     context_mismatch_reason: Optional[str] = None
+    matcher_source: Optional[str] = None
+    ab_matcher_source: Optional[str] = None
+    ab_confidence_score: Optional[float] = None
+    ab_start_time_seconds: Optional[int] = None
+    ab_end_time_seconds: Optional[int] = None
+    ab_match_reasoning: Optional[str] = None
     audit_status: AuditStatus = AuditStatus.UNAUDITED
     audit_reason: Optional[str] = None
     editor_rating: Optional[int] = Field(default=None, ge=1, le=5)

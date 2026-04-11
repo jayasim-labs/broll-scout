@@ -86,6 +86,12 @@ export interface RankedResult {
   source_flag: TranscriptSource
   context_match: boolean
   context_mismatch_reason: string | null
+  matcher_source: string | null
+  ab_matcher_source?: string | null
+  ab_confidence_score?: number | null
+  ab_start_time_seconds?: number | null
+  ab_end_time_seconds?: number | null
+  ab_match_reasoning?: string | null
   audit_status?: AuditStatus
   audit_reason?: string | null
   editor_rating: number | null

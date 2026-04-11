@@ -264,6 +264,19 @@ if ($ollamaCmd) {
         Write-Host "  NOTE: Model pull failed. You can run 'ollama pull qwen3:8b' later." -ForegroundColor Yellow
         Write-Host "  Timestamp matching will use GPT-4o-mini (API) as fallback." -ForegroundColor Gray
     }
+
+    Write-Host ""
+    Write-Host "  Pulling Gemma 4 26B MoE model (~18GB, one-time download)..." -ForegroundColor White
+    Write-Host "  This is the high-quality matcher. May take 10-20 minutes on first run." -ForegroundColor Gray
+    & ollama pull gemma4:26b
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  OK - Gemma 4 26B MoE model ready" -ForegroundColor Green
+    } else {
+        Write-Host "  NOTE: Gemma 4 pull failed. Pull later from Settings or run: ollama pull gemma4:26b" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Host "  Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page." -ForegroundColor Cyan
 }
 
 # --- 8. Desktop shortcut ---

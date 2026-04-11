@@ -209,6 +209,18 @@ if command -v ollama &>/dev/null; then
     else
         warn "Model pull failed. Run 'ollama pull qwen3:8b' manually later."
     fi
+
+    echo ""
+    echo "  Pulling Gemma 4 26B MoE model (~18GB, one-time download)..."
+    echo "  This is the high-quality matcher. May take 10-20 minutes on first run."
+    if ollama pull gemma4:26b; then
+        ok "Gemma 4 26B MoE model ready"
+    else
+        warn "Gemma 4 pull failed. You can pull it later from Settings or run: ollama pull gemma4:26b"
+    fi
+
+    echo ""
+    echo -e "  ${C}Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page.${NC}"
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────

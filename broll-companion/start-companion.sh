@@ -80,13 +80,28 @@ if command -v ollama &>/dev/null; then
     export OLLAMA_NUM_PARALLEL=3
     ollama serve &>/dev/null &
     # Wait for Ollama to respond
+    OLLAMA_UP=false
     for i in $(seq 1 15); do
         if curl -s http://127.0.0.1:11434/api/tags &>/dev/null; then
             echo -e "  ${G}✓ Ollama running (parallel=3)${NC}"
+            OLLAMA_UP=true
             break
         fi
         sleep 1
     done
+
+    # Auto-pull required models if missing
+    if $OLLAMA_UP; then
+        INSTALLED=$(ollama list 2>/dev/null)
+        if ! echo "$INSTALLED" | grep -q "qwen3:8b"; then
+            echo -e "${DIM}  Pulling Qwen3 8B (~5GB)...${NC}"
+            ollama pull qwen3:8b && echo -e "  ${G}✓ Qwen3 8B ready${NC}" || echo -e "  ${Y}⚠ Qwen3 pull failed${NC}"
+        fi
+        if ! echo "$INSTALLED" | grep -q "gemma4:26b"; then
+            echo -e "${DIM}  Pulling Gemma 4 26B MoE (~18GB, first time only)...${NC}"
+            ollama pull gemma4:26b && echo -e "  ${G}✓ Gemma 4 26B ready${NC}" || echo -e "  ${Y}⚠ Gemma 4 pull failed — pull from Settings later${NC}"
+        fi
+    fi
 else
     echo -e "  ${Y}⚠ Ollama not found — install from https://ollama.com${NC}"
 fi
