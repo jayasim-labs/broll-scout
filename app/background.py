@@ -601,11 +601,7 @@ async def run_pipeline(
         from app.models.schemas import AuditStatus, Scarcity, ShotIntent
         RESEARCH_THRESHOLD = 0.5
         MAX_RESEARCH_ATTEMPTS = 3
-        STOCK_SUGGESTIONS = {
-            "pexels": "https://www.pexels.com/search/videos/",
-            "pixabay": "https://pixabay.com/videos/search/",
-            "artgrid": "https://artgrid.io/search/",
-        }
+        
         low_conf_shots: list[tuple[Segment, BRollShot, Optional[RankedResult]]] = []
         for seg in active_segments:
             seg_results = all_segment_results.get(seg.segment_id, [])
@@ -717,11 +713,8 @@ async def run_pipeline(
                         all_segment_results.setdefault(seg.segment_id, []).append(best_attempt_result)
                     research_improved += 1
                 elif best_attempt_result is None or best_attempt_score < RESEARCH_THRESHOLD:
-                    # After exhaustion: surface best available with low-confidence badge + stock suggestions
-                    stock_terms = " ".join(shot.key_terms[:3]) if shot.key_terms else short_need
-                    stock_urls = [f"{url}{stock_terms.replace(' ', '+')}" for _name, url in STOCK_SUGGESTIONS.items()]
                     _log_activity(job_id, "alert",
-                                  f"Exhausted re-search for \"{short_need}\" — suggest stock: {', '.join(stock_urls[:2])}",
+                                  f"No good match found for \"{short_need}\" after {MAX_RESEARCH_ATTEMPTS} attempts — keeping best available ({best_attempt_score:.0%})",
                                   depth=1, group="research")
 
             if research_improved:
