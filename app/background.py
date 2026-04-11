@@ -303,9 +303,13 @@ async def run_pipeline(
                             t.transcript_source.value, t.transcript_source.value,
                         )
                         transcript_sources[vid] = source_label
+                        is_whisper = "Whisper" in source_label
                         if t.transcript_text:
                             timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
-                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}", depth=2, group="search")
+                            if is_whisper:
+                                _log_activity(job_id, "check", f"✅ Whisper done for \"{short_title}\" ({dur_min}m video){timing} — {yt_link}", depth=2, group="search")
+                            else:
+                                _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}", depth=2, group="search")
                         else:
                             failed_fetches.add(vid)
                             affected = video_to_shots.get(vid, [])
@@ -431,16 +435,46 @@ async def run_pipeline(
         empty_shots = sum(1 for c in shot_candidates.values() if not c)
         saved_fetches = total_pairs - unique_videos
 
+        # Transcript source breakdown
+        source_counts: dict[str, int] = {}
+        for src in transcript_sources.values():
+            source_counts[src] = source_counts.get(src, 0) + 1
+        whisper_ok = source_counts.get("Whisper base (local)", 0)
+        cache_hits = source_counts.get("DynamoDB cache", 0)
+        yt_manual = source_counts.get("YouTube manual captions", 0)
+        yt_auto = source_counts.get("YouTube auto-captions", 0)
+        error_count = source_counts.get("error", 0)
+        failed_count = len(failed_fetches)
+
         _log_activity(job_id, "check",
             f"Search + fetch done in {search_elapsed}s! "
             f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved) → "
             f"{videos_with_transcript} transcripts ready",
             group="search")
+
+        breakdown_parts = []
+        if cache_hits:
+            breakdown_parts.append(f"{cache_hits} cached")
+        if yt_manual:
+            breakdown_parts.append(f"{yt_manual} YouTube captions")
+        if yt_auto:
+            breakdown_parts.append(f"{yt_auto} auto-captions")
+        if whisper_ok:
+            breakdown_parts.append(f"{whisper_ok} Whisper")
+        if failed_count:
+            breakdown_parts.append(f"{failed_count} failed")
+        if error_count:
+            breakdown_parts.append(f"{error_count} errors")
+
+        if breakdown_parts:
+            _log_activity(job_id, "bar-chart", f"Transcript sources: {' · '.join(breakdown_parts)}", depth=1, group="search")
+
         if empty_shots:
             _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
         logger.info(
-            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed, %d missed in %.1fs",
+            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed, %d missed in %.1fs | sources: %s",
             job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), len(missed_videos), search_elapsed,
+            dict(source_counts),
         )
 
         # ══════════════════════════════════════════════════
