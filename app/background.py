@@ -279,6 +279,12 @@ async def run_pipeline(
                     break
                 vid = item[1] if isinstance(item, tuple) else item
 
+                # Skip work if companion is gone — no point queueing tasks
+                if agent_queue.seconds_since_last_poll() > agent_queue.AGENT_GONE_THRESHOLD:
+                    logger.info("Skipping transcript for %s — agent gone", vid)
+                    transcript_queue.task_done()
+                    continue
+
                 async with transcript_semaphore:
                     cand = video_pool.get(vid)
                     if not cand:

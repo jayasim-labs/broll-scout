@@ -40,7 +40,7 @@ export default function ProjectsPage() {
     try {
       const [projRes, jobRes] = await Promise.all([
         fetch(`${API}/projects`),
-        fetch(`${API}/jobs`),
+        fetch(`${API}/jobs?limit=100`),
       ])
       if (projRes.ok) {
         const data = await projRes.json()

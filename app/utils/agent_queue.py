@@ -24,6 +24,11 @@ _lock = asyncio.Lock()
 
 TASK_TIMEOUT = 600
 
+# Consecutive poll-miss tracking: when the agent stops polling,
+# we fail all waiting tasks so the pipeline doesn't hang.
+AGENT_GONE_THRESHOLD = 45  # seconds without a poll → agent is gone
+_agent_gone_notified = False
+
 
 async def create_task(
     task_type: str, payload: dict, job_id: str | None = None,
@@ -49,25 +54,47 @@ async def wait_for_result(task_id: str, timeout: float = TASK_TIMEOUT) -> list[d
     event = _events.get(task_id)
     if not event:
         return []
-    try:
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-        async with _lock:
-            result = _completed.pop(task_id, {})
-            _events.pop(task_id, None)
-        status = result.get("status")
-        if status in ("failed", "cancelled"):
-            if status == "failed":
-                logger.warning("Agent task %s failed", task_id)
-            else:
-                logger.info("Agent task %s cancelled", task_id)
+
+    # Instead of a single long wait, check periodically so we can
+    # detect when the agent has gone away and bail early.
+    deadline = time.time() + timeout
+    check_interval = 5.0  # seconds between agent-alive checks
+    while time.time() < deadline:
+        remaining = min(check_interval, deadline - time.time())
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(event.wait(), timeout=remaining)
+            # Event was set — result is ready
+            async with _lock:
+                result = _completed.pop(task_id, {})
+                _events.pop(task_id, None)
+            status = result.get("status")
+            if status in ("failed", "cancelled"):
+                if status == "failed":
+                    logger.warning("Agent task %s failed", task_id)
+                else:
+                    logger.info("Agent task %s cancelled", task_id)
+                return []
+            return result.get("result", [])
+        except asyncio.TimeoutError:
+            pass
+
+        # Check if agent has disappeared
+        gap = seconds_since_last_poll()
+        if gap > AGENT_GONE_THRESHOLD:
+            logger.warning(
+                "Agent task %s aborted — no agent poll for %.0fs (threshold %ds)",
+                task_id, gap, AGENT_GONE_THRESHOLD,
+            )
+            await fail_all_pending("agent_gone")
             return []
-        return result.get("result", [])
-    except asyncio.TimeoutError:
-        logger.warning("Agent task %s timed out after %.0fs", task_id, timeout)
-        async with _lock:
-            _pending.pop(task_id, None)
-            _events.pop(task_id, None)
-        return []
+
+    logger.warning("Agent task %s timed out after %.0fs", task_id, timeout)
+    async with _lock:
+        _pending.pop(task_id, None)
+        _events.pop(task_id, None)
+    return []
 
 
 async def cancel_tasks_for_job(job_id: str) -> list[str]:
@@ -150,6 +177,32 @@ def is_agent_available() -> bool:
         return True
     has_claimed = any(t["status"] == "claimed" for t in _pending.values())
     return has_claimed
+
+
+def seconds_since_last_poll() -> float:
+    """How long since any agent last polled. Returns inf if never polled."""
+    if not _active_agents:
+        return float("inf")
+    return time.time() - max(_active_agents.values())
+
+
+async def fail_all_pending(reason: str = "agent_gone") -> int:
+    """Fail all pending/claimed tasks immediately so waiters stop blocking."""
+    failed = 0
+    events_to_set: list[asyncio.Event] = []
+    async with _lock:
+        for tid in list(_pending):
+            _completed[tid] = {"status": "failed", "result": []}
+            _pending.pop(tid)
+            ev = _events.pop(tid, None)
+            if ev:
+                events_to_set.append(ev)
+            failed += 1
+    for ev in events_to_set:
+        ev.set()
+    if failed:
+        logger.warning("Failed %d pending tasks: %s", failed, reason)
+    return failed
 
 
 def pending_task_count(task_type: str | None = None) -> int:

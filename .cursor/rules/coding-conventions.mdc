@@ -1,0 +1,27 @@
+---
+description: B-Roll Scout coding patterns and pitfalls to avoid
+alwaysApply: true
+---
+
+# Coding Conventions
+
+## Python (Backend + Companion)
+- FastAPI with async/await throughout. Services are classes with `_get()` for settings.
+- DynamoDB via boto3 `resource` API (not client). All ops go through `storage.py`.
+- `agent_queue.py` is the bridge to companion — create_task → wait_for_result pattern.
+- Companion is sync Flask, not async. Uses ThreadPoolExecutor for parallel tasks.
+- Guard `proc.stderr` with `(proc.stderr or "")[:N]` — subprocess can return None.
+- Guard yt-dlp JSON fields — `data.get("description")` can return `None` even with default.
+
+## TypeScript (Frontend)
+- Next.js App Router with `"use client"` directives. API proxy routes in `app/api/v1/`.
+- All backend calls go through proxy routes (never direct to EC2 from client code).
+- Settings type: `PipelineSettings` in `lib/types.ts` — keep in sync with `config.py` DEFAULTS.
+- Sidebar job counts come from the `jobs` array, NOT `project.job_count` — the `/api/v1/jobs?limit=100` call must return enough jobs.
+
+## Common Pitfalls
+- **DynamoDB `None` vs missing**: `.get("key", "")` returns `None` if key exists with null value. Always handle both.
+- **Agent gone detection**: `agent_queue.wait_for_result` checks every 5s. If no poll for 45s, fails all tasks.
+- **Whisper concurrency**: Only 1 Whisper job at a time (`whisper_semaphore`). They're GPU-heavy.
+- **yt-dlp format errors**: Use `-f bestaudio/ba/b/best/worst` not `-x --audio-format mp3` alone.
+- **Setup scripts are unified**: `setup.sh` = installer + launcher. No separate start scripts.

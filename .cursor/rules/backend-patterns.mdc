@@ -1,0 +1,42 @@
+---
+description: Backend Python patterns for FastAPI services and companion app
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Backend Patterns
+
+## Service Pattern
+Services are classes instantiated per-call. Read settings via `self._get("key", default)`.
+```python
+class MyService:
+    def __init__(self, pipeline_cfg: dict | None = None):
+        self._cfg = pipeline_cfg or {}
+    def _get(self, key, default=None):
+        return self._cfg.get(key, DEFAULTS.get(key, default))
+```
+
+## Agent Queue Pattern (EC2 → companion)
+```python
+task_id = await agent_queue.create_task("task_type", {"key": "val"}, job_id=job_id)
+results = await agent_queue.wait_for_result(task_id, timeout=120)
+```
+- `wait_for_result` checks every 5s if agent is still alive (45s gone threshold)
+- Returns `[]` on timeout or agent-gone — always handle empty results
+
+## Companion Task Handler (companion.py)
+```python
+elif task_type == "my_task":
+    results = my_function(payload["arg1"], payload.get("arg2", default))
+```
+Results must be `list[dict]`. The `/execute` endpoint wraps in `{"results": results}`.
+
+## DynamoDB
+- All ops through `storage.py` methods, never direct boto3 calls from services
+- `_scan_all()` handles pagination automatically
+- Decimal types from DynamoDB — cast to `int()`/`float()` before JSON serialization
+
+## Subprocess Safety
+- Always `(proc.stderr or "")[:N]` — stderr can be None
+- Always set `timeout` on `subprocess.run`
+- Use `_yt_throttle()` before any yt-dlp call

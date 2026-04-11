@@ -37,7 +37,7 @@ export default function HomePage() {
 
   const loadJobHistory = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/jobs`)
+      const resp = await fetch(`${API_BASE}/jobs?limit=100`)
       if (resp.ok) {
         const data = await resp.json()
         setJobHistory(data.jobs || [])

@@ -1,0 +1,75 @@
+---
+description: B-Roll Scout project architecture, conventions, and agent onboarding context
+alwaysApply: true
+---
+
+# B-Roll Scout — Project Context
+
+## What It Is
+A pipeline that takes a video script, finds matching B-roll clips on YouTube, and returns timestamped segments with download links. Used by video editors to source B-roll without manual searching.
+
+## Architecture (3 components)
+
+```
+Editor Browser (Next.js :3000)
+    ↕ API proxy routes
+FastAPI Backend (EC2 broll.jayasim.com:8000)
+    ↕ agent_queue (poll/result)
+Browser Agent Loop ←→ Companion (Flask :9876, editor's machine)
+```
+
+- **Frontend**: Next.js 15 / React 19 / TypeScript / Tailwind / shadcn. Pages: `/` (main), `/jobs/[id]`, `/projects`, `/library`, `/settings`, `/usage`. API proxy routes in `app/api/v1/**/route.ts` forward to EC2.
+- **Backend**: FastAPI + Pydantic v2 + DynamoDB. Pipeline orchestration in `app/background.py`. Services in `app/services/`. Deploy via `scripts/deploy.sh` (rsync to EC2, systemctl restart).
+- **Companion**: Flask on `localhost:9876`. Runs yt-dlp, Whisper, Ollama, clip downloads. The browser relays tasks between EC2 and companion via `agent_queue`.
+
+## Pipeline Flow (per job)
+1. `POST /api/v1/jobs` → `run_pipeline()` in `background.py`
+2. **Translate** (GPT-4o) → segments + shots + search queries
+3. **Search** (companion yt-dlp) → candidate videos
+4. **Transcripts** (DynamoDB cache → companion youtube-transcript-api → companion Whisper)
+5. **Match** (companion Ollama or GPT-4o-mini fallback) → timestamp pairs
+6. **Rank** (multi-weight scoring) → top results per shot
+7. **Re-search** (GPT-4o-mini) → fill low-confidence gaps
+8. Results stored in DynamoDB, UI polls for completion
+
+## Key Files
+
+| File | Role |
+|------|------|
+| `app/main.py` | FastAPI routes, job create/cancel, agent poll/result |
+| `app/background.py` | Pipeline orchestration, workers, activity logging |
+| `app/config.py` | DEFAULTS dict + Pydantic Settings (.env) |
+| `app/utils/agent_queue.py` | In-memory task queue bridging EC2 ↔ companion |
+| `app/services/translator.py` | GPT-4o script → segments + shots |
+| `app/services/searcher.py` | YouTube search, Gemini expansion, DynamoDB cache |
+| `app/services/transcriber.py` | Transcript cascade (cache → API → Whisper) |
+| `app/services/matcher.py` | Ollama/API timestamp matching, A/B testing |
+| `app/services/ranker.py` | Multi-weight scoring + dedup |
+| `app/services/storage.py` | All DynamoDB CRUD |
+| `app/services/settings_service.py` | Pipeline settings (DynamoDB + DEFAULTS merge) |
+| `broll-companion/companion.py` | Local Flask server for yt-dlp/Whisper/Ollama |
+| `broll-companion/setup.sh` | Mac unified installer+launcher |
+| `broll-companion/setup.ps1` | Windows unified installer+launcher |
+| `components/job-history.tsx` | Sidebar project/job list |
+| `components/agent-status.tsx` | Agent badge + browser↔companion relay loop |
+| `lib/types.ts` | TypeScript interfaces (PipelineSettings, JobSummary, etc.) |
+
+## DynamoDB Tables (prefix: `broll_`)
+`jobs`, `segments`, `results`, `transcripts`, `feedback`, `settings`, `channel_cache`, `projects`, `usage`, `search_cache`
+
+## LLMs Used
+- **GPT-4o**: Translation/segmentation (`translator.py`)
+- **GPT-4o-mini**: Re-search queries, lightweight tasks, API matching fallback
+- **Ollama (local)**: Timestamp matching (qwen3:8b, gemma4:26b, etc.)
+- **Whisper (local)**: Audio transcription when no YouTube captions (large-v3-turbo default)
+- **Gemini 1.5 Flash** (optional): Search query expansion
+
+## Env Vars
+- Python backend: `OPENAI_API_KEY`, `GEMINI_API_KEY` (optional), `YOUTUBE_API_KEY` (optional), `AWS_*`, `API_KEY`
+- Next.js: `BACKEND_URL`, `BACKEND_API_KEY` (in `.env.local`)
+
+## Conventions
+- Settings changes: add to `DEFAULTS` in `config.py`, `PipelineSettings` in `lib/types.ts`, validation in `settings_service.py`, UI in `app/settings/page.tsx`
+- New companion task: add handler in `companion.py` `/execute`, create/await in `agent_queue`, call from the relevant service
+- Deploy backend: `bash scripts/deploy.sh`
+- Deploy frontend: push to main (if Vercel) or rebuild locally

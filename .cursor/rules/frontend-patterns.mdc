@@ -1,0 +1,33 @@
+---
+description: Frontend TypeScript/React patterns for Next.js UI
+globs: "**/*.tsx,**/*.ts"
+alwaysApply: false
+---
+
+# Frontend Patterns
+
+## API Calls
+All backend calls go through Next.js API proxy routes (`app/api/v1/**/route.ts`).
+Client components call `/api/v1/...` (relative), proxy adds `BACKEND_URL` + `X-API-Key`.
+Never call EC2 directly from client code.
+
+## Settings Sync
+When adding a pipeline setting:
+1. Add to `PipelineSettings` interface in `lib/types.ts`
+2. Add UI control in `app/settings/page.tsx`
+3. The `onChange` callback calls the backend settings API
+
+## Sidebar (job-history.tsx)
+- Builds job counts from the `jobs[]` array, NOT from `project.job_count`
+- Must fetch `?limit=100` to cover all projects (default limit is 30)
+
+## Agent Relay (agent-status.tsx)
+- `useAgentLoop` polls EC2 for tasks, forwards to companion, posts results back
+- `POLL_INTERVAL_ACTIVE = 500ms`, `POLL_INTERVAL_IDLE = 10000ms`
+- Health checks every 15s to companion localhost:9876
+
+## Component Conventions
+- `"use client"` at top of interactive components
+- shadcn/ui components in `components/ui/`
+- App-specific components in `components/`
+- Use `cn()` from `lib/utils` for className merging
