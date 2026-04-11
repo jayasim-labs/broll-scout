@@ -207,7 +207,23 @@ if (-not $ollamaCmd) {
     try {
         Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaInstaller -TimeoutSec 120
         Write-Host "  Running Ollama installer (this may take a minute)..." -ForegroundColor White
-        Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -Wait -ErrorAction Stop
+        Write-Host "  If an Ollama window opens, you can close it - setup will continue." -ForegroundColor Gray
+        $installerProc = Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -PassThru -ErrorAction Stop
+
+        # Wait up to 90 seconds for the installer to finish
+        $waited = 0
+        while (-not $installerProc.HasExited -and $waited -lt 90) {
+            Start-Sleep -Seconds 2
+            $waited += 2
+            # Check if ollama.exe appeared on disk (installer done even if GUI still open)
+            $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+            if (Test-Path $ollamaExe) { break }
+        }
+
+        # Close the Ollama GUI app if it launched (it blocks the installer process)
+        Get-Process -Name "Ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+
         Remove-Item $ollamaInstaller -ErrorAction SilentlyContinue
         $env:PATH = "$env:LOCALAPPDATA\Programs\Ollama;$env:PATH"
         $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
@@ -227,6 +243,18 @@ if (-not $ollamaCmd) {
 
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaCmd) {
+    # Ensure Ollama server is running before pulling
+    $ollamaRunning = $false
+    try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2; $ollamaRunning = $true } catch {}
+    if (-not $ollamaRunning) {
+        Write-Host "  Starting Ollama server..." -ForegroundColor Gray
+        Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
+        for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 1
+            try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2; $ollamaRunning = $true; break } catch {}
+        }
+    }
+
     Write-Host "  Pulling Qwen3 8B model (~5GB, one-time download)..." -ForegroundColor White
     Write-Host "  This may take several minutes on first run." -ForegroundColor Gray
     & ollama pull qwen3:8b
