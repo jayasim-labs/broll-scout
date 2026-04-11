@@ -363,7 +363,7 @@ def _detect_cookie_support() -> None:
             log.warning(
                 "Cookie extraction from %s failed: %s. "
                 "Running without cookies. Set BROLL_COOKIE_BROWSER=none to silence this.",
-                COOKIE_BROWSER, proc.stderr[:200].strip(),
+                COOKIE_BROWSER, (proc.stderr or "")[:200].strip(),
             )
     except subprocess.TimeoutExpired:
         _cookie_status = "timeout"
@@ -532,7 +532,7 @@ def models_pull():
             log.info("Model %s pulled successfully", model_name)
             return jsonify({"status": "ok", "model": model_key})
         else:
-            stderr = proc.stderr[:500]
+            stderr = (proc.stderr or "")[:500]
             log.warning("Model pull failed for %s: %s", model_name, stderr)
             if "412" in stderr or "newer version" in stderr.lower():
                 return jsonify({
@@ -737,14 +737,21 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
         proc = subprocess.run(
             full_cmd, capture_output=True, text=True, timeout=t,
         )
-        for line in proc.stdout.strip().split("\n"):
+        stdout = proc.stdout or ""
+        for line in stdout.strip().split("\n"):
             if not line:
                 continue
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            results.append(_normalize(data))
+            if not isinstance(data, dict):
+                continue
+            try:
+                results.append(_normalize(data))
+            except (TypeError, AttributeError) as norm_err:
+                log.debug("yt-dlp skip bad entry: %s", norm_err)
+                continue
     except subprocess.TimeoutExpired:
         log.warning("yt-dlp timed out after %ds: %s", t, " ".join(full_cmd[:4]))
     except FileNotFoundError:
@@ -825,7 +832,7 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
             "yt-dlp", *_cookie_args, url,
             "--write-subs", "--write-auto-subs",
             "--sub-langs", lang_str,
-            "--sub-format", "json3",
+            "--sub-format", "json3/vtt/best",
             "--skip-download",
             "--no-playlist", "--no-warnings",
             "-o", sub_file_base,
@@ -835,7 +842,7 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if proc.returncode != 0:
             log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
-                        video_id, proc.returncode, proc.stderr[:200].strip())
+                        video_id, proc.returncode, (proc.stderr or "")[:200].strip())
             cmd_vtt = [
                 "yt-dlp", *_cookie_args, url,
                 "--write-subs", "--write-auto-subs",
@@ -967,19 +974,33 @@ def whisper_transcribe(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "audio.%(ext)s")
-        cmd = [
-            "yt-dlp", *_cookie_args, url,
-            "-x", "--audio-format", "mp3",
-            "--no-playlist", "--no-warnings",
-            "-o", output_template,
-        ]
         try:
             log.info("Whisper: downloading audio for %s", video_id)
             _yt_throttle()
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            # Prefer best audio without forcing mp3 — avoids "Requested format is not available"
+            # when the default extract path cannot produce mp3. Whisper loads m4a/webm/opus via ffmpeg.
+            cmd_best = [
+                "yt-dlp", *_cookie_args, url,
+                "-f", "bestaudio/ba/b/best/worst",
+                "-o", output_template,
+                "--no-playlist", "--no-warnings",
+            ]
+            proc = subprocess.run(cmd_best, capture_output=True, text=True, timeout=180)
             audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
             if proc.returncode != 0 or not audio_files:
-                log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, proc.stderr[:300])
+                _yt_throttle()
+                cmd_mp3 = [
+                    "yt-dlp", *_cookie_args, url,
+                    "-f", "bestaudio/ba/b/best/worst",
+                    "-x", "--audio-format", "mp3",
+                    "--no-playlist", "--no-warnings",
+                    "-o", output_template,
+                ]
+                proc = subprocess.run(cmd_mp3, capture_output=True, text=True, timeout=180)
+                audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
+            if proc.returncode != 0 or not audio_files:
+                _err = (proc.stderr or "")[:400]
+                log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
                 return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
             audio_path = audio_files[0]
             log.info("Whisper: audio downloaded → %s", os.path.basename(audio_path))
@@ -1239,8 +1260,9 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
                 "duration_seconds": end_seconds - start_seconds,
             }
         else:
-            log.warning("Clip download failed for %s: %s", video_id, proc.stderr[:500])
-            return {"status": "error", "message": proc.stderr[:500] or "Download failed"}
+            _err = (proc.stderr or "")[:500]
+            log.warning("Clip download failed for %s: %s", video_id, _err)
+            return {"status": "error", "message": _err or "Download failed"}
     except subprocess.TimeoutExpired:
         log.warning("Clip download timed out for %s", video_id)
         return {"status": "error", "message": "Download timed out (5 min limit)"}
@@ -1258,16 +1280,22 @@ def _seconds_to_hms(total_seconds: int) -> str:
 
 def _normalize(data: dict) -> dict:
     """Convert yt-dlp JSON to the same dict format the YouTube API returns."""
-    upload_date = data.get("upload_date", "")
+    # yt-dlp may set title/description/upload_date to JSON null — .get("k", "") still returns None.
+    ud = data.get("upload_date")
+    upload_date = "" if ud is None else str(ud)
     iso_date = ""
-    if upload_date and len(upload_date) == 8:
+    if len(upload_date) == 8 and upload_date.isdigit():
         iso_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}T00:00:00Z"
 
-    vid = data.get("id", "")
+    vid = str(data.get("id") or "")
+    title = "" if data.get("title") is None else str(data.get("title"))
+    desc_raw = data.get("description")
+    description = ("" if desc_raw is None else str(desc_raw))[:500]
+
     return {
         "video_id": vid,
-        "title": data.get("title", ""),
-        "video_title": data.get("title", ""),
+        "title": title,
+        "video_title": title,
         "video_url": f"https://www.youtube.com/watch?v={vid}",
         "channel_name": data.get("channel") or data.get("uploader") or "",
         "channel_id": data.get("channel_id") or "",
@@ -1280,7 +1308,7 @@ def _normalize(data: dict) -> dict:
         "video_duration_seconds": data.get("duration") or 0,
         "published_at": iso_date,
         "view_count": data.get("view_count") or 0,
-        "description": data.get("description", "")[:500],
+        "description": description,
         "width": data.get("width") or 0,
         "height": data.get("height") or 0,
     }
