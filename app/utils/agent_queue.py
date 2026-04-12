@@ -26,7 +26,7 @@ TASK_TIMEOUT = 600
 
 # Consecutive poll-miss tracking: when the agent stops polling,
 # we fail all waiting tasks so the pipeline doesn't hang.
-AGENT_GONE_THRESHOLD = 45  # seconds without a poll → agent is gone
+AGENT_GONE_THRESHOLD = 300  # seconds without a poll → agent is gone (generous: companion may be blocked on 429 retries)
 _agent_gone_notified = False
 
 

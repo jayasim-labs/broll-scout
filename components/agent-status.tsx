@@ -365,6 +365,48 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
     if (runningRef.current) return
     runningRef.current = true
     let cancelled = false
+    let inflight = 0
+
+    async function executeTask(task: { task_id: string; task_type: string; payload: unknown }) {
+      inflight++
+      try {
+        const payload = task.payload as Record<string, unknown> | null
+        const scopedId =
+          typeof payload?.job_id === "string"
+            ? payload.job_id
+            : jobIdRef.current
+        if (scopedId && await jobIsCancelled(scopedId)) {
+          await fetch("/api/v1/agent/result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task_id: task.task_id, status: "failed", result: [] }),
+          }).catch(() => {})
+          return
+        }
+
+        const execResp = await fetch(`${COMPANION_URL}/execute`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(task),
+          mode: "cors",
+        })
+        const execData = await execResp.json()
+
+        await fetch("/api/v1/agent/result", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task_id: task.task_id, status: "completed", result: execData.results || [] }),
+        }).catch(() => {})
+      } catch {
+        await fetch("/api/v1/agent/result", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task_id: task.task_id, status: "failed", result: [] }),
+        }).catch(() => {})
+      } finally {
+        inflight--
+      }
+    }
 
     async function loop() {
       while (!cancelled) {
@@ -388,60 +430,13 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
 
           const { tasks } = await pollResp.json()
 
-          if (!tasks || tasks.length === 0) {
-            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
-            continue
+          if (tasks && tasks.length > 0 && inflight === 0) {
+            for (const task of tasks) {
+              executeTask(task)
+            }
           }
 
-          await Promise.all(tasks.map(async (task: { task_id: string; task_type: string; payload: unknown }) => {
-            try {
-              const payload = task.payload as Record<string, unknown> | null
-              const scopedId =
-                typeof payload?.job_id === "string"
-                  ? payload.job_id
-                  : jobIdRef.current
-              if (scopedId && await jobIsCancelled(scopedId)) {
-                await fetch("/api/v1/agent/result", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    task_id: task.task_id,
-                    status: "failed",
-                    result: [],
-                  }),
-                }).catch(() => {})
-                return
-              }
-
-              const execResp = await fetch(`${COMPANION_URL}/execute`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(task),
-                mode: "cors",
-              })
-              const execData = await execResp.json()
-
-              await fetch("/api/v1/agent/result", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  task_id: task.task_id,
-                  status: "completed",
-                  result: execData.results || [],
-                }),
-              }).catch(() => {})
-            } catch {
-              await fetch("/api/v1/agent/result", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  task_id: task.task_id,
-                  status: "failed",
-                  result: [],
-                }),
-              }).catch(() => {})
-            }
-          }))
+          await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
         } catch {
           await sleep(POLL_INTERVAL_IDLE)
         }
