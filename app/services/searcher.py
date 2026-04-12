@@ -457,8 +457,9 @@ class SearcherService:
                         search_metadata[vid] = r
             return ids
 
-        # (a) Preferred Channel Search (Tier 1)
-        if tier1_ids:
+        # (a) Preferred Channel Search (Tier 1) — disabled by default
+        enable_channel_search = self._get("enable_preferred_channel_search")
+        if enable_channel_search and tier1_ids:
             await _emit("search", f"Checking {len(tier1_ids)} preferred channels")
             tier1_video_ids = await self._search_tier1_channels_full(
                 tier1_ids, query_text, results_per_query, job_id, "ytdlp_only", _emit
@@ -672,12 +673,13 @@ class SearcherService:
         short_need = shot.visual_need[:50]
         await _emit("search", f"    Shot: \"{short_need}\" — searching {len(queries)} queries ({results_per_query} results each)", depth=3)
 
-        # Parallel: tier-1 channel search + open YouTube search
+        # Channel search + open YouTube search
         tier1_ids, tier2_ids = self._build_preferred_channel_ids()
         tier1_list = list(tier1_ids)
+        enable_channel_search = self._get("enable_preferred_channel_search")
 
         async def _tier1_search():
-            if not tier1_list:
+            if not enable_channel_search or not tier1_list:
                 return []
             query_text = " ".join(shot.key_terms[:3]) if shot.key_terms else queries[0] if queries else ""
             return await self._search_tier1_channels_full(

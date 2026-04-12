@@ -200,11 +200,13 @@ async def run_pipeline(
         est_sec = est_search_sec % 60
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
         _set_progress(job_id, "searching", 20, f"Searching YouTube for {len(all_shots)} B-roll shots...")
-        sources = "preferred channels → yt-dlp"
+        sources = "yt-dlp"
+        if pipeline_cfg.get("enable_preferred_channel_search"):
+            sources = "preferred channels → " + sources
         if enable_gemini_expansion:
             sources += " → Gemini AI creative expansion"
-        _log_activity(job_id, "search", f"Streaming pipeline: searching {total_active_shots} shots + fetching transcripts in parallel (estimated ~{est_str})", group="search")
-        _log_activity(job_id, "clock", f"Search pipeline: {sources} → transcript fetch streams as videos are discovered", depth=1, group="search")
+        _log_activity(job_id, "search", f"Searching {total_active_shots} shots for B-roll videos (estimated ~{est_str})", group="search")
+        _log_activity(job_id, "clock", f"Search: {sources} → transcripts fetched sequentially", depth=1, group="search")
 
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService(pipeline_settings=pipeline_cfg)

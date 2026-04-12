@@ -973,6 +973,24 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
           <div className="pt-2 border-t">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
+                <Tv className="w-4 h-4 text-blue-500" />
+                <Label className="text-sm">Preferred Channel Search</Label>
+              </div>
+              <Switch
+                checked={!!(settings as Record<string, unknown>).enable_preferred_channel_search}
+                onCheckedChange={(v) => onChange("enable_preferred_channel_search", v)}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 mt-1.5 leading-relaxed">
+              Search your Tier 1 preferred channels (up to 5) for each shot before the open YouTube search.
+              Fires ~5 extra yt-dlp queries per shot — for a 40-shot script that&apos;s ~200 additional queries,
+              adding ~10 minutes to search time. Most candidates come from the open search anyway.
+              Enable only if your preferred channels are highly relevant to your content.
+            </p>
+          </div>
+          <div className="pt-2 border-t">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-amber-500" />
                 <Label className="text-sm">Gemini AI Expansion (default)</Label>
               </div>
