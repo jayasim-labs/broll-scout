@@ -272,8 +272,11 @@ async def run_pipeline(
                     if reused:
                         parts.append(f"{reused} already fetched")
                     detail = f" ({', '.join(parts)})" if parts else ""
+                    suffix = ""
+                    if new_videos == 0:
+                        suffix = " — all videos already in pool, no new fetches needed"
                     _log_activity(job_id, "search",
-                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
+                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos{suffix}",
                         depth=1, group="search")
                 else:
                     _log_activity(job_id, "alert",
