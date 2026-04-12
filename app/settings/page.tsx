@@ -720,9 +720,6 @@ interface ModelsStatusResponse {
 const MODEL_META: Record<string, { subtitle: string; badge?: string }> = {
   "qwen3:8b": { subtitle: "~5GB VRAM. Faster inference, good Tamil context understanding.", badge: "Default" },
   "gemma4:26b": { subtitle: "~18GB VRAM. MoE — activates 4B params/token. Better reasoning, 256K context.", badge: "Quality" },
-  "gemma4:e4b": { subtitle: "~10GB VRAM. Gemma 4 effective 4B variant. 128K context, good balance of speed and quality." },
-  "qwen3:4b": { subtitle: "~3GB VRAM. Faster but less accurate. For low-VRAM machines." },
-  "llama3.3:8b": { subtitle: "~5GB VRAM. Meta's Llama 3.3. Good general-purpose model." },
 }
 
 const COMPANION_URL = "http://127.0.0.1:9876"
@@ -1064,10 +1061,7 @@ function PipelineTab({ settings, onChange }: { settings: PipelineSettings; onCha
                     <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="gemma4:26b">Gemma 4 26B MoE</SelectItem>
-                      <SelectItem value="gemma4:e4b">Gemma 4 E4B</SelectItem>
                       <SelectItem value="qwen3:8b">Qwen3 8B</SelectItem>
-                      <SelectItem value="qwen3:4b">Qwen3 4B</SelectItem>
-                      <SelectItem value="llama3.3:8b">Llama 3.3 8B</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

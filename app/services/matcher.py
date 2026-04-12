@@ -352,7 +352,6 @@ class MatcherService:
         """Max transcript words based on model context window (leaves room for prompt + response)."""
         LIMITS = {
             "gemma4:26b": 40000,
-            "gemma4:e4b": 40000,
         }
         return LIMITS.get(model, 12000)
 

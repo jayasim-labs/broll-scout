@@ -312,7 +312,7 @@ if command -v ollama &>/dev/null; then
             ollama pull gemma4:26b && ok "Gemma 4 26B MoE model ready" || warn "Gemma 4 pull failed. Pull from Settings or run: ollama pull gemma4:26b"
         fi
 
-        echo -e "  ${C}Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page.${NC}"
+        echo -e "  ${C}Switch to Gemma 4 26B MoE (18GB VRAM) from the Settings page for higher quality.${NC}"
     fi
 fi
 

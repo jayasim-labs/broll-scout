@@ -128,31 +128,6 @@ MATCHER_MODELS = {
         "pull_size_gb": 18,
         "min_ollama_version": "0.20.0",
     },
-    "gemma4:e4b": {
-        "ollama_name": "gemma4:e4b",
-        "display_name": "Gemma 4 E4B (Balanced)",
-        "num_ctx": 131072,
-        "num_predict": 1024,
-        "min_vram_gb": 10,
-        "pull_size_gb": 9.6,
-        "min_ollama_version": "0.20.0",
-    },
-    "qwen3:4b": {
-        "ollama_name": "qwen3:4b",
-        "display_name": "Qwen3 4B (Faster, Less Accurate)",
-        "num_ctx": 32768,
-        "num_predict": 512,
-        "min_vram_gb": 3,
-        "pull_size_gb": 2.5,
-    },
-    "llama3.3:8b": {
-        "ollama_name": "llama3.3:8b",
-        "display_name": "Llama 3.3 8B",
-        "num_ctx": 32768,
-        "num_predict": 512,
-        "min_vram_gb": 5,
-        "pull_size_gb": 4.7,
-    },
 }
 
 MATCHER_MODEL = os.environ.get("BROLL_MATCHER_MODEL", "qwen3:8b")
@@ -692,19 +667,23 @@ def execute():
     payload = task.get("payload", {})
     task_id = task.get("task_id")
 
-    log.info("Task: %s  payload keys: %s", task_type, list(payload.keys()))
-
     if task_type == "search":
-        results = ytdlp_search(payload["query"], payload.get("max_results", 10))
+        query = payload["query"]
+        log.info("🔍 Search: \"%s\"", query[:80])
+        results = ytdlp_search(query, payload.get("max_results", 10))
     elif task_type == "channel_search":
+        log.info("📺 Channel search: %s — \"%s\"", payload["channel_id"], payload["query"][:60])
         results = ytdlp_channel_search(
             payload["channel_id"], payload["query"], payload.get("max_results", 5),
         )
     elif task_type == "video_details":
+        log.info("ℹ️  Video details: %s", payload["video_ids"][:3])
         results = ytdlp_video_details(payload["video_ids"])
     elif task_type == "transcript":
+        log.info("📄 Transcript: %s", payload["video_id"])
         results = fetch_transcript(payload["video_id"], payload.get("languages", ["en"]))
     elif task_type == "whisper":
+        log.info("🎙️ Whisper: %s (max %dm)", payload["video_id"], payload.get("max_duration_min", 60))
         ev = _register_abort(str(task_id)) if task_id else None
         try:
             results = whisper_transcribe(
@@ -717,9 +696,15 @@ def execute():
             if task_id:
                 _unregister_abort(str(task_id))
     elif task_type == "match_timestamp":
+        vid = payload.get("video_id", "?")
+        shot_need = (payload.get("shot_visual_need") or payload.get("query") or "?")[:50]
+        log.info("🧠 Match: %s — \"%s\"", vid, shot_need)
         result = ollama_match_timestamp(payload)
+        conf = result.get("confidence_score", 0)
+        log.info("  ↳ match: %.0f%% confidence", conf * 100 if isinstance(conf, (int, float)) else 0)
         return jsonify({"results": [result]})
     elif task_type == "lightweight_llm":
+        log.info("💡 Lightweight LLM call")
         result = ollama_lightweight_llm(payload)
         return jsonify({"results": [result]})
     elif task_type == "clip":
@@ -733,7 +718,20 @@ def execute():
     else:
         return jsonify({"error": f"Unknown task type: {task_type}"}), 400
 
-    log.info("Returning %d results for %s", len(results), task_type)
+    if task_type == "search":
+        titles = [r.get("title", "?")[:40] for r in results[:3]]
+        log.info("  ↳ %d results: %s%s", len(results), ", ".join(titles), "..." if len(results) > 3 else "")
+    elif task_type == "channel_search":
+        log.info("  ↳ %d results", len(results))
+    elif task_type == "transcript":
+        has_text = results and results[0].get("transcript")
+        src = results[0].get("source", "?") if results else "?"
+        log.info("  ↳ transcript: %s (source: %s)", "✓" if has_text else "✗ none", src)
+    elif task_type == "whisper":
+        has_text = results and results[0].get("transcript")
+        log.info("  ↳ whisper: %s", "✓ transcribed" if has_text else "✗ failed")
+    else:
+        log.info("  ↳ %d results for %s", len(results), task_type)
     return jsonify({"results": results})
 
 

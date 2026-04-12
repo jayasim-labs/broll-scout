@@ -515,7 +515,7 @@ All settings are saved to DynamoDB and take effect immediately — no redeploy n
 |---------|---------|---------|-------------|
 | `translation_model` | `gpt-4o` | gpt-4o, gpt-4o-mini | Script translation and segmentation |
 | `matcher_backend` | `auto` | auto, local, api | Routing for timestamp matching |
-| `matcher_model` | `qwen3:8b` | qwen3:8b, qwen3:4b, llama3.3:8b | Local LLM for Ollama |
+| `matcher_model` | `qwen3:8b` | qwen3:8b, gemma4:26b | Local LLM for Ollama |
 | `lightweight_model` | `gpt-4o-mini` | gpt-4o-mini, ollama | Re-search queries + "Add another shot" ideation |
 | `api_fallback_enabled` | `false` | true/false | GPT-4o-mini retries ALL Ollama failures |
 | `confident_fallback_enabled` | `false` | true/false | GPT-4o-mini retries only zero-confidence results (context mismatches trusted) |

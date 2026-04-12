@@ -231,6 +231,7 @@ async def run_pipeline(
 
         async def _search_one_shot(seg: Segment, shot: BRollShot):
             nonlocal shots_searched
+            short_need = shot.visual_need[:50] if shot.visual_need else shot.shot_id
             try:
                 cands = await searcher.search_for_shot(
                     shot, seg, job_id=job_id,
@@ -243,6 +244,7 @@ async def run_pipeline(
                 shot_candidates[shot.shot_id] = []
                 cands = []
 
+            new_videos = 0
             async with video_pool_lock:
                 for c in cands:
                     vid = c.video_id
@@ -252,6 +254,7 @@ async def run_pipeline(
                         video_to_shots[vid] = []
                         priority = c.video_duration_seconds or 9999
                         await transcript_queue.put((priority, vid))
+                        new_videos += 1
                     if shot.shot_id not in video_to_shots[vid]:
                         video_to_shots[vid].append(shot.shot_id)
 
@@ -259,6 +262,16 @@ async def run_pipeline(
                 shots_searched += 1
                 pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
                 elapsed_s = time.time() - search_start
+
+                if cands:
+                    _log_activity(job_id, "search",
+                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates ({new_videos} new)",
+                        depth=1, group="search")
+                else:
+                    _log_activity(job_id, "alert",
+                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → no results",
+                        depth=1, group="search")
+
                 if shots_searched > 0:
                     per_shot = elapsed_s / shots_searched
                     remaining = int(per_shot * (len(all_shots) - shots_searched))

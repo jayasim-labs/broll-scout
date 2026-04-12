@@ -370,7 +370,7 @@ if ($ollamaCmd) {
             else { Write-Host "  NOTE: Gemma 4 pull failed. Pull from Settings or run: ollama pull gemma4:26b" -ForegroundColor Yellow }
         }
 
-        Write-Host "  Other models (Gemma 4 E4B, Llama 3.3 8B) can be pulled from the Settings page." -ForegroundColor Cyan
+        Write-Host "  Switch to Gemma 4 26B MoE (18GB VRAM) from the Settings page for higher quality." -ForegroundColor Cyan
     }
 } else {
     Write-Host "  WARNING: Ollama not found - install from https://ollama.com" -ForegroundColor Yellow
