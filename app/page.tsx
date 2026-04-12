@@ -62,6 +62,10 @@ export default function HomePage() {
       const status = await response.json()
 
       if (status.progress) {
+        const log = status.progress.activity_log || []
+        const byGroup: Record<string, number> = {}
+        log.forEach((e: { group?: string }) => { byGroup[e.group || 'none'] = (byGroup[e.group || 'none'] || 0) + 1 })
+        console.log(`[BRoll] Poll: stage=${status.progress.stage} total=${log.length}`, byGroup)
         setProgress(status.progress)
         setJobHistory(prev => prev.map(j =>
           j.job_id === jobId
