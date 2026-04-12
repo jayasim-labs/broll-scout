@@ -55,6 +55,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 log = logging.getLogger("companion")
 
 YTDLP_TIMEOUT = 60
+# Shared yt-dlp args: try multiple player clients to handle age-gated/restricted videos,
+# force IPv4 to avoid IPv6 issues, and use geo-bypass for region locks.
+_YTDLP_EXTRA = [
+    "--extractor-args", "youtube:player_client=web,default",
+    "--force-ipv4",
+    "--geo-bypass",
+]
 _executor = ThreadPoolExecutor(max_workers=4)
 
 # ---------------------------------------------------------------------------
@@ -747,7 +754,7 @@ def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
 def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True) -> list[dict]:
     if throttle:
         _yt_throttle()
-    full_cmd = cmd[:1] + _cookie_args + cmd[1:]
+    full_cmd = cmd[:1] + _cookie_args + _YTDLP_EXTRA + cmd[1:]
     results = []
     t = timeout or YTDLP_TIMEOUT
     try:
@@ -783,6 +790,8 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
     languages = languages or ["en"]
 
     # --- Attempt 1: youtube-transcript-api (fast, no auth needed for most videos) ---
+    # Throttle library calls too — unthrottled bursts trigger YouTube IP blocks
+    _yt_throttle()
     try:
         result = _fetch_transcript_api(video_id, languages)
         if result and result[0].get("transcript"):
@@ -846,7 +855,7 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
     with tempfile.TemporaryDirectory(prefix="broll_subs_") as tmpdir:
         sub_file_base = os.path.join(tmpdir, "subs")
         cmd = [
-            "yt-dlp", *_cookie_args, url,
+            "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
             "--write-subs", "--write-auto-subs",
             "--sub-langs", lang_str,
             "--sub-format", "json3/vtt/best",
@@ -858,10 +867,15 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
         _yt_throttle()
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if proc.returncode != 0:
-            log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
-                        video_id, proc.returncode, (proc.stderr or "")[:200].strip())
+            stderr_snip = (proc.stderr or "")[:200].strip()
+            is_unavailable = "Requested format" in stderr_snip or "not available" in stderr_snip
+            if is_unavailable:
+                log.info("No subtitles available for %s (video may be restricted)", video_id)
+            else:
+                log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
+                            video_id, proc.returncode, stderr_snip)
             cmd_vtt = [
-                "yt-dlp", *_cookie_args, url,
+                "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
                 "--write-subs", "--write-auto-subs",
                 "--sub-langs", lang_str,
                 "--sub-format", "vtt",
@@ -997,7 +1011,7 @@ def whisper_transcribe(
             # Prefer best audio without forcing mp3 — avoids "Requested format is not available"
             # when the default extract path cannot produce mp3. Whisper loads m4a/webm/opus via ffmpeg.
             cmd_best = [
-                "yt-dlp", *_cookie_args, url,
+                "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
                 "-f", "bestaudio/ba/b/best/worst",
                 "-o", output_template,
                 "--no-playlist", "--no-warnings",
@@ -1007,7 +1021,7 @@ def whisper_transcribe(
             if proc.returncode != 0 or not audio_files:
                 _yt_throttle()
                 cmd_mp3 = [
-                    "yt-dlp", *_cookie_args, url,
+                    "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
                     "-f", "bestaudio/ba/b/best/worst",
                     "-x", "--audio-format", "mp3",
                     "--no-playlist", "--no-warnings",
@@ -1017,7 +1031,10 @@ def whisper_transcribe(
                 audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
             if proc.returncode != 0 or not audio_files:
                 _err = (proc.stderr or "")[:400]
-                log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
+                if "Requested format" in _err or "not available" in _err:
+                    log.info("Audio unavailable for %s (restricted/age-gated video — skipping Whisper)", video_id)
+                else:
+                    log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
                 return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
             audio_path = audio_files[0]
             log.info("Whisper: audio downloaded → %s", os.path.basename(audio_path))
