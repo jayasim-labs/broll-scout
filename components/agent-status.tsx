@@ -1,12 +1,10 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Wifi, WifiOff, Download, X, ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const COMPANION_URL = "http://localhost:9876"
-const POLL_INTERVAL_ACTIVE = 500
-const POLL_INTERVAL_IDLE = 10000
 const HEALTH_CHECK_INTERVAL = 15000
 
 type AgentState = "connected" | "disconnected" | "checking"
@@ -337,153 +335,41 @@ export async function abortCompanionAgentTasks(taskIds: string[]) {
   )
 }
 
-async function jobIsCancelled(jobId: string): Promise<boolean> {
-  try {
-    const st = await fetch(`/api/v1/jobs/${jobId}/status`)
-    if (!st.ok) return false
-    const data = await st.json()
-    return data.status === "cancelled"
-  } catch {
-    return false
-  }
-}
-
+/**
+ * Agent poll loop running inside a Web Worker.
+ *
+ * Web Workers are immune to Chrome's background-tab throttling — their
+ * setTimeout/setInterval run at full speed even when the tab is hidden
+ * or minimized. This guarantees the backend always sees recent polls
+ * and the AGENT_GONE_THRESHOLD is never hit during long pipeline runs.
+ */
 export function useAgentLoop(jobActive: boolean, currentJobId: string | null = null) {
-  const runningRef = useRef(false)
+  const workerRef = useRef<Worker | null>(null)
   const jobActiveRef = useRef(jobActive)
-  const jobIdRef = useRef(currentJobId)
 
   useEffect(() => {
     jobActiveRef.current = jobActive
+    workerRef.current?.postMessage({ type: "config", jobActive })
   }, [jobActive])
 
   useEffect(() => {
-    jobIdRef.current = currentJobId
-  }, [currentJobId])
+    if (workerRef.current) return
 
-  useEffect(() => {
-    if (runningRef.current) return
-    runningRef.current = true
-    let cancelled = false
+    const backendOrigin = typeof window !== "undefined" ? window.location.origin : ""
+    const worker = new Worker("/agent-poll-worker.js")
+    workerRef.current = worker
 
-    async function executeTask(task: { task_id: string; task_type: string; payload: unknown }) {
-      try {
-        const payload = task.payload as Record<string, unknown> | null
-        const scopedId =
-          typeof payload?.job_id === "string"
-            ? payload.job_id
-            : jobIdRef.current
-        if (scopedId && await jobIsCancelled(scopedId)) {
-          await fetch("/api/v1/agent/result", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ task_id: task.task_id, status: "failed", result: [] }),
-          }).catch(() => {})
-          return
-        }
+    worker.postMessage({
+      type: "start",
+      backendOrigin,
+      companionUrl: COMPANION_URL,
+      jobActive: jobActiveRef.current,
+    })
 
-        const isWhisper = task.task_type === "whisper"
-        const fetchTimeoutMs = isWhisper ? 30 * 60_000 : 5 * 60_000
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), fetchTimeoutMs)
-
-        try {
-          const execResp = await fetch(`${COMPANION_URL}/execute`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(task),
-            mode: "cors",
-            signal: controller.signal,
-          })
-          clearTimeout(timer)
-          const execData = await execResp.json()
-
-          await fetch("/api/v1/agent/result", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ task_id: task.task_id, status: "completed", result: execData.results || [] }),
-          }).catch(() => {})
-        } catch (fetchErr) {
-          clearTimeout(timer)
-          throw fetchErr
-        }
-      } catch {
-        await fetch("/api/v1/agent/result", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task_id: task.task_id, status: "failed", result: [] }),
-        }).catch(() => {})
-      }
-    }
-
-    async function executeTasks(tasks: { task_id: string; task_type: string; payload: unknown }[]) {
-      await Promise.all(tasks.map(t => executeTask(t)))
-    }
-
-    async function sendHeartbeat() {
-      try {
-        await fetch("/api/v1/agent/poll", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent_id: "browser-agent" }),
-        })
-      } catch { /* ignore */ }
-    }
-
-    function onVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        sendHeartbeat()
-      }
-    }
-    document.addEventListener("visibilitychange", onVisibilityChange)
-
-    async function loop() {
-      while (!cancelled) {
-        try {
-          let pollResp: Response
-          try {
-            pollResp = await fetch("/api/v1/agent/poll", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ agent_id: "browser-agent" }),
-            })
-          } catch {
-            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
-            continue
-          }
-
-          if (!pollResp.ok) {
-            await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
-            continue
-          }
-
-          const { tasks } = await pollResp.json()
-
-          if (tasks && tasks.length > 0) {
-            const heartbeatInterval = setInterval(sendHeartbeat, 10_000)
-            try {
-              await executeTasks(tasks)
-            } finally {
-              clearInterval(heartbeatInterval)
-            }
-          }
-
-          await sleep(jobActiveRef.current ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE)
-        } catch {
-          await sleep(POLL_INTERVAL_IDLE)
-        }
-      }
-    }
-
-    loop()
     return () => {
-      cancelled = true
-      runningRef.current = false
-      document.removeEventListener("visibilitychange", onVisibilityChange)
+      worker.postMessage({ type: "stop" })
+      worker.terminate()
+      workerRef.current = null
     }
   }, [])
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
 }

@@ -24,10 +24,10 @@ _lock = asyncio.Lock()
 
 TASK_TIMEOUT = 600
 
-# Consecutive poll-miss tracking: when the agent stops polling,
-# we fail all waiting tasks so the pipeline doesn't hang.
-AGENT_GONE_THRESHOLD = 300       # seconds without a poll → agent is gone (generous: companion may be blocked on 429 retries)
-AGENT_GONE_CLAIMED  = 25 * 60   # 25 min — claimed tasks get extra grace (browser tab may be throttled during long Whisper tasks)
+# Agent-gone detection: polls now run inside a Web Worker (immune to
+# Chrome's background-tab throttling), so a gap > 2 min reliably means
+# the user closed the tab or navigated away. 5 min is a safe threshold.
+AGENT_GONE_THRESHOLD = 5 * 60   # 5 min — Worker guarantees sub-second polls
 _agent_gone_notified = False
 
 
@@ -81,30 +81,15 @@ async def wait_for_result(task_id: str, timeout: float = TASK_TIMEOUT) -> list[d
         except asyncio.TimeoutError:
             pass
 
-        # Check if agent has disappeared — but give claimed tasks extra
-        # grace time because the browser tab may be throttled while the
-        # companion is still actively processing (e.g. 15-min Whisper).
+        # Check if agent has genuinely disappeared (user closed tab).
+        # Chrome background throttling can pause polls for 5-15 min,
+        # so we use a very generous threshold (30 min) to avoid killing
+        # tasks during normal tab backgrounding.
         gap = seconds_since_last_poll()
-        task_info = _pending.get(task_id, {})
-        is_claimed = task_info.get("status") == "claimed"
-        claimed_at_str = task_info.get("claimed_at")
-        claimed_age = 0.0
-        if claimed_at_str:
-            try:
-                claimed_at = datetime.fromisoformat(claimed_at_str)
-                claimed_age = (datetime.now(timezone.utc) - claimed_at).total_seconds()
-            except (ValueError, TypeError):
-                pass
-
-        # A claimed task gets a much longer grace period — the companion
-        # may be working for 20+ min on Whisper while Chrome throttles
-        # the browser tab's heartbeat interval.
-        effective_threshold = AGENT_GONE_CLAIMED if is_claimed else AGENT_GONE_THRESHOLD
-
-        if gap > effective_threshold:
+        if gap > AGENT_GONE_THRESHOLD:
             logger.warning(
-                "Agent task %s aborted — no agent poll for %.0fs (threshold %ds, claimed=%s, claimed_age=%.0fs)",
-                task_id, gap, effective_threshold, is_claimed, claimed_age,
+                "Agent task %s aborted — no agent poll for %.0fs (threshold %ds)",
+                task_id, gap, AGENT_GONE_THRESHOLD,
             )
             await fail_all_pending("agent_gone")
             return []
