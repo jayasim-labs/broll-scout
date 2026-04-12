@@ -69,28 +69,88 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 # YouTube request throttle — limits yt-dlp calls to avoid bot detection.
 # Token-bucket: allows short bursts but enforces avg rate over time.
+#
+# UNIFIED 429 TRACKER: Any 429 from search, subtitles, or audio increments
+# a single counter. All subsequent yt-dlp calls see the elevated threat level
+# and slow down proactively — not just the code path that hit the 429.
+#
+# DYNAMIC RAMP: After a 429, MIN_GAP doubles for 5 minutes. If no 429 hits
+# in that window, it auto-resets to the baseline.
 # ---------------------------------------------------------------------------
 import random as _random
 
-_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.5"))   # req/sec avg (~1 req every 2s)
-_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "1"))       # no burst — strict 1-at-a-time
-_YT_MIN_GAP    = float(os.environ.get("BROLL_YT_MIN_GAP", "2.0"))     # hard minimum seconds between any two yt-dlp calls
+_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.5"))
+_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "1"))
+_YT_MIN_GAP_BASE = float(os.environ.get("BROLL_YT_MIN_GAP", "2.0"))
 _yt_tokens = float(_YT_BURST_SIZE)
 _yt_last_refill = time.time()
 _yt_last_request = 0.0
 _yt_lock = threading.Lock()
 
+# Unified 429 state — shared across search, subtitle, and audio code paths
+_yt_429_count = 0
+_yt_429_last_hit = 0.0
+_YT_429_COOLDOWN_PER_HIT = 15       # seconds added per consecutive 429
+_YT_429_COOLDOWN_CAP = 90           # max pre-emptive cooldown
+_YT_429_RAMP_DURATION = 5 * 60      # 5 min: how long the elevated gap lasts
+_YT_429_RAMP_MULTIPLIER = 2.0       # double the min gap after a 429
+
+
+def _yt_record_429(source: str) -> None:
+    """Call when ANY yt-dlp request gets a 429. Affects all future throttling."""
+    global _yt_429_count, _yt_429_last_hit
+    with _yt_lock:
+        _yt_429_count += 1
+        _yt_429_last_hit = time.time()
+        log.warning("429 recorded from %s (global count=%d)", source, _yt_429_count)
+
+
+def _yt_record_success() -> None:
+    """Call on successful yt-dlp requests to gradually decay the 429 counter."""
+    global _yt_429_count
+    with _yt_lock:
+        if _yt_429_count > 0:
+            _yt_429_count = max(0, _yt_429_count - 1)
+
+
+def _yt_effective_min_gap() -> float:
+    """Dynamic min gap: doubles after a 429, resets after 5 min clean."""
+    with _yt_lock:
+        if _yt_429_count > 0 and (time.time() - _yt_429_last_hit) < _YT_429_RAMP_DURATION:
+            return _YT_MIN_GAP_BASE * _YT_429_RAMP_MULTIPLIER
+        # Auto-reset: no 429 for 5 minutes → back to baseline
+        if _yt_429_count > 0 and (time.time() - _yt_429_last_hit) >= _YT_429_RAMP_DURATION:
+            return _YT_MIN_GAP_BASE
+    return _YT_MIN_GAP_BASE
+
+
+def _yt_preemptive_cooldown() -> float:
+    """Extra seconds to wait before a request, based on recent 429 history."""
+    with _yt_lock:
+        if _yt_429_count <= 0:
+            return 0.0
+        age = time.time() - _yt_429_last_hit
+        if age > _YT_429_RAMP_DURATION:
+            return 0.0
+        return min(_yt_429_count * _YT_429_COOLDOWN_PER_HIT, _YT_429_COOLDOWN_CAP)
+
 
 def _yt_throttle() -> None:
-    """Block until a token is available. Enforces a hard minimum gap + token bucket."""
+    """Block until a token is available. Applies pre-emptive cooldown + dynamic gap."""
     global _yt_tokens, _yt_last_refill, _yt_last_request
+
+    cooldown = _yt_preemptive_cooldown()
+    if cooldown > 0:
+        log.info("Pre-emptive 429 cooldown: %.1fs (count=%d)", cooldown, _yt_429_count)
+        time.sleep(cooldown)
+
+    min_gap = _yt_effective_min_gap()
     while True:
         with _yt_lock:
             now = time.time()
-            # Hard minimum gap between ANY two yt-dlp calls
             since_last = now - _yt_last_request
-            if since_last < _YT_MIN_GAP:
-                wait = _YT_MIN_GAP - since_last + _random.uniform(0.3, 0.8)
+            if since_last < min_gap:
+                wait = min_gap - since_last + _random.uniform(0.3, 0.8)
                 time.sleep(wait)
                 now = time.time()
 
@@ -743,7 +803,7 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
     full_cmd = cmd[:1] + _cookie_args + _YTDLP_EXTRA + cmd[1:]
     t = timeout or YTDLP_TIMEOUT
 
-    for attempt in range(3):
+    for attempt in range(5):
         if throttle:
             _yt_throttle()
         results = []
@@ -753,8 +813,9 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
             )
             stderr_snip = (proc.stderr or "")[:300]
             if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
-                backoff = (2 ** attempt) * 5 + _random.uniform(2, 5)
-                log.info("YouTube 429 on search — backing off %.1fs (attempt %d/3)", backoff, attempt + 1)
+                _yt_record_429("search")
+                backoff = (2 ** attempt) * 10 + _random.uniform(3, 8)
+                log.info("YouTube 429 on search — backing off %.1fs (attempt %d/5)", backoff, attempt + 1)
                 time.sleep(backoff)
                 continue
 
@@ -773,6 +834,8 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
                 except (TypeError, AttributeError) as norm_err:
                     log.debug("yt-dlp skip bad entry: %s", norm_err)
                     continue
+            if results:
+                _yt_record_success()
             return results
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp timed out after %ds: %s", t, " ".join(full_cmd[:4]))
@@ -806,26 +869,15 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
 
 
 
-_subtitle_429_streak = 0
-_subtitle_429_lock = threading.Lock()
-
 def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
     """Fetch transcript using yt-dlp with browser cookies.
 
     Uses your authenticated YouTube session so requests aren't treated as bot traffic.
     Retries with exponential backoff on HTTP 429 (Too Many Requests).
-    If a previous video also hit 429, adds a longer pre-request cooldown.
+    Uses the unified 429 tracker so search/subtitle/audio 429s all affect throttling.
     """
-    global _subtitle_429_streak
     url = f"https://www.youtube.com/watch?v={video_id}"
     lang_str = ",".join(languages)
-
-    with _subtitle_429_lock:
-        streak = _subtitle_429_streak
-    if streak > 0:
-        cooldown = min(streak * 10, 60)
-        log.info("Pre-request cooldown %.0fs for %s (429 streak=%d)", cooldown, video_id, streak)
-        time.sleep(cooldown)
 
     sub_formats = ["json3/vtt/best", "vtt"]
     got_429 = False
@@ -847,21 +899,21 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
                 "-o", sub_file_base,
             ]
 
-            for attempt in range(3):
+            for attempt in range(5):
                 _yt_throttle()
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 stderr_snip = (proc.stderr or "")[:300].strip()
 
                 if proc.returncode == 0:
-                    with _subtitle_429_lock:
-                        _subtitle_429_streak = max(0, _subtitle_429_streak - 1)
+                    _yt_record_success()
                     break
 
                 if "429" in stderr_snip or "Too Many Requests" in stderr_snip:
-                    backoff = (2 ** attempt) * 8 + _random.uniform(2, 6)
-                    log.info("YouTube 429 for %s subtitles — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
+                    _yt_record_429("subtitles")
+                    backoff = (2 ** attempt) * 10 + _random.uniform(3, 8)
+                    log.info("YouTube 429 for %s subtitles — backing off %.1fs (attempt %d/5)", video_id, backoff, attempt + 1)
                     time.sleep(backoff)
-                    if attempt == 2:
+                    if attempt == 4:
                         got_429 = True
                     continue
 
@@ -883,10 +935,8 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
                     return _parse_vtt_subs(video_id, sub_path, source)
 
         if got_429:
-            with _subtitle_429_lock:
-                _subtitle_429_streak += 1
-            log.warning("All subtitle attempts hit 429 for %s — will try Whisper fallback (streak=%d)",
-                        video_id, _subtitle_429_streak)
+            log.warning("All subtitle attempts hit 429 for %s — will try Whisper fallback (429 count=%d)",
+                        video_id, _yt_429_count)
 
         return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
@@ -993,18 +1043,21 @@ def whisper_transcribe(
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     def _ytdlp_with_429_retry(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
-        """Run a yt-dlp command with automatic 429 backoff (up to 3 attempts)."""
-        for attempt in range(3):
+        """Run a yt-dlp command with automatic 429 backoff (up to 5 attempts)."""
+        for attempt in range(5):
             _yt_throttle()
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             stderr_snip = (proc.stderr or "")[:300]
             if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
-                backoff = (2 ** attempt) * 8 + _random.uniform(2, 6)
-                log.info("YouTube 429 for %s audio — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
+                _yt_record_429("audio")
+                backoff = (2 ** attempt) * 10 + _random.uniform(3, 8)
+                log.info("YouTube 429 for %s audio — backing off %.1fs (attempt %d/5)", video_id, backoff, attempt + 1)
                 time.sleep(backoff)
                 continue
+            if proc.returncode == 0:
+                _yt_record_success()
             return proc
-        return proc  # return last attempt's result
+        return proc
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "audio.%(ext)s")

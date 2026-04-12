@@ -195,7 +195,8 @@ async def run_pipeline(
             for shot in shots_to_use:
                 all_shots.append((seg, shot))
 
-        est_search_sec = len(all_shots) * 12
+        num_batches = max(1, len(all_shots) // 4)
+        est_search_sec = len(all_shots) * 12 + num_batches * 80
         est_min = est_search_sec // 60
         est_sec = est_search_sec % 60
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
@@ -288,14 +289,17 @@ async def run_pipeline(
         # ══════════════════════════════════════════════════════════════
         # Stage 2a: Search — find all candidate videos (sequential)
         # ══════════════════════════════════════════════════════════════
-        # Process shots ONE AT A TIME with a cooldown between each.
-        # Each shot fires ~3 yt-dlp queries; running shots in parallel
-        # was causing bursts of 10+ concurrent requests that triggered
-        # YouTube 429 rate limits on subsequent subtitle fetches.
+        # Process shots ONE AT A TIME with batch-level pacing.
+        # Each shot fires ~3 yt-dlp queries. YouTube's rate limit window
+        # is roughly ~15-20 requests per 2-minute window. With 3 queries
+        # per shot, we hit the limit after ~5 shots. Inserting a longer
+        # cooldown every BATCH_SIZE shots stays under the threshold.
         shuffled_shots = list(all_shots)
         random.shuffle(shuffled_shots)
 
-        SEARCH_INTER_SHOT_DELAY = 2.0  # seconds between shots
+        SEARCH_INTER_SHOT_DELAY = 3.0  # seconds between shots within a batch
+        SEARCH_BATCH_SIZE = 4          # shots per batch before cooldown
+        SEARCH_BATCH_COOLDOWN = 75.0   # seconds to pause between batches
 
         for i, (seg, shot) in enumerate(shuffled_shots):
             try:
@@ -303,7 +307,16 @@ async def run_pipeline(
             except Exception:
                 logger.warning("Search failed for shot %s", shot.shot_id)
             if i < len(shuffled_shots) - 1:
-                await asyncio.sleep(SEARCH_INTER_SHOT_DELAY + random.uniform(0.5, 1.5))
+                shot_num = i + 1
+                if shot_num % SEARCH_BATCH_SIZE == 0:
+                    cooldown = SEARCH_BATCH_COOLDOWN + random.uniform(5, 15)
+                    _log_activity(job_id, "clock",
+                        f"Rate-limit cooldown: pausing {int(cooldown)}s after {shot_num} shots "
+                        f"({len(shuffled_shots) - shot_num} remaining)",
+                        depth=1, group="search")
+                    await asyncio.sleep(cooldown)
+                else:
+                    await asyncio.sleep(SEARCH_INTER_SHOT_DELAY + random.uniform(0.5, 1.5))
 
         search_elapsed = round(time.time() - search_start, 1)
         total_pairs = sum(len(c) for c in shot_candidates.values())
