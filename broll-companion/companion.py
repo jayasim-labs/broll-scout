@@ -72,27 +72,37 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 import random as _random
 
-_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.8"))  # req/sec avg (~1 req every 1.25s)
-_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "2"))       # max burst (kept tight)
+_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.5"))   # req/sec avg (~1 req every 2s)
+_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "1"))       # no burst — strict 1-at-a-time
+_YT_MIN_GAP    = float(os.environ.get("BROLL_YT_MIN_GAP", "2.0"))     # hard minimum seconds between any two yt-dlp calls
 _yt_tokens = float(_YT_BURST_SIZE)
 _yt_last_refill = time.time()
+_yt_last_request = 0.0
 _yt_lock = threading.Lock()
 
 
 def _yt_throttle() -> None:
-    """Block until a token is available. Adds human-like jitter between requests."""
-    global _yt_tokens, _yt_last_refill
+    """Block until a token is available. Enforces a hard minimum gap + token bucket."""
+    global _yt_tokens, _yt_last_refill, _yt_last_request
     while True:
         with _yt_lock:
             now = time.time()
+            # Hard minimum gap between ANY two yt-dlp calls
+            since_last = now - _yt_last_request
+            if since_last < _YT_MIN_GAP:
+                wait = _YT_MIN_GAP - since_last + _random.uniform(0.3, 0.8)
+                time.sleep(wait)
+                now = time.time()
+
             elapsed = now - _yt_last_refill
             _yt_tokens = min(_YT_BURST_SIZE, _yt_tokens + elapsed * _YT_RATE_LIMIT)
             _yt_last_refill = now
             if _yt_tokens >= 1.0:
                 _yt_tokens -= 1.0
-                time.sleep(_random.uniform(0.2, 0.6))
+                _yt_last_request = time.time()
+                time.sleep(_random.uniform(0.3, 0.8))
                 break
-        time.sleep(0.4 + _random.uniform(0.1, 0.5))
+        time.sleep(0.5 + _random.uniform(0.2, 0.6))
 
 _abort_lock = threading.Lock()
 _task_aborts: dict[str, threading.Event] = {}

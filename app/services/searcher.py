@@ -895,7 +895,7 @@ class SearcherService:
                     await emit("check", f"→ {len(cached)} cached results for \"{q[:50]}\"", 3)
                 continue
             if uncached_count > 0:
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await asyncio.sleep(random.uniform(1.5, 3.0))
             uncached_count += 1
             try:
                 if emit:

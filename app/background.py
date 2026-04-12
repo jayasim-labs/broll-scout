@@ -195,7 +195,7 @@ async def run_pipeline(
             for shot in shots_to_use:
                 all_shots.append((seg, shot))
 
-        est_search_sec = len(all_shots) * 5
+        est_search_sec = len(all_shots) * 12
         est_min = est_search_sec // 60
         est_sec = est_search_sec % 60
         est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
@@ -286,20 +286,24 @@ async def run_pipeline(
                 _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
 
         # ══════════════════════════════════════════════════════════════
-        # Stage 2a: Search — find all candidate videos (parallel)
+        # Stage 2a: Search — find all candidate videos (sequential)
         # ══════════════════════════════════════════════════════════════
+        # Process shots ONE AT A TIME with a cooldown between each.
+        # Each shot fires ~3 yt-dlp queries; running shots in parallel
+        # was causing bursts of 10+ concurrent requests that triggered
+        # YouTube 429 rate limits on subsequent subtitle fetches.
         shuffled_shots = list(all_shots)
         random.shuffle(shuffled_shots)
 
-        async def _staggered_search():
-            tasks = []
-            for i, (seg, shot) in enumerate(shuffled_shots):
-                tasks.append(asyncio.create_task(_search_one_shot(seg, shot)))
-                if i < len(shuffled_shots) - 1:
-                    await asyncio.sleep(random.uniform(0.3, 1.2))
-            await asyncio.gather(*tasks, return_exceptions=True)
+        SEARCH_INTER_SHOT_DELAY = 2.0  # seconds between shots
 
-        await _staggered_search()
+        for i, (seg, shot) in enumerate(shuffled_shots):
+            try:
+                await _search_one_shot(seg, shot)
+            except Exception:
+                logger.warning("Search failed for shot %s", shot.shot_id)
+            if i < len(shuffled_shots) - 1:
+                await asyncio.sleep(SEARCH_INTER_SHOT_DELAY + random.uniform(0.5, 1.5))
 
         search_elapsed = round(time.time() - search_start, 1)
         total_pairs = sum(len(c) for c in shot_candidates.values())
@@ -325,7 +329,7 @@ async def run_pipeline(
         # Cooldown: search phase fires many yt-dlp queries in a short burst.
         # YouTube rate-limits per IP; jumping straight into subtitle fetching
         # triggers 429s. A short pause lets the rate-limit window reset.
-        SEARCH_COOLDOWN_SEC = 15
+        SEARCH_COOLDOWN_SEC = 30
         _log_activity(job_id, "clock",
             f"Cooling down {SEARCH_COOLDOWN_SEC}s before transcript fetch (YouTube rate-limit buffer) ...",
             depth=1, group="search")
