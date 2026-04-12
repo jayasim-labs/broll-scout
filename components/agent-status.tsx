@@ -372,21 +372,6 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
     async function loop() {
       while (!cancelled) {
         try {
-          let companionOk = false
-          try {
-            const hResp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
-            const hData = await hResp.json()
-            companionOk = hData.status === "ok"
-          } catch {
-            await sleep(POLL_INTERVAL_IDLE)
-            continue
-          }
-
-          if (!companionOk) {
-            await sleep(POLL_INTERVAL_IDLE)
-            continue
-          }
-
           let pollResp: Response
           try {
             pollResp = await fetch("/api/v1/agent/poll", {
