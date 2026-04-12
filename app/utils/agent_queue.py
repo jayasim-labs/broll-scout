@@ -24,10 +24,11 @@ _lock = asyncio.Lock()
 
 TASK_TIMEOUT = 600
 
-# Agent-gone detection: polls now run inside a Web Worker (immune to
-# Chrome's background-tab throttling), so a gap > 2 min reliably means
-# the user closed the tab or navigated away. 5 min is a safe threshold.
-AGENT_GONE_THRESHOLD = 5 * 60   # 5 min — Worker guarantees sub-second polls
+# Agent-gone detection: polls + heartbeats run inside a Web Worker
+# (immune to Chrome's background-tab throttling). The heartbeat fires
+# every 8s regardless of whether a companion task is running.
+# A gap > 5 min reliably means the user closed the tab.
+AGENT_GONE_THRESHOLD = 5 * 60   # 5 min — Worker heartbeat guarantees 8s polls
 _agent_gone_notified = False
 
 
@@ -81,18 +82,24 @@ async def wait_for_result(task_id: str, timeout: float = TASK_TIMEOUT) -> list[d
         except asyncio.TimeoutError:
             pass
 
-        # Check if agent has genuinely disappeared (user closed tab).
-        # Chrome background throttling can pause polls for 5-15 min,
-        # so we use a very generous threshold (30 min) to avoid killing
-        # tasks during normal tab backgrounding.
         gap = seconds_since_last_poll()
+        task_info = _pending.get(task_id, {})
+        task_type = task_info.get("task_type", "?")
+        task_status = task_info.get("status", "?")
         if gap > AGENT_GONE_THRESHOLD:
             logger.warning(
-                "Agent task %s aborted — no agent poll for %.0fs (threshold %ds)",
-                task_id, gap, AGENT_GONE_THRESHOLD,
+                "Agent task %s (%s, status=%s) aborted — no agent poll for %.0fs "
+                "(threshold %ds). Last poll was at %.1f",
+                task_id, task_type, task_status, gap, AGENT_GONE_THRESHOLD,
+                max(_active_agents.values()) if _active_agents else 0,
             )
             await fail_all_pending("agent_gone")
             return []
+        elif gap > 60:
+            logger.info(
+                "Agent task %s (%s): poll gap %.0fs — still within threshold %ds",
+                task_id, task_type, gap, AGENT_GONE_THRESHOLD,
+            )
 
     logger.warning("Agent task %s timed out after %.0fs", task_id, timeout)
     async with _lock:
@@ -128,9 +135,17 @@ async def cancel_tasks_for_job(job_id: str) -> list[str]:
     return cancelled_ids
 
 
+_poll_count = 0
+_poll_log_interval = 50  # log every N polls to show the agent is alive
+
 async def poll_tasks(agent_id: str, max_tasks: int = 2) -> list[dict]:
+    global _poll_count
     async with _lock:
         _active_agents[agent_id] = time.time()
+        _poll_count += 1
+        pending_count = sum(1 for t in _pending.values() if t["status"] == "pending")
+        claimed_count = sum(1 for t in _pending.values() if t["status"] == "claimed")
+
         claimed: list[dict] = []
         for task_id, task in list(_pending.items()):
             if task["status"] == "pending":
@@ -144,6 +159,19 @@ async def poll_tasks(agent_id: str, max_tasks: int = 2) -> list[dict]:
                 })
                 if len(claimed) >= max_tasks:
                     break
+
+    if claimed:
+        logger.info(
+            "Agent poll #%d: claimed %d task(s) [%s] (was %d pending, %d claimed)",
+            _poll_count, len(claimed),
+            ", ".join(f"{c['task_type']}" for c in claimed),
+            pending_count, claimed_count,
+        )
+    elif _poll_count % _poll_log_interval == 0:
+        logger.debug(
+            "Agent poll #%d: heartbeat (pending=%d, claimed=%d)",
+            _poll_count, pending_count, claimed_count,
+        )
     return claimed
 
 

@@ -544,8 +544,8 @@ async def run_pipeline(
             group="transcript")
 
         logger.info(
-            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed, %d missed in %.1fs | sources: %s",
-            job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), len(missed_videos), total_pipeline_elapsed,
+            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed in %.1fs | sources: %s",
+            job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), total_pipeline_elapsed,
             dict(source_counts),
         )
 

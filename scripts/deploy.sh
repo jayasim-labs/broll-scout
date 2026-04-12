@@ -32,7 +32,7 @@ SSH=(ssh "${SSH_OPTS[@]}" "${BROLL_EC2_USER}@${BROLL_EC2_HOST}")
 echo "=== Deploying B-Roll Scout to EC2 (${BROLL_EC2_USER}@${BROLL_EC2_HOST}) ==="
 
 echo ">> Syncing Python code..."
-rsync -az --delete --info=name \
+rsync -avz --delete \
   -e "ssh -i \"$BROLL_SSH_KEY\" -o StrictHostKeyChecking=accept-new" \
   --include='app/' \
   --include='app/**' \
