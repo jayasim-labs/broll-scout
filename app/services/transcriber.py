@@ -136,7 +136,7 @@ class TranscriberService:
             "video_id": video_id,
             "languages": ["en"],
         }, job_id=job_id)
-        results = await agent_queue.wait_for_result(task_id, timeout=90)
+        results = await agent_queue.wait_for_result(task_id, timeout=300)
         if not results:
             return None
         data = results[0]
