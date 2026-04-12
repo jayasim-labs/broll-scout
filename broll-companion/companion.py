@@ -1105,17 +1105,37 @@ def whisper_transcribe(
             log.warning("Whisper: no GPU available — downgrading %s → base for CPU", model_size)
             model_size = "base"
 
+        WHISPER_TIMEOUT = 20 * 60  # 20 minutes max per transcription
+
+        def _run_transcribe(model_obj, audio, lang, use_fp16):
+            return model_obj.transcribe(audio, language=lang, fp16=use_fp16)
+
+        def _transcribe_with_timeout(model_obj, audio, lang, use_fp16, label=""):
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_run_transcribe, model_obj, audio, lang, use_fp16)
+                try:
+                    return future.result(timeout=WHISPER_TIMEOUT)
+                except FuturesTimeout:
+                    log.error("Whisper %s timed out after %ds for %s", label, WHISPER_TIMEOUT, video_id)
+                    future.cancel()
+                    return None
+
         try:
-            log.info("Whisper: transcribing %s with %s model on %s...", video_id, model_size, device.upper())
+            log.info("Whisper: transcribing %s with %s model on %s (timeout %ds)...", video_id, model_size, device.upper(), WHISPER_TIMEOUT)
             model = whisper.load_model(model_size, device=device)
-            result = model.transcribe(audio_path, language="en", fp16=fp16)
+            result = _transcribe_with_timeout(model, audio_path, "en", fp16, label=f"{model_size}/{device}")
+            if result is None:
+                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": "transcription_timeout"}]
             log.info("Whisper: transcription complete for %s (%d segments)", video_id, len(result.get("segments", [])))
         except Exception as e:
             if device != "cpu":
                 log.warning("Whisper %s failed on %s: %s — falling back to CPU base model", model_size, device, e)
                 try:
                     model = whisper.load_model("base", device="cpu")
-                    result = model.transcribe(audio_path, language="en", fp16=False)
+                    result = _transcribe_with_timeout(model, audio_path, "en", False, label="base/cpu")
+                    if result is None:
+                        return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": "transcription_timeout"}]
                     log.info("Whisper: CPU fallback complete for %s (%d segments)", video_id, len(result.get("segments", [])))
                 except Exception as e2:
                     log.error("Whisper CPU fallback also failed for %s: %s", video_id, e2)

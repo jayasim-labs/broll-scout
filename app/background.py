@@ -403,10 +403,12 @@ async def run_pipeline(
                         whisper_failure_reasons[reason] = whisper_failure_reasons.get(reason, 0) + 1
                         reason_labels = {
                             "timeout": "Whisper task timed out",
+                            "transcription_timeout": "Whisper transcription exceeded 20 min limit",
                             "no_agent": "companion agent unavailable",
                             "audio_download_failed": "audio download failed (restricted/age-gated)",
                             "video_fallback_failed": "audio + video fallback both failed",
                             "all_formats_failed": "all download formats failed (restricted video)",
+                            "download_timeout": "audio download timed out",
                         }
                         reason_text = reason_labels.get(reason, f"Whisper failed: {reason}")
                         _log_activity(job_id, "alert",
@@ -425,11 +427,26 @@ async def run_pipeline(
                     f"✗ \"{short_title}\" — fetch error — {yt_link}",
                     depth=2, group="transcript")
 
-            # Progress update
+            # Progress update with ETA
             done = i + 1
             pct = 40 + int(15 * done / max(len(sorted_videos), 1))
+            transcript_elapsed = time.time() - search_start - SEARCH_COOLDOWN_SEC
+            if done > 0 and transcript_elapsed > 0:
+                per_video = transcript_elapsed / done
+                remaining_videos = len(sorted_videos) - done
+                eta_sec = int(per_video * remaining_videos)
+                if eta_sec >= 3600:
+                    eta_label = f" — ~{eta_sec // 3600}h {(eta_sec % 3600) // 60}m remaining"
+                elif eta_sec >= 60:
+                    eta_label = f" — ~{eta_sec // 60}m remaining"
+                elif eta_sec > 0:
+                    eta_label = f" — ~{eta_sec}s remaining"
+                else:
+                    eta_label = ""
+            else:
+                eta_label = ""
             _set_progress(job_id, "searching", min(pct, 55),
-                          f"Transcripts: {done}/{len(sorted_videos)} fetched")
+                          f"Transcripts: {done}/{len(sorted_videos)} fetched ({whisper_count} via Whisper){eta_label}")
 
         total_pipeline_elapsed = round(time.time() - search_start, 1)
 
@@ -479,14 +496,18 @@ async def run_pipeline(
                 reason_summary_parts = []
                 if whisper_failure_reasons.get("timeout"):
                     reason_summary_parts.append(f"{whisper_failure_reasons['timeout']} timed out")
+                if whisper_failure_reasons.get("transcription_timeout"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['transcription_timeout']} transcription timed out (>20min)")
                 if whisper_failure_reasons.get("audio_download_failed"):
                     reason_summary_parts.append(f"{whisper_failure_reasons['audio_download_failed']} audio download failed")
+                if whisper_failure_reasons.get("download_timeout"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['download_timeout']} download timed out")
                 if whisper_failure_reasons.get("video_fallback_failed"):
                     reason_summary_parts.append(f"{whisper_failure_reasons['video_fallback_failed']} video fallback failed")
                 if whisper_failure_reasons.get("all_formats_failed"):
                     reason_summary_parts.append(f"{whisper_failure_reasons['all_formats_failed']} restricted")
                 other_reasons = sum(v for k, v in whisper_failure_reasons.items()
-                                    if k not in ("timeout", "audio_download_failed", "video_fallback_failed", "all_formats_failed", "no_agent"))
+                                    if k not in ("timeout", "transcription_timeout", "audio_download_failed", "download_timeout", "video_fallback_failed", "all_formats_failed", "no_agent"))
                 if other_reasons:
                     reason_summary_parts.append(f"{other_reasons} other")
                 reason_detail = f" ({', '.join(reason_summary_parts)})" if reason_summary_parts else ""

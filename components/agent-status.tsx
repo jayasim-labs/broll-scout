@@ -382,19 +382,31 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
           return
         }
 
-        const execResp = await fetch(`${COMPANION_URL}/execute`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(task),
-          mode: "cors",
-        })
-        const execData = await execResp.json()
+        const isWhisper = task.task_type === "whisper"
+        const fetchTimeoutMs = isWhisper ? 30 * 60_000 : 5 * 60_000
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), fetchTimeoutMs)
 
-        await fetch("/api/v1/agent/result", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task_id: task.task_id, status: "completed", result: execData.results || [] }),
-        }).catch(() => {})
+        try {
+          const execResp = await fetch(`${COMPANION_URL}/execute`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(task),
+            mode: "cors",
+            signal: controller.signal,
+          })
+          clearTimeout(timer)
+          const execData = await execResp.json()
+
+          await fetch("/api/v1/agent/result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task_id: task.task_id, status: "completed", result: execData.results || [] }),
+          }).catch(() => {})
+        } catch (fetchErr) {
+          clearTimeout(timer)
+          throw fetchErr
+        }
       } catch {
         await fetch("/api/v1/agent/result", {
           method: "POST",
@@ -417,6 +429,13 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
         })
       } catch { /* ignore */ }
     }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        sendHeartbeat()
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange)
 
     async function loop() {
       while (!cancelled) {
@@ -457,7 +476,11 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
     }
 
     loop()
-    return () => { cancelled = true; runningRef.current = false }
+    return () => {
+      cancelled = true
+      runningRef.current = false
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+    }
   }, [])
 }
 
