@@ -390,6 +390,12 @@ class TranslatorService:
                         },
                     )
                 if response.status_code == 429:
+                    body = response.text[:500]
+                    if "insufficient_quota" in body:
+                        raise RuntimeError(
+                            "OpenAI API quota exhausted — your account has no credits remaining. "
+                            "Add credits at https://platform.openai.com/account/billing"
+                        )
                     wait = (2 ** attempt) * 10
                     logger.warning("OpenAI rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
                     await asyncio.sleep(wait)
