@@ -323,7 +323,8 @@ def _signal_handler(signum, frame):
     sig_name = signal.Signals(signum).name
     log.info("Received %s — shutting down...", sig_name)
     _cleanup()
-    sys.exit(0)
+    print("  Done. All processes stopped.")
+    os._exit(0)
 
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
