@@ -180,9 +180,8 @@ def ensure_ollama_running() -> bool:
 
 
 def _is_model_installed(model_key: str, installed_names: list[str]) -> bool:
-    """Check if a model from MATCHER_MODELS is installed by matching its base name prefix."""
-    base_name = model_key.split(":")[0]
-    return any(base_name in m for m in installed_names)
+    """Check if a model from MATCHER_MODELS is installed (exact or tag-prefix match)."""
+    return any(m == model_key or m.startswith(model_key + "-") for m in installed_names)
 
 
 def ensure_model_loaded() -> bool:
@@ -293,13 +292,6 @@ def _cleanup():
         except subprocess.TimeoutExpired:
             _ollama_process.kill()
 
-    # Clean up cookie jar temp directory
-    if _cookie_jar_dir:
-        try:
-            _cookie_jar_dir.cleanup()
-        except Exception:
-            pass
-
     log.info("Companion cleanup complete.")
 
 atexit.register(_cleanup)
@@ -327,13 +319,11 @@ signal.signal(signal.SIGTERM, _signal_handler)
 COOKIE_BROWSER = os.environ.get("BROLL_COOKIE_BROWSER", "none")
 _cookie_args: list[str] = []
 _cookie_status: str = "untested"
-_cookie_jar_path: str | None = None
-_cookie_jar_dir: tempfile.TemporaryDirectory | None = None
 
 
 def _detect_cookie_support() -> None:
-    """Test if yt-dlp can read cookies from the configured browser and export a cookie jar."""
-    global _cookie_args, _cookie_status, _cookie_jar_path, _cookie_jar_dir
+    """Test if yt-dlp can read cookies from the configured browser."""
+    global _cookie_args, _cookie_status
 
     if COOKIE_BROWSER.lower() == "none":
         _cookie_status = "disabled"
@@ -357,7 +347,6 @@ def _detect_cookie_support() -> None:
             _cookie_args = ["--cookies-from-browser", COOKIE_BROWSER]
             _cookie_status = f"active ({COOKIE_BROWSER})"
             log.info("Cookie extraction enabled: --cookies-from-browser %s", COOKIE_BROWSER)
-            _export_cookie_jar()
         else:
             _cookie_status = f"failed ({COOKIE_BROWSER})"
             log.warning(
@@ -375,32 +364,6 @@ def _detect_cookie_support() -> None:
         _cookie_status = f"error: {e}"
         log.warning("Cookie detection error: %s — running without cookies", e)
 
-
-def _export_cookie_jar() -> None:
-    """Export browser cookies to a Netscape cookie jar file via yt-dlp.
-
-    This jar is used by fetch_transcript's yt-dlp fallback so that
-    subtitle requests are authenticated (avoids YouTube bot detection).
-    """
-    global _cookie_jar_path, _cookie_jar_dir
-    try:
-        _cookie_jar_dir = tempfile.TemporaryDirectory(prefix="broll_cookies_")
-        jar_path = os.path.join(_cookie_jar_dir.name, "cookies.txt")
-        proc = subprocess.run(
-            ["yt-dlp", "--cookies-from-browser", COOKIE_BROWSER,
-             "--cookies", jar_path,
-             "--skip-download", "--no-warnings",
-             "--flat-playlist", "--playlist-end", "1",
-             "ytsearch1:test"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if os.path.isfile(jar_path) and os.path.getsize(jar_path) > 100:
-            _cookie_jar_path = jar_path
-            log.info("Cookie jar exported to %s (%d bytes)", jar_path, os.path.getsize(jar_path))
-        else:
-            log.warning("Cookie jar export produced no usable file")
-    except Exception as e:
-        log.warning("Cookie jar export failed: %s — yt-dlp fallback will use --cookies-from-browser directly", e)
 
 
 @app.route("/health")
@@ -621,7 +584,7 @@ def models_switch():
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     """View or change cookie browser at runtime."""
-    global COOKIE_BROWSER, _cookie_args, _cookie_status, _cookie_jar_path, _cookie_jar_dir
+    global COOKIE_BROWSER, _cookie_args, _cookie_status
 
     if request.method == "POST":
         body = request.json or {}
@@ -630,17 +593,12 @@ def settings():
             COOKIE_BROWSER = new_browser  # noqa: F841 — intentional global reassign
             _cookie_args = []
             _cookie_status = "untested"
-            if _cookie_jar_dir:
-                _cookie_jar_dir.cleanup()
-                _cookie_jar_dir = None
-            _cookie_jar_path = None
             _detect_cookie_support()
         return jsonify({"cookie_browser": COOKIE_BROWSER, "cookie_status": _cookie_status})
 
     return jsonify({
         "cookie_browser": COOKIE_BROWSER,
         "cookie_status": _cookie_status,
-        "cookie_jar_active": _cookie_jar_path is not None,
     })
 
 
@@ -1408,17 +1366,16 @@ if __name__ == "__main__":
     else:
         log.warning("Ollama not available — timestamp matching will use GPT-4o-mini via API")
 
+    whisper_device = "CPU"
     try:
         import torch
         if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            log.info("Whisper engine: CUDA GPU (%s) — large models supported, fp16", gpu_name)
+            whisper_device = f"CUDA GPU ({torch.cuda.get_device_name(0)})"
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            log.info("Whisper engine: Apple Metal GPU (MPS) — large models supported")
-        else:
-            log.info("Whisper engine: CPU only — large models will be downgraded to 'base'")
+            whisper_device = "Apple Metal GPU (MPS)"
     except ImportError:
-        log.info("Whisper engine: CPU only (PyTorch not found) — large models will be downgraded to 'base'")
+        pass
+    log.info("Whisper engine: %s", whisper_device)
 
     log.info("CORS allowed origins: %s", _default_cors)
     log.info("Keep this running while your B-Roll Scout tab is open in the browser")

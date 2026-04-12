@@ -65,7 +65,10 @@ export function AgentStatusBadge() {
 
   async function checkCompanion() {
     try {
-      const healthResp = await fetch(`${COMPANION_URL}/health`, { mode: "cors" })
+      const [healthResp, modelsResp] = await Promise.all([
+        fetch(`${COMPANION_URL}/health`, { mode: "cors" }),
+        fetch(`${COMPANION_URL}/models/status`, { mode: "cors" }).catch(() => null),
+      ])
       const data: CompanionHealth = await healthResp.json()
       if (data.status === "ok" || data.ytdlp_ok) {
         setState("connected")
@@ -73,6 +76,9 @@ export function AgentStatusBadge() {
           data.ytdlp_ok = true
         }
         setHealth(data)
+        if (modelsResp?.ok) {
+          setModelsStatus(await modelsResp.json())
+        }
       } else {
         setState("disconnected")
         setHealth(null)
@@ -85,31 +91,22 @@ export function AgentStatusBadge() {
     }
   }
 
-  async function fetchModelsOnce() {
-    try {
-      const resp = await fetch(`${COMPANION_URL}/models/status`, { mode: "cors" })
-      if (resp.ok) setModelsStatus(await resp.json())
-    } catch { /* silent */ }
-  }
-
   if (state === "checking") return null
 
-  const installedModelCount = modelsStatus
+  const modelCount = modelsStatus ? Object.keys(modelsStatus.models).length : 0
+  const readyModelCount = modelsStatus
     ? Object.values(modelsStatus.models).filter(m => m.ready).length
     : 0
-  const totalAgents = health
-    ? [health.ytdlp_ok, health.ffmpeg_ok, health.whisper_ok].filter(Boolean).length + installedModelCount
+  const toolsReady = health
+    ? [health.ytdlp_ok, health.ffmpeg_ok, health.whisper_ok].filter(Boolean).length
     : 0
-  const totalPossible = 3 + (modelsStatus ? Object.keys(modelsStatus.models).length : 1)
+  const totalAgents = toolsReady + readyModelCount
+  const totalPossible = 3 + modelCount
 
   return (
     <div className="relative" data-agent-panel>
       <button
-        onClick={() => {
-          const willOpen = !showPanel
-          setShowPanel(willOpen)
-          if (willOpen && !modelsStatus) fetchModelsOnce()
-        }}
+        onClick={() => setShowPanel(prev => !prev)}
         className={cn(
           "flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full transition-colors",
           state === "connected"
@@ -173,7 +170,7 @@ export function AgentStatusBadge() {
                         Matcher models (Ollama {modelsStatus.ollama_version})
                       </span>
                       <span className="text-[10px] text-muted-foreground/60">
-                        {installedModelCount} ready
+                        {readyModelCount} ready
                       </span>
                     </div>
                   </div>
