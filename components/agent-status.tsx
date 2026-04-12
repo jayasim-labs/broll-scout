@@ -358,7 +358,8 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
     if (workerRef.current) return
 
     const backendOrigin = typeof window !== "undefined" ? window.location.origin : ""
-    const worker = new Worker("/agent-poll-worker.js")
+    const workerUrl = `/agent-poll-worker.js?v=${Date.now()}`
+    const worker = new Worker(workerUrl)
     workerRef.current = worker
 
     worker.postMessage({
