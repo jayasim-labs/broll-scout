@@ -1444,6 +1444,7 @@ const logIconColor: Record<string, string> = {
 const LOG_GROUP_LABELS: Record<string, { label: string; icon: LucideIcon; color: string }> = {
   translate: { label: "Translation & Segmentation", icon: Languages, color: "text-violet-400" },
   search: { label: "Video Discovery", icon: Search, color: "text-blue-400" },
+  transcript: { label: "Transcript & Whisper", icon: Mic, color: "text-teal-400" },
   match: { label: "Timestamp Analysis", icon: Eye, color: "text-pink-400" },
   rank: { label: "Ranking & Deduplication", icon: Filter, color: "text-orange-400" },
   done: { label: "Complete", icon: Check, color: "text-emerald-400" },

@@ -786,62 +786,24 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
 
 
 def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[dict]:
-    """Fetch transcript: try youtube-transcript-api first, fall back to yt-dlp with cookies."""
+    """Fetch transcript using yt-dlp with cookies (authenticated, residential IP)."""
     languages = languages or ["en"]
 
-    # --- Attempt 1: youtube-transcript-api (fast, no auth needed for most videos) ---
-    # Throttle library calls too — unthrottled bursts trigger YouTube IP blocks
+    # yt-dlp with browser cookies is the primary path — it handles authenticated
+    # requests from a residential IP and avoids the rate-limiting/IP-blocking
+    # issues that youtube-transcript-api suffers from.
     _yt_throttle()
-    try:
-        result = _fetch_transcript_api(video_id, languages)
-        if result and result[0].get("transcript"):
-            return result
-        log.info("youtube-transcript-api returned no transcript for %s — trying yt-dlp fallback", video_id)
-    except Exception as e:
-        log.info("youtube-transcript-api failed for %s: %s — trying yt-dlp fallback", video_id, e)
-
-    # --- Attempt 2: yt-dlp with cookies (authenticated, bypasses bot detection) ---
     if _cookie_args:
         try:
             result = _fetch_transcript_ytdlp(video_id, languages)
             if result and result[0].get("transcript"):
                 return result
         except Exception as e:
-            log.warning("yt-dlp subtitle fallback failed for %s: %s", video_id, e)
+            log.warning("yt-dlp subtitle fetch failed for %s: %s", video_id, e)
 
     return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
 
-def _fetch_transcript_api(video_id: str, languages: list[str]) -> list[dict]:
-    """Primary transcript fetcher using youtube-transcript-api."""
-    from youtube_transcript_api import YouTubeTranscriptApi
-    api = YouTubeTranscriptApi()
-
-    try:
-        fetched = api.fetch(video_id, languages=languages)
-        entries = fetched.to_raw_data()
-        source = "youtube_captions"
-    except Exception:
-        transcript_list = api.list(video_id)
-        try:
-            manual = transcript_list.find_manually_created_transcript(languages)
-            entries = manual.fetch().to_raw_data()
-            source = "youtube_captions"
-        except Exception:
-            try:
-                auto = transcript_list.find_generated_transcript(languages)
-                entries = auto.fetch().to_raw_data()
-                source = "youtube_auto_captions"
-            except Exception:
-                for t in transcript_list:
-                    if not t.is_generated:
-                        entries = t.fetch().to_raw_data()
-                        source = "youtube_captions"
-                        break
-                else:
-                    return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
-
-    return [{"video_id": video_id, "transcript": _format_entries(entries), "source": source}]
 
 
 def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:

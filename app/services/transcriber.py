@@ -1,9 +1,6 @@
 import asyncio
 import logging
 
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-
 from app.config import get_settings, DEFAULTS
 from app.models.schemas import Transcript, TranscriptSource
 from app.utils.cost_tracker import get_cost_tracker
@@ -11,11 +8,9 @@ from app.utils import agent_queue
 
 logger = logging.getLogger(__name__)
 
-_ytt_api = YouTubeTranscriptApi()
-
 
 class TranscriberService:
-    """Fetches transcripts via cache -> YouTube captions -> agent -> Whisper flag cascade."""
+    """Fetches transcripts via cache -> companion agent (residential IP) -> Whisper."""
 
     def __init__(self, pipeline_settings: dict | None = None):
         self.settings = get_settings()
@@ -34,7 +29,7 @@ class TranscriberService:
         on_whisper_start=None,
         whisper_gate: asyncio.Semaphore | None = None,
     ) -> Transcript:
-        """Attempt to get a transcript: cache -> direct YouTube -> agent (local companion) -> Whisper."""
+        """Attempt to get a transcript: cache -> companion agent (residential IP) -> Whisper via companion."""
         from app.services.storage import get_storage
         storage = get_storage()
 
@@ -54,12 +49,9 @@ class TranscriberService:
         except Exception:
             logger.exception("Cache lookup failed for %s", video_id)
 
-        # Prefer companion agent (has browser cookies + residential IP) over
-        # server-side youtube-transcript-api (anonymous from datacenter IP).
-        # This avoids YouTube bot detection and IP blocking.
-        agent_available = agent_queue.is_agent_available()
-
-        if agent_available:
+        # All YouTube requests go through the companion agent (residential IP)
+        # to avoid datacenter IP bans from YouTube.
+        if agent_queue.is_agent_available():
             try:
                 agent_result = await self._fetch_via_agent(video_id, job_id=job_id)
                 if agent_result:
@@ -78,34 +70,11 @@ class TranscriberService:
                         video_duration_seconds=video_duration_seconds,
                     )
                 else:
-                    logger.info("[transcript] Agent returned nothing for %s — trying server-side", video_id)
+                    logger.info("[transcript] Agent returned nothing for %s — falling through to Whisper", video_id)
             except Exception:
-                logger.info("[transcript] Agent failed for %s — trying server-side", video_id)
+                logger.info("[transcript] Agent failed for %s — falling through to Whisper", video_id)
 
-        # Server-side fallback: only used when companion agent is unavailable or failed
-        try:
-            transcript_data, source = self._fetch_youtube_captions(video_id)
-            if transcript_data is not None:
-                await storage.store_transcript(
-                    video_id=video_id,
-                    transcript_text=transcript_data,
-                    source=source,
-                    language="en",
-                    duration=video_duration_seconds,
-                )
-                return Transcript(
-                    video_id=video_id,
-                    transcript_text=transcript_data,
-                    transcript_source=source,
-                    language="en",
-                    video_duration_seconds=video_duration_seconds,
-                )
-        except (TranscriptsDisabled, NoTranscriptFound):
-            logger.info("No YouTube captions available for %s (direct)", video_id)
-        except Exception:
-            logger.info("Direct YouTube caption fetch failed for %s", video_id)
-
-        # Last resort: Whisper transcription via local companion
+        # Whisper transcription via local companion
         max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60
         effective_duration = video_duration_seconds or 300
         agent_up = agent_queue.is_agent_available()
@@ -152,11 +121,14 @@ class TranscriberService:
                         transcript_source=TranscriptSource.WHISPER,
                         language="en",
                         video_duration_seconds=video_duration_seconds,
+                        whisper_attempted=True,
                     )
                 else:
                     logger.warning("[transcript] Whisper returned no transcript for %s", video_id)
+                    no_transcript.whisper_attempted = True
             except Exception:
                 logger.exception("[transcript] Whisper exception for %s", video_id)
+                no_transcript.whisper_attempted = True
         else:
             logger.warning("[transcript] Skipping Whisper for %s — duration %ds > max %ds", video_id, effective_duration, max_whisper_duration)
 
@@ -254,52 +226,3 @@ class TranscriberService:
             video_duration_seconds=duration,
         )
 
-    def _fetch_youtube_captions(
-        self, video_id: str
-    ) -> tuple[str | None, TranscriptSource]:
-        """Try YouTube captions: manual English -> auto English -> manual any language."""
-        try:
-            fetched = _ytt_api.fetch(video_id, languages=["en"])
-            return self._format_entries(fetched.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
-        except Exception:
-            pass
-
-        transcript_list = _ytt_api.list(video_id)
-
-        try:
-            manual_en = transcript_list.find_manually_created_transcript(["en"])
-            entries = manual_en.fetch()
-            return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
-        except Exception:
-            pass
-
-        try:
-            auto_en = transcript_list.find_generated_transcript(["en"])
-            entries = auto_en.fetch()
-            return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_AUTO
-        except Exception:
-            pass
-
-        for transcript in transcript_list:
-            if not transcript.is_generated:
-                try:
-                    entries = transcript.fetch()
-                    return self._format_entries(entries.to_raw_data()), TranscriptSource.YOUTUBE_MANUAL
-                except Exception:
-                    continue
-
-        return None, TranscriptSource.NONE
-
-    @staticmethod
-    def _format_entries(entries: list[dict]) -> str:
-        lines = []
-        for entry in entries:
-            start = int(entry.get("start", 0))
-            duration = entry.get("duration", 0)
-            end = int(start + duration) if duration else start
-            s_min, s_sec = start // 60, start % 60
-            e_min, e_sec = end // 60, end % 60
-            text = entry.get("text", "").strip()
-            if text:
-                lines.append(f"[{s_min}:{s_sec:02d} → {e_min}:{e_sec:02d}] {text}")
-        return "\n".join(lines)

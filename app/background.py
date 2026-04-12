@@ -333,7 +333,10 @@ async def run_pipeline(
                         else:
                             failed_fetches.add(vid)
                             affected = video_to_shots.get(vid, [])
-                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
+                            if t.whisper_attempted:
+                                _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — Whisper attempted but audio download failed (likely restricted/age-gated) — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
+                            else:
+                                _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
                     except Exception:
                         logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
                         transcript_cache[vid] = None
@@ -388,9 +391,9 @@ async def run_pipeline(
         remaining = total_to_fetch - already_done
         if remaining > 0:
             est_min = round(estimated_whisper_sec / 60)
-            _log_activity(job_id, "clock", f"All searches done! Fetching {remaining} remaining transcripts (captions + Whisper ×{whisper_concurrency} concurrent, est. up to ~{est_min}m)", depth=1, group="search")
+            _log_activity(job_id, "clock", f"Fetching {remaining} remaining transcripts (captions + Whisper ×{whisper_concurrency} concurrent, est. up to ~{est_min}m)", group="transcript")
         else:
-            _log_activity(job_id, "check", f"All {total_to_fetch} transcripts already fetched during search", depth=1, group="search")
+            _log_activity(job_id, "check", f"All {total_to_fetch} transcripts already fetched during search", group="transcript")
 
         async def _transcript_progress_reporter():
             """Periodically log transcript fetch progress with rate and ETA."""
@@ -415,7 +418,7 @@ async def run_pipeline(
                         f"Transcripts: {done_now}/{total_to_fetch} "
                         f"({caption_count} captions, {whisper_count} Whisper, {len(failed_fetches)} failed) "
                         f"— {elapsed_min}m elapsed, ~{eta_min}m remaining",
-                        depth=1, group="search",
+                        depth=1, group="transcript",
                     )
                     _set_progress(job_id, "searching", pct,
                                   f"Fetching transcripts: {done_now}/{total_to_fetch} ({pending_now} remaining, ~{eta_min}m ETA)")
@@ -443,7 +446,7 @@ async def run_pipeline(
                 job_id, TRANSCRIPT_FETCH_TIMEOUT, fetched_count, total_to_fetch, pending_count,
             )
             whisper_done = sum(1 for s in transcript_sources.values() if "Whisper" in s)
-            _log_activity(job_id, "alert", f"Transcript phase reached {TRANSCRIPT_FETCH_TIMEOUT // 60}m limit — proceeding with {fetched_count}/{total_to_fetch} transcripts ({whisper_done} via Whisper, {pending_count} still pending)", depth=1, group="search")
+            _log_activity(job_id, "alert", f"Transcript phase reached {TRANSCRIPT_FETCH_TIMEOUT // 60}m limit — proceeding with {fetched_count}/{total_to_fetch} transcripts ({whisper_done} via Whisper, {pending_count} still pending)", depth=1, group="transcript")
         finally:
             progress_reporter.cancel()
             try:
@@ -492,10 +495,18 @@ async def run_pipeline(
         search_min = round(search_elapsed / 60, 1)
         search_label = f"{search_min}m" if search_min >= 1 else f"{search_elapsed}s"
         _log_activity(job_id, "check",
-            f"Search + transcript fetch done in {search_label}! "
-            f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved) → "
-            f"{videos_with_transcript} transcripts ready",
+            f"Video discovery done in {search_label} — "
+            f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved)",
             group="search")
+
+        if empty_shots:
+            _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
+
+        # ── Transcript & Whisper summary (separate UI section) ──
+
+        _log_activity(job_id, "bar-chart",
+            f"Fetched transcripts for {unique_videos} videos → {videos_with_transcript} succeeded, {failed_count} failed",
+            group="transcript")
 
         breakdown_parts = []
         if cache_hits:
@@ -512,10 +523,42 @@ async def run_pipeline(
             breakdown_parts.append(f"{error_count} errors")
 
         if breakdown_parts:
-            _log_activity(job_id, "bar-chart", f"Transcript sources: {' · '.join(breakdown_parts)}", depth=1, group="search")
+            _log_activity(job_id, "bar-chart", f"Sources: {' · '.join(breakdown_parts)}", depth=1, group="transcript")
 
-        if empty_shots:
-            _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
+        # Whisper detail
+        if whisper_queue_count > 0:
+            whisper_failed = whisper_queue_count - whisper_ok
+            if whisper_ok > 0 and whisper_failed == 0:
+                _log_activity(job_id, "check",
+                    f"🎙️ Whisper: all {whisper_ok} transcriptions succeeded (concurrency: {whisper_concurrency})",
+                    depth=1, group="transcript")
+            elif whisper_ok > 0:
+                _log_activity(job_id, "alert",
+                    f"🎙️ Whisper: {whisper_ok} succeeded, {whisper_failed} failed — audio download error on restricted/age-gated videos (concurrency: {whisper_concurrency})",
+                    depth=1, group="transcript")
+            else:
+                _log_activity(job_id, "alert",
+                    f"🎙️ Whisper: all {whisper_failed} attempted transcriptions failed — audio download errors (concurrency: {whisper_concurrency})",
+                    depth=1, group="transcript")
+        elif unique_videos > 0 and videos_with_transcript == unique_videos:
+            _log_activity(job_id, "check",
+                f"🎙️ Whisper not needed — all {unique_videos} videos had YouTube captions or cached transcripts",
+                depth=1, group="transcript")
+
+        # High failure rate warning
+        if failed_count > 0 and unique_videos > 0:
+            fail_pct = round(failed_count / unique_videos * 100)
+            if fail_pct >= 40:
+                _log_activity(job_id, "alert",
+                    f"⚠️ {failed_count} of {unique_videos} videos ({fail_pct}%) had no transcript at all. "
+                    f"Likely restricted/age-gated videos or YouTube rate-limiting. "
+                    f"Only {videos_with_transcript} videos can proceed to matching.",
+                    depth=1, group="transcript")
+
+        _log_activity(job_id, "check",
+            f"Transcript phase complete — {videos_with_transcript} videos ready for timestamp matching",
+            group="transcript")
+
         logger.info(
             "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed, %d missed in %.1fs | sources: %s",
             job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), len(missed_videos), search_elapsed,
@@ -558,11 +601,15 @@ async def run_pipeline(
                     match_tasks.append((cand.video_id, shot_id))
 
         total_match_pairs = len(match_tasks)
+        skipped_no_transcript = sum(len(c) for c in shot_candidates.values()) - total_match_pairs
 
-        _set_progress(job_id, "matching", 50, f"Matching {total_match_pairs} video-shot pairs with local AI...")
-        _log_activity(job_id, "eye", f"Matching {total_active_shots} shots against {videos_with_transcript} videos with transcripts ({total_match_pairs} video-shot pairs to process)", group="match")
+        _set_progress(job_id, "matching", 55, f"Matching {total_match_pairs} video-shot pairs with local AI...")
+        _log_activity(job_id, "eye",
+            f"Matching {total_active_shots} shots against {videos_with_transcript} videos with transcripts "
+            f"({total_match_pairs} video-shot pairs to process"
+            + (f", {skipped_no_transcript} pairs skipped — no transcript" if skipped_no_transcript else "")
+            + ")", group="match")
         _log_activity(job_id, "clock", f"Each pair gets a dedicated {match_label} call — processing sequentially (1 at a time)", depth=1, group="match")
-        _log_activity(job_id, "zap", f"Running {total_match_pairs} matches", depth=1, group="match")
 
         matches_done = 0
         matches_with_result = 0

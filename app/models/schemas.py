@@ -293,6 +293,7 @@ class Transcript(BaseModel):
     transcript_source: TranscriptSource
     language: str = "en"
     video_duration_seconds: int = 0
+    whisper_attempted: bool = False
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
