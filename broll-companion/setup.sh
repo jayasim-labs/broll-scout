@@ -144,6 +144,7 @@ step "4/8" "yt-dlp & ffmpeg..."
 NEED_INSTALL=()
 if ! command -v yt-dlp &>/dev/null; then NEED_INSTALL+=("yt-dlp"); fi
 if ! command -v ffmpeg &>/dev/null; then NEED_INSTALL+=("ffmpeg"); fi
+if ! command -v deno &>/dev/null; then NEED_INSTALL+=("deno"); fi
 
 if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
     FIRST_RUN=true
@@ -152,7 +153,11 @@ if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
 fi
 
 if command -v yt-dlp &>/dev/null && command -v ffmpeg &>/dev/null; then
-    ok "yt-dlp $(yt-dlp --version) + ffmpeg"
+    DENO_NOTE=""
+    if command -v deno &>/dev/null; then
+        DENO_NOTE=" + deno (JS solver)"
+    fi
+    ok "yt-dlp $(yt-dlp --version) + ffmpeg${DENO_NOTE}"
 else
     warn "Some tools could not be installed. Check brew output above."
 fi

@@ -60,7 +60,9 @@ YTDLP_TIMEOUT = 60
 _YTDLP_EXTRA = [
     "--extractor-args", "youtube:player_client=web,default",
     "--force-ipv4",
-    "--geo-bypass",
+    "--remote-components", "ejs:github",
+    "--socket-timeout", "30",
+    "--retries", "3",
 ]
 _executor = ThreadPoolExecutor(max_workers=4)
 
@@ -1268,7 +1270,7 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
-        "yt-dlp", *_cookie_args, url,
+        "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
         "--download-sections", f"*{start_ts}-{end_ts}",
         "--force-keyframes-at-cuts",
         "--merge-output-format", "mp4",
