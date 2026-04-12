@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class TranscriberService:
-    """Fetches transcripts via cache -> companion agent (residential IP) -> Whisper."""
+    """Fetches transcripts via cache -> companion captions -> Whisper."""
 
     def __init__(self, pipeline_settings: dict | None = None):
         self.settings = get_settings()
@@ -27,7 +27,10 @@ class TranscriberService:
         job_id: str | None = None,
         on_whisper_start=None,
     ) -> Transcript:
-        """Attempt to get a transcript: cache -> companion agent (residential IP) -> Whisper via companion."""
+        """Try cache -> companion captions -> Whisper, sequentially.
+
+        Simple and synchronous — caller gets back a complete result every time.
+        """
         from app.services.storage import get_storage
         storage = get_storage()
 
@@ -38,6 +41,7 @@ class TranscriberService:
             video_duration_seconds=video_duration_seconds,
         )
 
+        # 1. Cache lookup
         try:
             cached = await storage.get_transcript(video_id)
             if cached and cached.transcript_text:
@@ -47,11 +51,10 @@ class TranscriberService:
         except Exception:
             logger.exception("Cache lookup failed for %s", video_id)
 
-        # All YouTube requests go through the companion agent (residential IP)
-        # to avoid datacenter IP bans from YouTube.
+        # 2. Companion captions (YouTube captions via residential IP)
         if agent_queue.is_agent_available():
             try:
-                agent_result = await self._fetch_via_agent(video_id, job_id=job_id)
+                agent_result = await self._fetch_captions_via_agent(video_id, job_id=job_id)
                 if agent_result:
                     await storage.store_transcript(
                         video_id=video_id,
@@ -67,75 +70,68 @@ class TranscriberService:
                         language="en",
                         video_duration_seconds=video_duration_seconds,
                     )
-                else:
-                    logger.info("[transcript] Agent returned nothing for %s — falling through to Whisper", video_id)
             except Exception:
-                logger.info("[transcript] Agent failed for %s — falling through to Whisper", video_id)
+                logger.info("[transcript] Agent captions failed for %s", video_id)
 
-        # Whisper transcription via local companion
+        # 3. Whisper transcription via companion
         max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60
         effective_duration = video_duration_seconds or 300
-        agent_up = agent_queue.is_agent_available()
-        whisper_queue_depth = agent_queue.pending_task_count("whisper")
-        logger.info("[transcript] Whisper check for %s: duration=%ds, max=%ds, agent=%s, queue_depth=%d",
-                    video_id, effective_duration, max_whisper_duration, agent_up, whisper_queue_depth)
-        if effective_duration <= max_whisper_duration:
-            try:
-                if on_whisper_start:
-                    try:
-                        await on_whisper_start(video_id, effective_duration)
-                    except Exception:
-                        pass
+        if effective_duration > max_whisper_duration:
+            logger.info("[transcript] Skipping Whisper for %s — duration %ds > max %ds",
+                        video_id, effective_duration, max_whisper_duration)
+            return no_transcript
 
-                logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
-                whisper_result = await self._whisper_via_agent(
-                    video_id, effective_duration, job_id=job_id,
+        if not agent_queue.is_agent_available():
+            logger.warning("[transcript] No agent available for Whisper on %s", video_id)
+            no_transcript.whisper_attempted = True
+            no_transcript.whisper_failure_reason = "no_agent"
+            return no_transcript
+
+        try:
+            if on_whisper_start:
+                try:
+                    await on_whisper_start(video_id, effective_duration)
+                except Exception:
+                    pass
+
+            whisper_result = await self._whisper_via_agent(
+                video_id, effective_duration, job_id=job_id,
+            )
+            if whisper_result and whisper_result.get("text"):
+                await storage.store_transcript(
+                    video_id=video_id,
+                    transcript_text=whisper_result["text"],
+                    source=TranscriptSource.WHISPER,
+                    language="en",
+                    duration=video_duration_seconds,
                 )
-
-                if whisper_result and whisper_result.get("text"):
-                    await storage.store_transcript(
-                        video_id=video_id,
-                        transcript_text=whisper_result["text"],
-                        source=TranscriptSource.WHISPER,
-                        language="en",
-                        duration=video_duration_seconds,
-                    )
-                    if job_id:
-                        whisper_min = round(effective_duration / 60, 1)
-                        costs = get_cost_tracker().get_job_costs(job_id)
-                        if costs:
-                            costs.add_whisper(whisper_min)
-                    logger.warning("[transcript] Whisper SUCCESS for %s", video_id)
-                    return Transcript(
-                        video_id=video_id,
-                        transcript_text=whisper_result["text"],
-                        transcript_source=TranscriptSource.WHISPER,
-                        language="en",
-                        video_duration_seconds=video_duration_seconds,
-                        whisper_attempted=True,
-                    )
-                else:
-                    reason = whisper_result.get("failure_reason", "unknown") if whisper_result else "unknown"
-                    logger.warning("[transcript] Whisper failed for %s — reason: %s", video_id, reason)
-                    no_transcript.whisper_attempted = True
-                    no_transcript.whisper_failure_reason = reason
-            except Exception:
-                logger.exception("[transcript] Whisper exception for %s", video_id)
+                if job_id:
+                    whisper_min = round(effective_duration / 60, 1)
+                    costs = get_cost_tracker().get_job_costs(job_id)
+                    if costs:
+                        costs.add_whisper(whisper_min)
+                return Transcript(
+                    video_id=video_id,
+                    transcript_text=whisper_result["text"],
+                    transcript_source=TranscriptSource.WHISPER,
+                    language="en",
+                    video_duration_seconds=video_duration_seconds,
+                    whisper_attempted=True,
+                )
+            else:
+                reason = whisper_result.get("failure_reason", "unknown") if whisper_result else "unknown"
                 no_transcript.whisper_attempted = True
-        else:
-            logger.warning("[transcript] Skipping Whisper for %s — duration %ds > max %ds", video_id, effective_duration, max_whisper_duration)
+                no_transcript.whisper_failure_reason = reason
+        except Exception:
+            logger.exception("[transcript] Whisper exception for %s", video_id)
+            no_transcript.whisper_attempted = True
 
-        logger.warning("[transcript] All sources exhausted for %s", video_id)
         return no_transcript
 
-    async def _fetch_via_agent(
+    async def _fetch_captions_via_agent(
         self, video_id: str, job_id: str | None = None,
     ) -> dict | None:
-        """Ask the local companion to fetch the transcript."""
-        if not agent_queue.is_agent_available():
-            logger.info("No agent available for transcript fetch of %s", video_id)
-            return None
-
+        """Ask the companion to fetch YouTube captions."""
         task_id = await agent_queue.create_task("transcript", {
             "video_id": video_id,
             "languages": ["en"],
@@ -161,14 +157,11 @@ class TranscriberService:
     async def _whisper_via_agent(
         self, video_id: str, duration_seconds: int, job_id: str | None = None,
     ) -> dict | None:
-        """Ask the local companion to download audio and run Whisper transcription.
+        """Ask the companion to download audio and run Whisper.
 
-        Returns dict with 'text' on success, or dict with 'failure_reason' on failure, or None.
+        Returns dict with 'text' on success, or 'failure_reason' on failure.
+        No timeout calculation needed — the companion does the work and we just wait.
         """
-        if not agent_queue.is_agent_available():
-            logger.warning("[whisper] No agent available for %s", video_id)
-            return {"failure_reason": "no_agent"}
-
         max_dur_min = self._get("whisper_max_video_duration_min", 60)
         whisper_model = self._get("whisper_model", "large-v3-turbo")
         task_id = await agent_queue.create_task("whisper", {
@@ -176,24 +169,17 @@ class TranscriberService:
             "max_duration_min": max_dur_min,
             "whisper_model": whisper_model,
         }, job_id=job_id)
-        queue_depth = agent_queue.pending_task_count("whisper")
-        concurrency = max(self._get("whisper_concurrency", 2), 1)
-        avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 300)
-        queue_wait = (queue_depth * avg_whisper_sec) // concurrency
-        # Processing: download (~30s) + Whisper (~0.25x real-time on GPU, ~1x on CPU).
-        # Use 0.5x as conservative middle ground, minimum 3 minutes.
-        processing_time = max(180, int(duration_seconds * 0.5) + 60)
-        timeout = min(4 * 3600, queue_wait + processing_time)
-        logger.info("[whisper] Task %s for %s — queue_depth=%d, concurrency=%d, queue_wait≈%ds, processing≈%ds, timeout=%ds",
-                    task_id[:8], video_id, queue_depth, concurrency, queue_wait, processing_time, timeout)
+
+        # Generous per-task timeout: the companion processes sequentially so
+        # this task may queue behind others. 4 hours is a safe upper bound —
+        # in practice even a 60-min video takes ~10 min on GPU.
+        timeout = 4 * 3600
         results = await agent_queue.wait_for_result(task_id, timeout=timeout)
         if not results:
-            logger.warning("[whisper] Task timed out or empty for %s (timeout=%ds)", video_id, timeout)
+            logger.warning("[whisper] Task timed out or empty for %s", video_id)
             return {"failure_reason": "timeout"}
         data = results[0]
-        source = data.get("source", "unknown")
         transcript_text = data.get("transcript")
-        logger.warning("[whisper] Result for %s: source=%s, has_text=%s", video_id, source, bool(transcript_text))
         if not transcript_text:
             failure_detail = data.get("failure_detail", "audio_download_failed")
             return {"failure_reason": failure_detail}
@@ -225,4 +211,3 @@ class TranscriberService:
             language=language,
             video_duration_seconds=duration,
         )
-

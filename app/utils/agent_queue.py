@@ -205,25 +205,3 @@ async def fail_all_pending(reason: str = "agent_gone") -> int:
     return failed
 
 
-def pending_task_count(task_type: str | None = None) -> int:
-    """Count pending + claimed tasks, optionally filtered by task_type."""
-    return sum(
-        1 for t in _pending.values()
-        if t["status"] in ("pending", "claimed")
-        and (task_type is None or t["task_type"] == task_type)
-    )
-
-
-async def cleanup_stale(max_age: float = 120) -> None:
-    """Remove tasks older than max_age seconds that were never completed."""
-    async with _lock:
-        now = time.time()
-        stale = [
-            tid for tid, t in _pending.items()
-            if now - datetime.fromisoformat(t["created_at"]).timestamp() > max_age
-        ]
-        for tid in stale:
-            _pending.pop(tid, None)
-            event = _events.pop(tid, None)
-            if event:
-                event.set()

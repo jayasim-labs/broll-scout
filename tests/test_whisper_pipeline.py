@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("AWS_REGION", "us-east-1")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
+import app.services.storage  # noqa: F401 — ensure module is loaded for patch() resolution
 from app.models.schemas import (
     BRollShot, CandidateVideo, MatchResult, Segment, Transcript,
     TranscriptSource,
@@ -145,8 +146,7 @@ class TestTranscriberPaths:
         with patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create), \
              patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait), \
-             patch("app.utils.agent_queue.is_agent_available", return_value=True), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
             ts = TranscriberService()
             result = await ts.get_transcript("WHISPER_003", video_duration_seconds=900, on_whisper_start=on_whisper)
 
@@ -181,8 +181,7 @@ class TestTranscriberPaths:
         with patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create), \
              patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait), \
-             patch("app.utils.agent_queue.is_agent_available", return_value=True), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=50):
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
             ts = TranscriberService()
             result = await ts.get_transcript("TIMEOUT_004", video_duration_seconds=600)
 
@@ -217,8 +216,7 @@ class TestTranscriberPaths:
         with patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create), \
              patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait), \
-             patch("app.utils.agent_queue.is_agent_available", return_value=True), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
             ts = TranscriberService()
             result = await ts.get_transcript("AUDIOFAIL_005", video_duration_seconds=450)
 
@@ -252,8 +250,7 @@ class TestTranscriberPaths:
         with patch("app.services.storage.get_storage", return_value=mock_storage), \
              patch("app.utils.agent_queue.create_task", side_effect=mock_create), \
              patch("app.utils.agent_queue.wait_for_result", side_effect=mock_wait), \
-             patch("app.utils.agent_queue.is_agent_available", return_value=True), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.is_agent_available", return_value=True):
             ts = TranscriberService()
             result = await ts.get_transcript("RESTRICTED_006", video_duration_seconds=720)
 
@@ -573,8 +570,7 @@ class TestWhisperViaAgentFailurePaths:
 
         with patch("app.utils.agent_queue.is_agent_available", return_value=True), \
              patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-t"), \
-             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=[]), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=[]):
             ts = TranscriberService()
             result = await ts._whisper_via_agent("test_vid", 600)
 
@@ -590,8 +586,7 @@ class TestWhisperViaAgentFailurePaths:
 
         with patch("app.utils.agent_queue.is_agent_available", return_value=True), \
              patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-f"), \
-             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=whisper_fail), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=whisper_fail):
             ts = TranscriberService()
             result = await ts._whisper_via_agent("test_vid", 600)
 
@@ -602,12 +597,17 @@ class TestWhisperViaAgentFailurePaths:
     async def test_no_agent_returns_failure_reason(self):
         from app.services.transcriber import TranscriberService
 
-        with patch("app.utils.agent_queue.is_agent_available", return_value=False):
-            ts = TranscriberService()
-            result = await ts._whisper_via_agent("test_vid", 600)
+        mock_storage = AsyncMock()
+        mock_storage.get_transcript.return_value = None
 
-        assert result is not None
-        assert result.get("failure_reason") == "no_agent"
+        with patch("app.services.storage.get_storage", return_value=mock_storage), \
+             patch("app.utils.agent_queue.is_agent_available", return_value=False):
+            ts = TranscriberService()
+            result = await ts.get_transcript("test_vid", video_duration_seconds=600)
+
+        assert result.transcript_text is None
+        assert result.whisper_attempted is True
+        assert result.whisper_failure_reason == "no_agent"
 
     @pytest.mark.asyncio
     async def test_success_returns_text(self):
@@ -617,8 +617,7 @@ class TestWhisperViaAgentFailurePaths:
 
         with patch("app.utils.agent_queue.is_agent_available", return_value=True), \
              patch("app.utils.agent_queue.create_task", new_callable=AsyncMock, return_value="task-s"), \
-             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=whisper_ok), \
-             patch("app.utils.agent_queue.pending_task_count", return_value=0):
+             patch("app.utils.agent_queue.wait_for_result", new_callable=AsyncMock, return_value=whisper_ok):
             ts = TranscriberService()
             result = await ts._whisper_via_agent("test_vid", 600)
 
