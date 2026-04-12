@@ -346,11 +346,13 @@ export async function abortCompanionAgentTasks(taskIds: string[]) {
 export function useAgentLoop(jobActive: boolean, currentJobId: string | null = null) {
   const workerRef = useRef<Worker | null>(null)
   const jobActiveRef = useRef(jobActive)
+  const jobIdRef = useRef(currentJobId)
 
   useEffect(() => {
     jobActiveRef.current = jobActive
-    workerRef.current?.postMessage({ type: "config", jobActive })
-  }, [jobActive])
+    jobIdRef.current = currentJobId
+    workerRef.current?.postMessage({ type: "config", jobActive, jobId: currentJobId })
+  }, [jobActive, currentJobId])
 
   useEffect(() => {
     if (workerRef.current) return
@@ -364,6 +366,7 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
       backendOrigin,
       companionUrl: COMPANION_URL,
       jobActive: jobActiveRef.current,
+      jobId: jobIdRef.current,
     })
 
     return () => {

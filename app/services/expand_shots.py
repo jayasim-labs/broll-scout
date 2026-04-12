@@ -269,8 +269,8 @@ async def _lightweight_via_ollama(
 ) -> dict | None:
     from app.utils import agent_queue
 
-    if not agent_queue.is_agent_available():
-        logger.warning("Companion not available for lightweight LLM — falling back to OpenAI")
+    if not agent_queue.is_agent_available(job_id=job_id):
+        logger.warning("Companion not available for lightweight LLM (job=%s) — falling back to OpenAI", job_id)
         return await _lightweight_via_openai(prompt, system_prompt)
 
     matcher_model = pipeline_settings.get("matcher_model", "qwen3:8b")

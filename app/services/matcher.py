@@ -276,7 +276,7 @@ class MatcherService:
     ) -> MatchResult:
         """Run model B for A/B comparison and attach results to primary."""
         try:
-            if not agent_queue.is_agent_available():
+            if not agent_queue.is_agent_available(job_id=job_id):
                 return primary
             task_id = await agent_queue.create_task("match_timestamp", {
                 "prompt": prompt,
@@ -380,7 +380,7 @@ class MatcherService:
 
         # "auto" — try local first, optionally fall back to API
         local_zero_confidence = False
-        if agent_queue.is_agent_available():
+        if agent_queue.is_agent_available(job_id=job_id):
             try:
                 result = await self._call_local(prompt, job_id)
                 if result and result.get("context_match") is False:
@@ -421,8 +421,8 @@ class MatcherService:
     async def _call_local(
         self, prompt: str, job_id: str | None,
     ) -> dict | None:
-        if not agent_queue.is_agent_available():
-            logger.info("No agent available for local matching")
+        if not agent_queue.is_agent_available(job_id=job_id):
+            logger.info("No agent available for local matching (job=%s)", job_id)
             return {"confidence_score": 0, "matcher_source": "local_unavailable"}
 
         matcher_model = self._get("matcher_model", "qwen3:8b")

@@ -758,13 +758,13 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
                 time.sleep(backoff)
                 continue
 
-            stdout = proc.stdout or ""
+            stdout = (proc.stdout or "").replace("\x00", "")
             for line in stdout.strip().split("\n"):
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     continue
                 if not isinstance(data, dict):
                     continue

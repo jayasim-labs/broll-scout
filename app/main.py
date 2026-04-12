@@ -685,7 +685,7 @@ async def recalculate_usage(
 
 @app.post("/api/v1/agent/poll")
 async def agent_poll(body: AgentPollRequest):
-    tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=3)
+    tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=3, job_id=body.job_id)
     return {"tasks": tasks}
 
 

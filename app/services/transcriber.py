@@ -52,7 +52,7 @@ class TranscriberService:
             logger.exception("Cache lookup failed for %s", video_id)
 
         # 2. Companion captions (YouTube captions via residential IP)
-        if agent_queue.is_agent_available():
+        if agent_queue.is_agent_available(job_id=job_id):
             try:
                 agent_result = await self._fetch_captions_via_agent(video_id, job_id=job_id)
                 if agent_result:
@@ -81,8 +81,8 @@ class TranscriberService:
                         video_id, effective_duration, max_whisper_duration)
             return no_transcript
 
-        if not agent_queue.is_agent_available():
-            logger.warning("[transcript] No agent available for Whisper on %s", video_id)
+        if not agent_queue.is_agent_available(job_id=job_id):
+            logger.warning("[transcript] No agent available for Whisper on %s (job=%s)", video_id, job_id)
             no_transcript.whisper_attempted = True
             no_transcript.whisper_failure_reason = "no_agent"
             return no_transcript

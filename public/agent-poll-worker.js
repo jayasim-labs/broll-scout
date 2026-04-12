@@ -1,25 +1,26 @@
 /*
- * Web Worker for agent polling.
+ * Web Worker for agent polling — with per-job isolation.
+ *
+ * MULTI-USER: Each editor's browser sends their current job_id with
+ * every poll. The backend only returns tasks for THAT job. This ensures
+ * Editor A's agent never steals Editor B's tasks.
  *
  * Web Workers are NOT subject to Chrome's background-tab throttling —
  * setTimeout/setInterval run at full speed even when the tab is hidden.
- * This guarantees the backend always sees recent polls and never
- * triggers the agent-gone timeout during long pipeline runs.
  *
- * CRITICAL DESIGN: The heartbeat (poll) loop runs on a FIXED interval,
- * completely independent of task execution. Task execution runs in
- * parallel — a long-running companion /execute call (e.g. Whisper 10m,
- * transcript 429 cooldown 2m) never blocks the heartbeat.
+ * CRITICAL DESIGN: The heartbeat runs on a FIXED interval, completely
+ * independent of task execution. Task execution is fire-and-forget.
  *
- * Protocol (main thread ↔ worker):
- *   main → worker:  { type: "start", backendOrigin, companionUrl }
- *   main → worker:  { type: "config", jobActive: boolean }
- *   main → worker:  { type: "stop" }
+ * Protocol (main thread <-> worker):
+ *   main -> worker:  { type: "start", backendOrigin, companionUrl, jobActive, jobId }
+ *   main -> worker:  { type: "config", jobActive, jobId }
+ *   main -> worker:  { type: "stop" }
  */
 
 let backendOrigin = ""
 let companionUrl = ""
 let jobActive = false
+let jobId = null
 let running = false
 
 const POLL_ACTIVE_MS = 800
@@ -37,9 +38,13 @@ function logError(msg, err) {
   console.error(`[agent-worker] ${msg}`, err)
 }
 
-// ─── Heartbeat: always-on, never blocked by task execution ────────
-// Sends a lightweight poll to the backend so it knows the agent is alive.
-// This runs on a FIXED setInterval, completely decoupled from task execution.
+function pollBody() {
+  const body = { agent_id: "browser-agent" }
+  if (jobId) body.job_id = jobId
+  return JSON.stringify(body)
+}
+
+// --- Heartbeat: always-on, never blocked by task execution ---
 function startHeartbeat() {
   stopHeartbeat()
   heartbeatTimer = setInterval(async () => {
@@ -47,13 +52,13 @@ function startHeartbeat() {
       await fetch(`${backendOrigin}/api/v1/agent/poll`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: "browser-agent" }),
+        body: pollBody(),
       })
     } catch (err) {
       logError("heartbeat fetch failed", err)
     }
   }, HEARTBEAT_MS)
-  log("heartbeat started (every " + HEARTBEAT_MS + "ms)")
+  log("heartbeat started (every " + HEARTBEAT_MS + "ms, job=" + jobId + ")")
 }
 
 function stopHeartbeat() {
@@ -63,22 +68,22 @@ function stopHeartbeat() {
   }
 }
 
-// ─── Task execution: runs in parallel, never blocks the poll loop ─
+// --- Task execution: runs in parallel, never blocks the poll loop ---
 async function executeTask(task) {
   const payload = task.payload || {}
-  const jobId = payload.job_id || null
+  const taskJobId = payload.job_id || null
   const taskType = task.task_type || "unknown"
   const taskId = task.task_id
 
-  log(`executing ${taskType} task ${taskId}`)
+  log(`executing ${taskType} task ${taskId} (job=${taskJobId})`)
 
-  if (jobId) {
+  if (taskJobId) {
     try {
-      const st = await fetch(`${backendOrigin}/api/v1/jobs/${jobId}/status`)
+      const st = await fetch(`${backendOrigin}/api/v1/jobs/${taskJobId}/status`)
       if (st.ok) {
         const d = await st.json()
         if (d.status === "cancelled") {
-          log(`task ${taskId} skipped — job ${jobId} cancelled`)
+          log(`task ${taskId} skipped - job ${taskJobId} cancelled`)
           await submitResult(taskId, "failed", [])
           return
         }
@@ -123,24 +128,20 @@ async function submitResult(taskId, status, result) {
   }
 }
 
-// ─── Poll loop: lightweight, never blocks ─────────────────────────
-// Polls the backend for new tasks. If tasks are returned, they are
-// executed in the background (fire-and-forget) so the poll loop
-// immediately returns to sleeping and polling again.
+// --- Poll loop: lightweight, never blocks ---
 async function pollLoop() {
-  log("pollLoop started")
+  log("pollLoop started (job=" + jobId + ")")
   while (running) {
     try {
       const resp = await fetch(`${backendOrigin}/api/v1/agent/poll`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: "browser-agent" }),
+        body: pollBody(),
       })
       if (resp.ok) {
         const data = await resp.json()
         if (data.tasks && data.tasks.length > 0 && !busyExecuting) {
           busyExecuting = true
-          // Fire-and-forget: execute tasks in background, don't block the loop
           ;(async () => {
             try {
               for (const task of data.tasks) {
@@ -170,17 +171,24 @@ self.onmessage = (e) => {
     backendOrigin = msg.backendOrigin || ""
     companionUrl = msg.companionUrl || "http://localhost:9876"
     jobActive = msg.jobActive || false
-    log(`start: backend=${backendOrigin}, companion=${companionUrl}, jobActive=${jobActive}`)
+    jobId = msg.jobId || null
+    log(`start: backend=${backendOrigin}, companion=${companionUrl}, jobActive=${jobActive}, job=${jobId}`)
     if (!running) {
       running = true
       startHeartbeat()
       pollLoop()
     }
   } else if (msg.type === "config") {
-    if (msg.jobActive !== undefined) {
-      jobActive = msg.jobActive
-      log(`config: jobActive=${jobActive}`)
+    if (msg.jobActive !== undefined) jobActive = msg.jobActive
+    if (msg.jobId !== undefined) {
+      const oldJobId = jobId
+      jobId = msg.jobId
+      if (oldJobId !== jobId) {
+        log(`job changed: ${oldJobId} -> ${jobId}`)
+        startHeartbeat()
+      }
     }
+    log(`config: jobActive=${jobActive}, job=${jobId}`)
   } else if (msg.type === "stop") {
     log("stop received")
     running = false
