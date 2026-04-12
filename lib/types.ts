@@ -337,6 +337,7 @@ export interface PipelineSettings {
   youtube_results_per_query: number
   max_candidates_per_segment: number
   enable_preferred_channel_search: boolean
+  enable_multilingual_search: boolean
 
   max_candidates_per_shot: number
   top_results_per_shot: number

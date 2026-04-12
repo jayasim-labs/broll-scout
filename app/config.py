@@ -79,6 +79,7 @@ DEFAULTS = {
     "segment_timeout_sec": 300,
     "enable_gemini_expansion": False,
     "enable_preferred_channel_search": False,
+    "enable_multilingual_search": False,
 
     "preferred_channels_tier1": [
         "UC_5jTJ1XNWcq9FOWX6Q7hCg",

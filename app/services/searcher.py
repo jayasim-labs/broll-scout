@@ -663,8 +663,8 @@ class SearcherService:
             if queries:
                 queries.append(f"{queries[0]} {modifiers[0]}")
 
-        # Add multilingual queries for Indian topics
-        if _is_indian_topic(script_context) and queries:
+        # Add multilingual queries for Indian topics (if enabled)
+        if self._get("enable_multilingual_search") and _is_indian_topic(script_context) and queries:
             multilingual = _generate_multilingual_queries(queries[0], script_context)
             queries.extend(multilingual[1:])
 

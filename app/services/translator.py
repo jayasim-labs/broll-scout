@@ -164,12 +164,10 @@ Do the following in one response:
            - "medium": somewhat specific (particular historical events, specific locations, niche subjects)
            - "rare": very specific footage unlikely to be on YouTube (classified events, obscure historical moments, specific private locations)
        * preferred_source_type: what type of source video would be ideal — one of: "documentary", "news_clip", "stock_footage", "drone_aerial", "interview", "timelapse", "archival", "animation", or "" if no preference
-       * search_queries: EXACTLY 5 YouTube search queries for THIS specific shot. Think about how YouTube videos are actually TITLED — not how an editor would describe the shot. The 5 queries MUST be diverse:
+       * search_queries: EXACTLY 3 YouTube search queries for THIS specific shot. Think about how YouTube videos are actually TITLED — not how an editor would describe the shot. The 3 queries MUST be diverse:
            1. SPECIFIC: exact event/subject name as a YouTuber would title it (e.g., "North Sentinel Island drone footage")
-           2. DESCRIPTIVE: what the footage looks like (e.g., "isolated tropical island aerial view 4K")
-           3. DOCUMENTARY: topic + "documentary" or "history" (e.g., "Sentinel Island documentary")
-           4. BROADER CONTEXT: related broader category that would still yield relevant footage (e.g., "Andaman Islands drone aerial")
-           5. CREATIVE SYNONYM: rephrase using completely different words, synonyms, or a related concept that would show visually similar footage (e.g., "uncontacted tribe island footage", "forbidden island ocean")
+           2. DESCRIPTIVE: what the footage visually looks like (e.g., "isolated tropical island aerial drone footage 4K")
+           3. DOCUMENTARY: topic + "documentary" or "history" or a creative synonym (e.g., "Sentinel Island documentary", "uncontacted tribe island footage")
          This diversity is CRITICAL — different phrasings find different videos.
          IMPORTANT: Avoid overly academic/niche queries that nobody would use as a YouTube title. "King Edward II ban on football" won't find results — but "medieval football history England" will.
        * key_terms: 3-5 keywords for THIS shot
@@ -186,9 +184,7 @@ Do the following in one response:
          "search_queries": [
            "North Sentinel Island satellite view",
            "isolated tropical island aerial drone footage",
-           "Sentinel Island documentary aerial",
-           "Andaman Islands forbidden island drone",
-           "remote island overhead cinematic b-roll"
+           "Sentinel Island documentary aerial"
          ],
          "key_terms": ["satellite", "aerial", "island", "isolation"]
        },
@@ -202,8 +198,6 @@ Do the following in one response:
          "search_queries": [
            "North Sentinel Island jungle canopy aerial",
            "dense tropical rainforest island drone footage",
-           "Andaman island rainforest documentary",
-           "impenetrable jungle island overhead view",
            "tropical jungle canopy cinematic flyover"
          ],
          "key_terms": ["rainforest", "canopy", "dense", "tropical"]
