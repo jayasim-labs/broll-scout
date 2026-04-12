@@ -730,10 +730,12 @@ def ytdlp_channel_search(channel_id: str, query: str, max_results: int = 5) -> l
 def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
     if not video_ids:
         return []
-    # Batch: pass all URLs in a single yt-dlp invocation
     urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
-    cmd = ["yt-dlp", *urls, "--dump-json", "--no-download", "--no-warnings"]
-    results = _run_ytdlp(cmd, timeout=max(YTDLP_TIMEOUT, len(video_ids) * 8))
+    cmd = [
+        "yt-dlp", *urls, "--dump-json", "--no-download", "--no-warnings",
+        "--sleep-requests", "1.5",
+    ]
+    results = _run_ytdlp(cmd, timeout=max(YTDLP_TIMEOUT, len(video_ids) * 10))
     return results
 
 
