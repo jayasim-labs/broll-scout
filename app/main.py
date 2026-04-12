@@ -253,8 +253,6 @@ async def get_job_status(job_id: str):
             status = "cancelled"
         elif progress.get("stage") == "failed":
             status = "failed"
-        log_count = len(progress.get("activity_log", []))
-        logger.info("Status poll %s: stage=%s log_entries=%d", job_id[:8], progress.get("stage"), log_count)
         return {"job_id": job_id, "status": status, "progress": progress}
 
     storage = get_storage()

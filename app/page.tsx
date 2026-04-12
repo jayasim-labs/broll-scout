@@ -62,8 +62,6 @@ export default function HomePage() {
       const status = await response.json()
 
       if (status.progress) {
-        const logLen = status.progress.activity_log?.length || 0
-        if (logLen > 0) console.log(`[BRoll] Poll: stage=${status.progress.stage} activity_log=${logLen} entries`)
         setProgress(status.progress)
         setJobHistory(prev => prev.map(j =>
           j.job_id === jobId
