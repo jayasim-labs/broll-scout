@@ -741,7 +741,7 @@ def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True
             )
             stderr_snip = (proc.stderr or "")[:300]
             if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
-                backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                backoff = (2 ** attempt) * 5 + _random.uniform(2, 5)
                 log.info("YouTube 429 on search — backing off %.1fs (attempt %d/3)", backoff, attempt + 1)
                 time.sleep(backoff)
                 continue
@@ -794,21 +794,37 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
 
 
 
+_subtitle_429_streak = 0
+_subtitle_429_lock = threading.Lock()
+
 def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
     """Fetch transcript using yt-dlp with browser cookies.
 
     Uses your authenticated YouTube session so requests aren't treated as bot traffic.
-    Retries with backoff on HTTP 429 (Too Many Requests).
+    Retries with exponential backoff on HTTP 429 (Too Many Requests).
+    If a previous video also hit 429, adds a longer pre-request cooldown.
     """
+    global _subtitle_429_streak
     url = f"https://www.youtube.com/watch?v={video_id}"
     lang_str = ",".join(languages)
 
+    with _subtitle_429_lock:
+        streak = _subtitle_429_streak
+    if streak > 0:
+        cooldown = min(streak * 10, 60)
+        log.info("Pre-request cooldown %.0fs for %s (429 streak=%d)", cooldown, video_id, streak)
+        time.sleep(cooldown)
+
     sub_formats = ["json3/vtt/best", "vtt"]
+    got_429 = False
 
     with tempfile.TemporaryDirectory(prefix="broll_subs_") as tmpdir:
         sub_file_base = os.path.join(tmpdir, "subs")
 
         for fmt in sub_formats:
+            if got_429:
+                break
+
             cmd = [
                 "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
                 "--write-subs", "--write-auto-subs",
@@ -825,12 +841,16 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
                 stderr_snip = (proc.stderr or "")[:300].strip()
 
                 if proc.returncode == 0:
+                    with _subtitle_429_lock:
+                        _subtitle_429_streak = max(0, _subtitle_429_streak - 1)
                     break
 
                 if "429" in stderr_snip or "Too Many Requests" in stderr_snip:
-                    backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                    backoff = (2 ** attempt) * 8 + _random.uniform(2, 6)
                     log.info("YouTube 429 for %s subtitles — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
                     time.sleep(backoff)
+                    if attempt == 2:
+                        got_429 = True
                     continue
 
                 if "Requested format" in stderr_snip or "not available" in stderr_snip:
@@ -849,6 +869,12 @@ def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
                     return _parse_json3_subs(video_id, sub_path, source)
                 else:
                     return _parse_vtt_subs(video_id, sub_path, source)
+
+        if got_429:
+            with _subtitle_429_lock:
+                _subtitle_429_streak += 1
+            log.warning("All subtitle attempts hit 429 for %s — will try Whisper fallback (streak=%d)",
+                        video_id, _subtitle_429_streak)
 
         return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
@@ -961,7 +987,7 @@ def whisper_transcribe(
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             stderr_snip = (proc.stderr or "")[:300]
             if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
-                backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                backoff = (2 ** attempt) * 8 + _random.uniform(2, 6)
                 log.info("YouTube 429 for %s audio — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
                 time.sleep(backoff)
                 continue

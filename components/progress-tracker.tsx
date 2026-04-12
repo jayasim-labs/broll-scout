@@ -205,7 +205,8 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
 }
 
 function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast: boolean }) {
-  const [expanded, setExpanded] = useState(true)
+  const [manualToggle, setManualToggle] = useState<boolean | null>(null)
+  const expanded = manualToggle !== null ? manualToggle : isLast
   const Icon = group.icon
 
   const depth0 = group.entries.filter(e => !e.depth || e.depth === 0)
@@ -215,7 +216,7 @@ function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast:
     <div className="relative">
       <button
         className="flex items-center gap-2 w-full text-left py-1.5 px-1 rounded hover:bg-secondary/50 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => setManualToggle(prev => prev !== null ? !prev : !isLast ? true : false)}
       >
         {expanded ? (
           <ChevronDown className="w-3 h-3 text-muted-foreground flex-shrink-0" />
@@ -224,9 +225,16 @@ function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast:
         )}
         <Icon className={cn("w-3.5 h-3.5 flex-shrink-0", group.color)} />
         <span className={cn("text-xs font-semibold", group.color)}>{group.label}</span>
-        <span className="text-[10px] text-muted-foreground/50 ml-auto">
-          {group.entries.length} event{group.entries.length !== 1 ? "s" : ""}
-        </span>
+        {!expanded && (
+          <span className="text-[10px] text-muted-foreground/50 ml-1">
+            — {group.entries.length} event{group.entries.length !== 1 ? "s" : ""}
+          </span>
+        )}
+        {isLast && (
+          <span className="ml-auto">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+          </span>
+        )}
       </button>
 
       {expanded && (

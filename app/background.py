@@ -219,9 +219,21 @@ async def run_pipeline(
         shots_searched = 0
         search_lock = asyncio.Lock()
 
+        search_launched = 0
+
         async def _search_one_shot(seg: Segment, shot: BRollShot):
-            nonlocal shots_searched
+            nonlocal shots_searched, search_launched
             short_need = shot.visual_need[:50] if shot.visual_need else shot.shot_id
+
+            async with search_lock:
+                search_launched += 1
+                shot_num = search_launched
+            queries = shot.search_queries or seg.search_queries or []
+            q_preview = f" — queries: {', '.join(q[:30] for q in queries[:2])}" if queries else ""
+            _log_activity(job_id, "globe",
+                f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" — searching ...{q_preview}",
+                depth=1, group="search")
+
             try:
                 cands = await searcher.search_for_shot(
                     shot, seg, job_id=job_id,
@@ -257,12 +269,12 @@ async def run_pipeline(
                     if reused:
                         parts.append(f"{reused} already in pool")
                     detail = f" ({', '.join(parts)})" if parts else ""
-                    _log_activity(job_id, "search",
-                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
+                    _log_activity(job_id, "check",
+                        f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
                         depth=1, group="search")
                 else:
                     _log_activity(job_id, "alert",
-                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → no results",
+                        f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → no results",
                         depth=1, group="search")
 
                 if shots_searched > 0:
@@ -309,6 +321,18 @@ async def run_pipeline(
         # Process each video one at a time: cache → captions → Whisper.
         # The companion handles one task at a time anyway, so sequential
         # gives identical throughput with zero concurrency bugs.
+
+        # Cooldown: search phase fires many yt-dlp queries in a short burst.
+        # YouTube rate-limits per IP; jumping straight into subtitle fetching
+        # triggers 429s. A short pause lets the rate-limit window reset.
+        SEARCH_COOLDOWN_SEC = 15
+        _log_activity(job_id, "clock",
+            f"Cooling down {SEARCH_COOLDOWN_SEC}s before transcript fetch (YouTube rate-limit buffer) ...",
+            depth=1, group="search")
+        _set_progress(job_id, "searching", 42,
+                      f"Cooldown {SEARCH_COOLDOWN_SEC}s — YouTube rate-limit buffer before transcript fetch")
+        await asyncio.sleep(SEARCH_COOLDOWN_SEC)
+
         transcript_cache: Dict[str, Optional[str]] = {}
         transcript_sources: Dict[str, str] = {}
         failed_fetches: set = set()
@@ -330,6 +354,10 @@ async def run_pipeline(
             yt_link = f"https://youtu.be/{vid}"
             short_title = cand.video_title[:45]
             dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
+
+            _log_activity(job_id, "clock",
+                f"[{i+1}/{len(sorted_videos)}] \"{short_title}\" ({dur_min}m) — fetching transcript ... — {yt_link}",
+                depth=1, group="transcript")
 
             async def _on_whisper_start(v_id: str, dur_s: int):
                 nonlocal whisper_count
@@ -420,7 +448,7 @@ async def run_pipeline(
 
         # ── Transcript & Whisper summary ──
 
-        _log_activity(job_id, "bar-chart",
+        _log_activity(job_id, "check",
             f"Fetched transcripts for {unique_videos} videos → {videos_with_transcript} succeeded, {failed_count} failed",
             group="transcript")
 
@@ -439,7 +467,7 @@ async def run_pipeline(
             breakdown_parts.append(f"{error_count} errors")
 
         if breakdown_parts:
-            _log_activity(job_id, "bar-chart", f"Sources: {' · '.join(breakdown_parts)}", depth=1, group="transcript")
+            _log_activity(job_id, "check", f"Sources: {' · '.join(breakdown_parts)}", depth=1, group="transcript")
 
         if whisper_count > 0:
             whisper_failed = whisper_count - whisper_ok
@@ -887,7 +915,7 @@ async def run_pipeline(
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
         time_label = f"{elapsed_hr}h" if elapsed_hr >= 1 else f"{elapsed_min}m"
-        _log_activity(job_id, "bar-chart",
+        _log_activity(job_id, "sparkles",
             f"Pipeline summary: {time_label} total | "
             f"GPT-4o (translation) → yt-dlp ({unique_videos} videos) → "
             f"Whisper ({whisper_ok} transcribed) → "
