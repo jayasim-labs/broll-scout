@@ -70,15 +70,15 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 import random as _random
 
-_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "2.5"))  # req/sec avg
-_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "4"))       # max burst
+_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.8"))  # req/sec avg (~1 req every 1.25s)
+_YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "2"))       # max burst (kept tight)
 _yt_tokens = float(_YT_BURST_SIZE)
 _yt_last_refill = time.time()
 _yt_lock = threading.Lock()
 
 
 def _yt_throttle() -> None:
-    """Block until a token is available. Adds small jitter to look human."""
+    """Block until a token is available. Adds human-like jitter between requests."""
     global _yt_tokens, _yt_last_refill
     while True:
         with _yt_lock:
@@ -88,8 +88,9 @@ def _yt_throttle() -> None:
             _yt_last_refill = now
             if _yt_tokens >= 1.0:
                 _yt_tokens -= 1.0
+                time.sleep(_random.uniform(0.2, 0.6))
                 break
-        time.sleep(0.1 + _random.uniform(0.05, 0.2))
+        time.sleep(0.4 + _random.uniform(0.1, 0.5))
 
 _abort_lock = threading.Lock()
 _task_aborts: dict[str, threading.Event] = {}
@@ -753,36 +754,49 @@ def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
 
 
 def _run_ytdlp(cmd: list[str], timeout: int | None = None, throttle: bool = True) -> list[dict]:
-    if throttle:
-        _yt_throttle()
     full_cmd = cmd[:1] + _cookie_args + _YTDLP_EXTRA + cmd[1:]
-    results = []
     t = timeout or YTDLP_TIMEOUT
-    try:
-        proc = subprocess.run(
-            full_cmd, capture_output=True, text=True, timeout=t,
-        )
-        stdout = proc.stdout or ""
-        for line in stdout.strip().split("\n"):
-            if not line:
+
+    for attempt in range(3):
+        if throttle:
+            _yt_throttle()
+        results = []
+        try:
+            proc = subprocess.run(
+                full_cmd, capture_output=True, text=True, timeout=t,
+            )
+            stderr_snip = (proc.stderr or "")[:300]
+            if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
+                backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                log.info("YouTube 429 on search — backing off %.1fs (attempt %d/3)", backoff, attempt + 1)
+                time.sleep(backoff)
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(data, dict):
-                continue
-            try:
-                results.append(_normalize(data))
-            except (TypeError, AttributeError) as norm_err:
-                log.debug("yt-dlp skip bad entry: %s", norm_err)
-                continue
-    except subprocess.TimeoutExpired:
-        log.warning("yt-dlp timed out after %ds: %s", t, " ".join(full_cmd[:4]))
-    except FileNotFoundError:
-        log.error("yt-dlp not found — install with: pip install yt-dlp")
-    except Exception as e:
-        log.error("yt-dlp error: %s", e)
+
+            stdout = proc.stdout or ""
+            for line in stdout.strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                try:
+                    results.append(_normalize(data))
+                except (TypeError, AttributeError) as norm_err:
+                    log.debug("yt-dlp skip bad entry: %s", norm_err)
+                    continue
+            return results
+        except subprocess.TimeoutExpired:
+            log.warning("yt-dlp timed out after %ds: %s", t, " ".join(full_cmd[:4]))
+            return results
+        except FileNotFoundError:
+            log.error("yt-dlp not found — install with: pip install yt-dlp")
+            return results
+        except Exception as e:
+            log.error("yt-dlp error: %s", e)
+            return results
     return results
 
 
@@ -790,17 +804,16 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
     """Fetch transcript using yt-dlp with cookies (authenticated, residential IP)."""
     languages = languages or ["en"]
 
-    # yt-dlp with browser cookies is the primary path — it handles authenticated
-    # requests from a residential IP and avoids the rate-limiting/IP-blocking
-    # issues that youtube-transcript-api suffers from.
-    _yt_throttle()
-    if _cookie_args:
-        try:
-            result = _fetch_transcript_ytdlp(video_id, languages)
-            if result and result[0].get("transcript"):
-                return result
-        except Exception as e:
-            log.warning("yt-dlp subtitle fetch failed for %s: %s", video_id, e)
+    if not _cookie_args:
+        log.warning("No browser cookies configured — cannot fetch transcript for %s", video_id)
+        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+
+    try:
+        result = _fetch_transcript_ytdlp(video_id, languages)
+        if result and result[0].get("transcript"):
+            return result
+    except Exception as e:
+        log.warning("yt-dlp subtitle fetch failed for %s: %s", video_id, e)
 
     return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
@@ -808,61 +821,62 @@ def fetch_transcript(video_id: str, languages: list[str] | None = None) -> list[
 
 
 def _fetch_transcript_ytdlp(video_id: str, languages: list[str]) -> list[dict]:
-    """Fallback transcript fetcher using yt-dlp with browser cookies.
+    """Fetch transcript using yt-dlp with browser cookies.
 
     Uses your authenticated YouTube session so requests aren't treated as bot traffic.
+    Retries with backoff on HTTP 429 (Too Many Requests).
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
     lang_str = ",".join(languages)
 
+    sub_formats = ["json3/vtt/best", "vtt"]
+
     with tempfile.TemporaryDirectory(prefix="broll_subs_") as tmpdir:
         sub_file_base = os.path.join(tmpdir, "subs")
-        cmd = [
-            "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
-            "--write-subs", "--write-auto-subs",
-            "--sub-langs", lang_str,
-            "--sub-format", "json3/vtt/best",
-            "--skip-download",
-            "--no-playlist", "--no-warnings",
-            "-o", sub_file_base,
-        ]
 
-        _yt_throttle()
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            stderr_snip = (proc.stderr or "")[:200].strip()
-            is_unavailable = "Requested format" in stderr_snip or "not available" in stderr_snip
-            if is_unavailable:
-                log.info("No subtitles available for %s (video may be restricted)", video_id)
-            else:
-                log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
-                            video_id, proc.returncode, stderr_snip)
-            cmd_vtt = [
+        for fmt in sub_formats:
+            cmd = [
                 "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
                 "--write-subs", "--write-auto-subs",
                 "--sub-langs", lang_str,
-                "--sub-format", "vtt",
+                "--sub-format", fmt,
                 "--skip-download",
                 "--no-playlist", "--no-warnings",
                 "-o", sub_file_base,
             ]
-            _yt_throttle()
-            proc = subprocess.run(cmd_vtt, capture_output=True, text=True, timeout=30)
-            if proc.returncode != 0:
-                return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
-        sub_files = globmod_top.glob(os.path.join(tmpdir, "subs*"))
-        if not sub_files:
-            return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
+            for attempt in range(3):
+                _yt_throttle()
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                stderr_snip = (proc.stderr or "")[:300].strip()
 
-        sub_path = sub_files[0]
-        source = "youtube_auto_captions" if ".auto." in os.path.basename(sub_path) else "youtube_captions"
-        source += "_ytdlp"
+                if proc.returncode == 0:
+                    break
 
-        if sub_path.endswith(".json3"):
-            return _parse_json3_subs(video_id, sub_path, source)
-        else:
-            return _parse_vtt_subs(video_id, sub_path, source)
+                if "429" in stderr_snip or "Too Many Requests" in stderr_snip:
+                    backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                    log.info("YouTube 429 for %s subtitles — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
+                    time.sleep(backoff)
+                    continue
+
+                if "Requested format" in stderr_snip or "not available" in stderr_snip:
+                    log.info("No subtitles available for %s (video may be restricted)", video_id)
+                else:
+                    log.warning("yt-dlp subtitle download failed for %s (rc=%d): %s",
+                                video_id, proc.returncode, stderr_snip)
+                break
+
+            sub_files = globmod_top.glob(os.path.join(tmpdir, "subs*"))
+            if sub_files:
+                sub_path = sub_files[0]
+                source = "youtube_auto_captions" if ".auto." in os.path.basename(sub_path) else "youtube_captions"
+                source += "_ytdlp"
+                if sub_path.endswith(".json3"):
+                    return _parse_json3_subs(video_id, sub_path, source)
+                else:
+                    return _parse_vtt_subs(video_id, sub_path, source)
+
+        return [{"video_id": video_id, "transcript": None, "source": "no_transcript"}]
 
 
 def _parse_json3_subs(video_id: str, path: str, source: str) -> list[dict]:
@@ -966,41 +980,90 @@ def whisper_transcribe(
 
     url = f"https://www.youtube.com/watch?v={video_id}"
 
+    def _ytdlp_with_429_retry(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
+        """Run a yt-dlp command with automatic 429 backoff (up to 3 attempts)."""
+        for attempt in range(3):
+            _yt_throttle()
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            stderr_snip = (proc.stderr or "")[:300]
+            if proc.returncode != 0 and ("429" in stderr_snip or "Too Many Requests" in stderr_snip):
+                backoff = (attempt + 1) * 3 + _random.uniform(1, 3)
+                log.info("YouTube 429 for %s audio — backing off %.1fs (attempt %d/3)", video_id, backoff, attempt + 1)
+                time.sleep(backoff)
+                continue
+            return proc
+        return proc  # return last attempt's result
+
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "audio.%(ext)s")
         try:
             log.info("Whisper: downloading audio for %s", video_id)
-            _yt_throttle()
-            # Prefer best audio without forcing mp3 — avoids "Requested format is not available"
-            # when the default extract path cannot produce mp3. Whisper loads m4a/webm/opus via ffmpeg.
+
+            # Attempt 1: audio-only stream (fast, small download)
             cmd_best = [
                 "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
-                "-f", "bestaudio/ba/b/best/worst",
+                "-f", "bestaudio/ba",
                 "-o", output_template,
                 "--no-playlist", "--no-warnings",
             ]
-            proc = subprocess.run(cmd_best, capture_output=True, text=True, timeout=180)
+            proc = _ytdlp_with_429_retry(cmd_best, timeout=180)
             audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
+
+            # Attempt 2: audio-only with mp3 extraction
             if proc.returncode != 0 or not audio_files:
-                _yt_throttle()
                 cmd_mp3 = [
                     "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
-                    "-f", "bestaudio/ba/b/best/worst",
+                    "-f", "bestaudio/ba",
                     "-x", "--audio-format", "mp3",
                     "--no-playlist", "--no-warnings",
                     "-o", output_template,
                 ]
-                proc = subprocess.run(cmd_mp3, capture_output=True, text=True, timeout=180)
+                proc = _ytdlp_with_429_retry(cmd_mp3, timeout=180)
                 audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
+
+            # Attempt 3: age-restricted fallback — download lowest-res video (has embedded
+            # audio) and extract audio via ffmpeg. These videos block audio-only streams
+            # but allow combined video+audio formats.
             if proc.returncode != 0 or not audio_files:
+                log.info("Whisper: audio-only unavailable for %s — trying video fallback (lowest res)", video_id)
+                video_template = os.path.join(tmpdir, "video.%(ext)s")
+                cmd_video = [
+                    "yt-dlp", *_cookie_args, *_YTDLP_EXTRA, url,
+                    "-f", "worstvideo+worstaudio/worst",
+                    "-o", video_template,
+                    "--no-playlist", "--no-warnings",
+                ]
+                proc = _ytdlp_with_429_retry(cmd_video, timeout=300)
+                video_files = globmod.glob(os.path.join(tmpdir, "video.*"))
+                if proc.returncode == 0 and video_files:
+                    video_path = video_files[0]
+                    extracted_audio = os.path.join(tmpdir, "audio.mp3")
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-i", video_path,
+                        "-vn", "-acodec", "libmp3lame", "-q:a", "6",
+                        "-y", extracted_audio,
+                    ]
+                    ff = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+                    try:
+                        os.remove(video_path)
+                    except OSError:
+                        pass
+                    if ff.returncode == 0 and os.path.isfile(extracted_audio):
+                        audio_files = [extracted_audio]
+                        log.info("Whisper: extracted audio from video fallback for %s", video_id)
+                    else:
+                        log.warning("Whisper: ffmpeg audio extraction failed for %s: %s", video_id, (ff.stderr or "")[:200])
+                        audio_files = []
+
+            if not audio_files:
                 _err = (proc.stderr or "")[:400]
                 if "Requested format" in _err or "not available" in _err:
-                    log.info("Audio unavailable for %s (restricted/age-gated video — skipping Whisper)", video_id)
+                    log.info("Audio unavailable for %s (all formats failed — restricted video)", video_id)
                 else:
                     log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
                 return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
             audio_path = audio_files[0]
-            log.info("Whisper: audio downloaded → %s", os.path.basename(audio_path))
+            log.info("Whisper: audio ready → %s", os.path.basename(audio_path))
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp audio download timed out for %s", video_id)
             return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]

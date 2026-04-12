@@ -124,7 +124,7 @@ async def cancel_tasks_for_job(job_id: str) -> list[str]:
     return cancelled_ids
 
 
-async def poll_tasks(agent_id: str, max_tasks: int = 3) -> list[dict]:
+async def poll_tasks(agent_id: str, max_tasks: int = 2) -> list[dict]:
     async with _lock:
         _active_agents[agent_id] = time.time()
         claimed: list[dict] = []
