@@ -224,6 +224,7 @@ async def run_pipeline(
         whisper_concurrency = int(pipeline_cfg.get("whisper_concurrency", 2))
         whisper_queue_count = 0
         whisper_queue_lock = asyncio.Lock()
+        whisper_failure_reasons: dict[str, int] = {}
 
         shots_searched = 0
         transcripts_fetched = 0
@@ -268,15 +269,12 @@ async def run_pipeline(
                     reused = len(cands) - new_videos
                     parts = []
                     if new_videos:
-                        parts.append(f"{new_videos} new")
+                        parts.append(f"{new_videos} new → queued for transcript")
                     if reused:
-                        parts.append(f"{reused} already fetched")
+                        parts.append(f"{reused} already in pool")
                     detail = f" ({', '.join(parts)})" if parts else ""
-                    suffix = ""
-                    if new_videos == 0:
-                        suffix = " — all videos already in pool, no new fetches needed"
                     _log_activity(job_id, "search",
-                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos{suffix}",
+                        f"Shot {shots_searched}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
                         depth=1, group="search")
                 else:
                     _log_activity(job_id, "alert",
@@ -353,7 +351,17 @@ async def run_pipeline(
                         failed_fetches.add(vid)
                         affected = video_to_shots.get(vid, [])
                         if t.whisper_attempted:
-                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — Whisper attempted but audio download failed (likely restricted/age-gated) — {yt_link} (affects {len(affected)} shots)", depth=2, group=g)
+                            reason = t.whisper_failure_reason or "audio_download_failed"
+                            whisper_failure_reasons[reason] = whisper_failure_reasons.get(reason, 0) + 1
+                            reason_labels = {
+                                "timeout": "Whisper task timed out (queue backlog)",
+                                "no_agent": "companion agent unavailable",
+                                "audio_download_failed": "audio download failed (restricted/age-gated)",
+                                "video_fallback_failed": "audio + video fallback both failed",
+                                "all_formats_failed": "all download formats failed (restricted video)",
+                            }
+                            reason_text = reason_labels.get(reason, f"Whisper failed: {reason}")
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — {reason_text} — {yt_link} (affects {len(affected)} shots)", depth=2, group=g)
                         else:
                             _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group=g)
                 except Exception:
@@ -554,14 +562,30 @@ async def run_pipeline(
                 _log_activity(job_id, "check",
                     f"🎙️ Whisper: all {whisper_ok} transcriptions succeeded (concurrency: {whisper_concurrency})",
                     depth=1, group="transcript")
-            elif whisper_ok > 0:
-                _log_activity(job_id, "alert",
-                    f"🎙️ Whisper: {whisper_ok} succeeded, {whisper_failed} failed — audio download error on restricted/age-gated videos (concurrency: {whisper_concurrency})",
-                    depth=1, group="transcript")
             else:
-                _log_activity(job_id, "alert",
-                    f"🎙️ Whisper: all {whisper_failed} attempted transcriptions failed — audio download errors (concurrency: {whisper_concurrency})",
-                    depth=1, group="transcript")
+                reason_summary_parts = []
+                if whisper_failure_reasons.get("timeout"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['timeout']} timed out")
+                if whisper_failure_reasons.get("audio_download_failed"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['audio_download_failed']} audio download failed")
+                if whisper_failure_reasons.get("video_fallback_failed"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['video_fallback_failed']} video fallback failed")
+                if whisper_failure_reasons.get("all_formats_failed"):
+                    reason_summary_parts.append(f"{whisper_failure_reasons['all_formats_failed']} restricted")
+                other_reasons = sum(v for k, v in whisper_failure_reasons.items()
+                                    if k not in ("timeout", "audio_download_failed", "video_fallback_failed", "all_formats_failed", "no_agent"))
+                if other_reasons:
+                    reason_summary_parts.append(f"{other_reasons} other")
+                reason_detail = f" ({', '.join(reason_summary_parts)})" if reason_summary_parts else ""
+
+                if whisper_ok > 0:
+                    _log_activity(job_id, "alert",
+                        f"🎙️ Whisper: {whisper_ok} succeeded, {whisper_failed} failed{reason_detail} (concurrency: {whisper_concurrency})",
+                        depth=1, group="transcript")
+                else:
+                    _log_activity(job_id, "alert",
+                        f"🎙️ Whisper: all {whisper_failed} attempted transcriptions failed{reason_detail} (concurrency: {whisper_concurrency})",
+                        depth=1, group="transcript")
         elif unique_videos > 0 and videos_with_transcript == unique_videos:
             _log_activity(job_id, "check",
                 f"🎙️ Whisper not needed — all {unique_videos} videos had YouTube captions or cached transcripts",

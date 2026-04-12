@@ -998,7 +998,9 @@ def whisper_transcribe(
             # Attempt 3: age-restricted fallback — download lowest-res video (has embedded
             # audio) and extract audio via ffmpeg. These videos block audio-only streams
             # but allow combined video+audio formats.
+            video_fallback_attempted = False
             if proc.returncode != 0 or not audio_files:
+                video_fallback_attempted = True
                 log.info("Whisper: audio-only unavailable for %s — trying video fallback (lowest res)", video_id)
                 video_template = os.path.join(tmpdir, "video.%(ext)s")
                 cmd_video = [
@@ -1033,14 +1035,19 @@ def whisper_transcribe(
                 _err = (proc.stderr or "")[:400]
                 if "Requested format" in _err or "not available" in _err:
                     log.info("Audio unavailable for %s (all formats failed — restricted video)", video_id)
+                    failure_detail = "all_formats_failed"
+                elif video_fallback_attempted:
+                    log.warning("yt-dlp audio + video fallback failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
+                    failure_detail = "video_fallback_failed"
                 else:
                     log.warning("yt-dlp audio download failed for %s (rc=%d): %s", video_id, proc.returncode, _err)
-                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+                    failure_detail = "audio_download_failed"
+                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": failure_detail}]
             audio_path = audio_files[0]
             log.info("Whisper: audio ready → %s", os.path.basename(audio_path))
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp audio download timed out for %s", video_id)
-            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+            return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": "download_timeout"}]
 
         if abort_event and abort_event.is_set():
             log.info("Whisper: aborted before transcribe for %s", video_id)
@@ -1086,10 +1093,10 @@ def whisper_transcribe(
                     log.info("Whisper: CPU fallback complete for %s (%d segments)", video_id, len(result.get("segments", [])))
                 except Exception as e2:
                     log.error("Whisper CPU fallback also failed for %s: %s", video_id, e2)
-                    return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+                    return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": "transcription_error"}]
             else:
                 log.error("Whisper transcription failed for %s: %s", video_id, e)
-                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed"}]
+                return [{"video_id": video_id, "transcript": None, "source": "whisper_failed", "failure_detail": "transcription_error"}]
 
         segments = result.get("segments", [])
         lines = []

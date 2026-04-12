@@ -92,7 +92,7 @@ class TranscriberService:
                     video_id, effective_duration, job_id=job_id,
                 )
 
-                if whisper_result:
+                if whisper_result and whisper_result.get("text"):
                     await storage.store_transcript(
                         video_id=video_id,
                         transcript_text=whisper_result["text"],
@@ -115,8 +115,10 @@ class TranscriberService:
                         whisper_attempted=True,
                     )
                 else:
-                    logger.warning("[transcript] Whisper returned no transcript for %s", video_id)
+                    reason = whisper_result.get("failure_reason", "unknown") if whisper_result else "unknown"
+                    logger.warning("[transcript] Whisper failed for %s — reason: %s", video_id, reason)
                     no_transcript.whisper_attempted = True
+                    no_transcript.whisper_failure_reason = reason
             except Exception:
                 logger.exception("[transcript] Whisper exception for %s", video_id)
                 no_transcript.whisper_attempted = True
@@ -159,10 +161,13 @@ class TranscriberService:
     async def _whisper_via_agent(
         self, video_id: str, duration_seconds: int, job_id: str | None = None,
     ) -> dict | None:
-        """Ask the local companion to download audio and run Whisper transcription."""
+        """Ask the local companion to download audio and run Whisper transcription.
+
+        Returns dict with 'text' on success, or dict with 'failure_reason' on failure, or None.
+        """
         if not agent_queue.is_agent_available():
             logger.warning("[whisper] No agent available for %s", video_id)
-            return None
+            return {"failure_reason": "no_agent"}
 
         max_dur_min = self._get("whisper_max_video_duration_min", 60)
         whisper_model = self._get("whisper_model", "large-v3-turbo")
@@ -172,22 +177,26 @@ class TranscriberService:
             "whisper_model": whisper_model,
         }, job_id=job_id)
         queue_depth = agent_queue.pending_task_count("whisper")
-        avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 45)
-        queue_wait = queue_depth * avg_whisper_sec
-        processing_time = max(180, duration_seconds + 120)
-        timeout = min(1800, queue_wait + processing_time)
-        logger.info("[whisper] Task %s for %s — queue_depth=%d, queue_wait≈%ds, processing≈%ds, timeout=%ds",
-                    task_id[:8], video_id, queue_depth, queue_wait, processing_time, timeout)
+        concurrency = max(self._get("whisper_concurrency", 2), 1)
+        avg_whisper_sec = DEFAULTS.get("avg_whisper_processing_sec", 300)
+        queue_wait = (queue_depth * avg_whisper_sec) // concurrency
+        # Processing: download (~30s) + Whisper (~0.25x real-time on GPU, ~1x on CPU).
+        # Use 0.5x as conservative middle ground, minimum 3 minutes.
+        processing_time = max(180, int(duration_seconds * 0.5) + 60)
+        timeout = min(4 * 3600, queue_wait + processing_time)
+        logger.info("[whisper] Task %s for %s — queue_depth=%d, concurrency=%d, queue_wait≈%ds, processing≈%ds, timeout=%ds",
+                    task_id[:8], video_id, queue_depth, concurrency, queue_wait, processing_time, timeout)
         results = await agent_queue.wait_for_result(task_id, timeout=timeout)
         if not results:
-            logger.warning("[whisper] Task timed out or empty for %s", video_id)
-            return None
+            logger.warning("[whisper] Task timed out or empty for %s (timeout=%ds)", video_id, timeout)
+            return {"failure_reason": "timeout"}
         data = results[0]
         source = data.get("source", "unknown")
         transcript_text = data.get("transcript")
         logger.warning("[whisper] Result for %s: source=%s, has_text=%s", video_id, source, bool(transcript_text))
         if not transcript_text:
-            return None
+            failure_detail = data.get("failure_detail", "audio_download_failed")
+            return {"failure_reason": failure_detail}
         return {"text": transcript_text}
 
     async def store_whisper_result(

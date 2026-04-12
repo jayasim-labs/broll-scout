@@ -53,7 +53,7 @@ DEFAULTS = {
     "whisper_model": "large-v3-turbo",
     "whisper_concurrency": 2,
     "whisper_max_video_duration_min": 60,
-    "avg_whisper_processing_sec": 45,
+    "avg_whisper_processing_sec": 300,
     "transcript_excerpt_max_words": 200,
 
     # Video filtering & ranking

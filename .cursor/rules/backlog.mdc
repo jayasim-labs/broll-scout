@@ -1,0 +1,30 @@
+---
+description: Project backlog — pending tasks, improvements, and known issues
+alwaysApply: true
+---
+
+# B-Roll Scout — Backlog
+
+Tasks for the AI to be aware of. Update this file as tasks are added, completed, or reprioritized.
+Mark completed tasks with [x] and move them to the bottom.
+
+## Pending
+
+- [ ] Show which specific videos belong to each shot in the UI (currently transcript results appear chronologically, not per-shot)
+- [ ] Reduce Whisper failures — `--remote-components ejs:github` fix deployed, monitor next run for improvement
+- [ ] Consider priority-aware polling or dedicated Whisper queue channel to reduce queue contention with caption tasks
+
+## Recently Completed
+
+- [x] Add Whisper failure reason breakdown in UI summary (timeout vs audio failed vs restricted)
+- [x] Add `failure_detail` field to companion Whisper response for precise failure diagnostics
+- [x] Fix Whisper per-task timeout: avg_whisper_processing_sec 45→300, cap 1800s→4h, factor in concurrency + video duration
+- [x] Improve shot search log: "10 new → queued for transcript" instead of just "10 new"
+- [x] Fix activity log group interleaving — Video Discovery and Transcript & Whisper sections no longer overlap
+- [x] Fix yt-dlp JS challenge failures — added `--remote-components ejs:github` to `_YTDLP_EXTRA`
+- [x] Add `--socket-timeout 30` and `--retries 3` to yt-dlp flags
+- [x] Remove deprecated `--geo-bypass` flag
+- [x] Fix agent status badge showing 3/4 on page load (now fetches model status concurrently)
+- [x] Remove unused LLM models (gemma4:e4b, qwen3:4b, llama3.3:8b)
+- [x] Clarify "X new, Y already fetched" in per-shot search log messages
+- [x] Add "all videos already in pool" message for shots with 0 new videos

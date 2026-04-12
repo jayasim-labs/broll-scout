@@ -294,6 +294,7 @@ class Transcript(BaseModel):
     language: str = "en"
     video_duration_seconds: int = 0
     whisper_attempted: bool = False
+    whisper_failure_reason: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
