@@ -370,7 +370,8 @@ class TranslatorService:
         self._last_input_tokens = 0
         self._last_output_tokens = 0
 
-        max_retries = 3
+        max_retries = 5
+        response = None
         for attempt in range(max_retries):
             try:
                 async with httpx.AsyncClient(timeout=180.0) as client:
@@ -389,7 +390,7 @@ class TranslatorService:
                         },
                     )
                 if response.status_code == 429:
-                    wait = (2 ** attempt) * 5
+                    wait = (2 ** attempt) * 10
                     logger.warning("OpenAI rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
                     await asyncio.sleep(wait)
                     continue
@@ -397,13 +398,25 @@ class TranslatorService:
                 break
             except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
                 if attempt < max_retries - 1:
-                    wait = (2 ** attempt) * 3
+                    wait = (2 ** attempt) * 5
                     logger.warning("OpenAI timeout (%s), retrying in %ds (attempt %d/%d)", type(e).__name__, wait, attempt + 1, max_retries)
                     await asyncio.sleep(wait)
                 else:
                     raise
+        else:
+            error_body = response.text[:500] if response else "no response"
+            raise RuntimeError(
+                f"OpenAI API failed after {max_retries} retries (last status: "
+                f"{response.status_code if response else 'N/A'}): {error_body}"
+            )
 
         result = response.json()
+        if "choices" not in result or not result["choices"]:
+            raise RuntimeError(
+                f"OpenAI returned unexpected response (no choices): "
+                f"{json.dumps(result)[:500]}"
+            )
+
         usage = result.get("usage", {})
         self._last_input_tokens = usage.get("prompt_tokens", 0)
         self._last_output_tokens = usage.get("completion_tokens", 0)

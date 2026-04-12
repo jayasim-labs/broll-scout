@@ -365,10 +365,8 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
     if (runningRef.current) return
     runningRef.current = true
     let cancelled = false
-    let inflight = 0
 
     async function executeTask(task: { task_id: string; task_type: string; payload: unknown }) {
-      inflight++
       try {
         const payload = task.payload as Record<string, unknown> | null
         const scopedId =
@@ -403,9 +401,21 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ task_id: task.task_id, status: "failed", result: [] }),
         }).catch(() => {})
-      } finally {
-        inflight--
       }
+    }
+
+    async function executeTasks(tasks: { task_id: string; task_type: string; payload: unknown }[]) {
+      await Promise.all(tasks.map(t => executeTask(t)))
+    }
+
+    async function sendHeartbeat() {
+      try {
+        await fetch("/api/v1/agent/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: "browser-agent" }),
+        })
+      } catch { /* ignore */ }
     }
 
     async function loop() {
@@ -430,9 +440,12 @@ export function useAgentLoop(jobActive: boolean, currentJobId: string | null = n
 
           const { tasks } = await pollResp.json()
 
-          if (tasks && tasks.length > 0 && inflight === 0) {
-            for (const task of tasks) {
-              executeTask(task)
+          if (tasks && tasks.length > 0) {
+            const heartbeatInterval = setInterval(sendHeartbeat, 10_000)
+            try {
+              await executeTasks(tasks)
+            } finally {
+              clearInterval(heartbeatInterval)
             }
           }
 
