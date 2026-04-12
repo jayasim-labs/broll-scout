@@ -85,7 +85,7 @@ if (-not $pythonCmd) {
     $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     if ($wingetCmd) {
         $firstRun = $true
-        Write-Host "  Python not found. Installing via winget (1-2 min)..." -ForegroundColor Yellow
+        Write-Host '  Python not found. Installing via winget, 1-2 min...' -ForegroundColor Yellow
         winget install --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements --silent
         Write-Host ""
         Write-Host "  Python installed. CLOSE this window and re-run setup.bat." -ForegroundColor Cyan
@@ -135,7 +135,7 @@ if (Test-Path (Join-Path $nodeModules ".package-lock.json")) {
     Write-Host "  OK - node_modules present" -ForegroundColor Green
 } else {
     $firstRun = $true
-    Write-Host "  Running npm install (first time)..." -ForegroundColor White
+    Write-Host '  Running npm install - first time...' -ForegroundColor White
     npm install --legacy-peer-deps
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  npm install failed. Fix errors above and re-run setup.bat." -ForegroundColor Red
@@ -146,7 +146,7 @@ if (Test-Path (Join-Path $nodeModules ".package-lock.json")) {
 
 # --- 5. Environment file ---
 Write-Host ""
-Write-Host "[5/8] Environment (.env.local)..." -ForegroundColor Yellow
+Write-Host '[5/8] Environment .env.local...' -ForegroundColor Yellow
 
 $envLocal = Join-Path $ProjectRoot ".env.local"
 $envExample = Join-Path $ProjectRoot ".env.example"
@@ -217,31 +217,34 @@ if (Test-Path $ActivateScript) {
     }
     Write-Host "  OK - Companion packages installed" -ForegroundColor Green
 
-    Write-Host "  Installing Whisper AI (speech-to-text)..." -ForegroundColor White
+    Write-Host '  Installing Whisper AI speech-to-text...' -ForegroundColor White
     # Install CUDA-enabled PyTorch first if NVIDIA GPU is available
     $hasNvidia = $false
     try {
         $nvidiaOut = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null
-        if ($LASTEXITCODE -eq 0 -and $nvidiaOut) {
+        if (($LASTEXITCODE -eq 0) -and ($nvidiaOut)) {
             $hasNvidia = $true
-            Write-Host "  NVIDIA GPU detected: $($nvidiaOut.Trim()) — installing CUDA PyTorch..." -ForegroundColor Cyan
+            $gpuName = $nvidiaOut.Trim()
+            Write-Host "  NVIDIA GPU detected: $gpuName - installing CUDA PyTorch..." -ForegroundColor Cyan
             & python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet 2>$null
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "  OK - PyTorch with CUDA installed (GPU-accelerated Whisper)" -ForegroundColor Green
+                Write-Host '  OK - PyTorch with CUDA installed, GPU-accelerated Whisper' -ForegroundColor Green
             } else {
-                Write-Host "  NOTE: CUDA PyTorch install failed, Whisper will use CPU" -ForegroundColor Yellow
+                Write-Host '  NOTE: CUDA PyTorch install failed, Whisper will use CPU' -ForegroundColor Yellow
             }
         }
-    } catch { }
+    } catch {
+        # nvidia-smi not found or failed - no NVIDIA GPU
+    }
 
     & python -m pip install openai-whisper --quiet 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  NOTE: Whisper install failed (optional)." -ForegroundColor Yellow
+        Write-Host '  NOTE: Whisper install failed. This is optional.' -ForegroundColor Yellow
     } else {
         if ($hasNvidia) {
-            Write-Host "  OK - Whisper installed (CUDA GPU accelerated)" -ForegroundColor Green
+            Write-Host '  OK - Whisper installed, CUDA GPU accelerated' -ForegroundColor Green
         } else {
-            Write-Host "  OK - Whisper installed (CPU mode)" -ForegroundColor Green
+            Write-Host '  OK - Whisper installed, CPU mode' -ForegroundColor Green
         }
     }
 }
@@ -266,7 +269,7 @@ if (-not $ollamaCmd) {
         Write-Host "  If an Ollama window opens, you can close it - setup will continue." -ForegroundColor Gray
         $installerProc = Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -PassThru -ErrorAction Stop
         $waited = 0
-        while (-not $installerProc.HasExited -and $waited -lt 90) {
+        while ((-not $installerProc.HasExited) -and ($waited -lt 90)) {
             Start-Sleep -Seconds 2; $waited += 2
             $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
             if (Test-Path $ollamaExe) { break }
@@ -298,13 +301,13 @@ if ($ollamaCmd) {
         if ($verOutput -match '(\d+\.\d+\.\d+)') {
             $currentVer = [version]$Matches[1]
             if ($currentVer -lt $minOllama) {
-                Write-Host "  Ollama $currentVer is too old for Gemma 4 (needs $minOllama+). Updating..." -ForegroundColor Yellow
+                Write-Host "  Ollama $currentVer is too old for Gemma 4, needs $minOllama or newer. Updating..." -ForegroundColor Yellow
                 $ollamaInstaller = Join-Path $env:TEMP "ollama-update.exe"
                 try {
                     Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $ollamaInstaller -TimeoutSec 120
                     $updateProc = Start-Process -FilePath $ollamaInstaller -ArgumentList "/S" -PassThru -ErrorAction Stop
                     $waited = 0
-                    while (-not $updateProc.HasExited -and $waited -lt 90) {
+                    while ((-not $updateProc.HasExited) -and ($waited -lt 90)) {
                         Start-Sleep -Seconds 2; $waited += 2
                         $ollamaExe = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
                         if (Test-Path $ollamaExe) { break }
@@ -314,22 +317,24 @@ if ($ollamaCmd) {
                     Remove-Item $ollamaInstaller -ErrorAction SilentlyContinue
                     $env:PATH = "$env:LOCALAPPDATA\Programs\Ollama;$env:PATH"
                     $newVer = & ollama --version 2>&1
-                    Write-Host "  OK - Ollama updated ($newVer)" -ForegroundColor Green
+                    Write-Host "  OK - Ollama updated to $newVer" -ForegroundColor Green
                 } catch {
                     Write-Host "  Auto-update failed: $_" -ForegroundColor Yellow
                     Write-Host "  Update manually from: https://ollama.com/download" -ForegroundColor White
                 }
             } else {
-                Write-Host "  OK - Ollama $currentVer (Gemma 4 compatible)" -ForegroundColor Green
+                Write-Host "  OK - Ollama $currentVer, Gemma 4 compatible" -ForegroundColor Green
             }
         }
-    } catch {}
+    } catch {
+        # Version check failed - skip update
+    }
 }
 
 # Start Ollama server with parallel=3
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaCmd) {
-    Write-Host "  Starting Ollama (OLLAMA_NUM_PARALLEL=3)..." -ForegroundColor Gray
+    Write-Host '  Starting Ollama with OLLAMA_NUM_PARALLEL=3...' -ForegroundColor Gray
     Get-Process -Name "ollama" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
     $env:OLLAMA_NUM_PARALLEL = "3"
@@ -340,10 +345,12 @@ if ($ollamaCmd) {
         Start-Sleep -Seconds 1
         try {
             $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
-            Write-Host "  OK - Ollama running (parallel=3)" -ForegroundColor Green
+            Write-Host '  OK - Ollama running, parallel=3' -ForegroundColor Green
             $ollamaRunning = $true
             break
-        } catch {}
+        } catch {
+            # Ollama not ready yet - retry
+        }
     }
 
     # Pull models if missing (skips if already pulled)
@@ -353,7 +360,7 @@ if ($ollamaCmd) {
             Write-Host "  OK - Qwen3 8B ready" -ForegroundColor Green
         } else {
             $firstRun = $true
-            Write-Host "  Pulling Qwen3 8B model (~5GB, one-time download)..." -ForegroundColor White
+            Write-Host '  Pulling Qwen3 8B model, approx 5GB one-time download...' -ForegroundColor White
             & ollama pull qwen3:8b
             if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Qwen3 8B model ready" -ForegroundColor Green }
             else { Write-Host "  NOTE: Qwen3 pull failed. Run 'ollama pull qwen3:8b' later." -ForegroundColor Yellow }
@@ -363,14 +370,14 @@ if ($ollamaCmd) {
             Write-Host "  OK - Gemma 4 26B ready" -ForegroundColor Green
         } else {
             $firstRun = $true
-            Write-Host "  Pulling Gemma 4 26B MoE model (~18GB, one-time download)..." -ForegroundColor White
-            Write-Host "  This may take 10-20 minutes on first run." -ForegroundColor Gray
+            Write-Host '  Pulling Gemma 4 26B MoE model, approx 18GB one-time download...' -ForegroundColor White
+            Write-Host '  This may take 10-20 minutes on first run.' -ForegroundColor Gray
             & ollama pull gemma4:26b
             if ($LASTEXITCODE -eq 0) { Write-Host "  OK - Gemma 4 26B MoE model ready" -ForegroundColor Green }
             else { Write-Host "  NOTE: Gemma 4 pull failed. Pull from Settings or run: ollama pull gemma4:26b" -ForegroundColor Yellow }
         }
 
-        Write-Host "  Switch to Gemma 4 26B MoE (18GB VRAM) from the Settings page for higher quality." -ForegroundColor Cyan
+        Write-Host '  Switch to Gemma 4 26B MoE from the Settings page for higher quality.' -ForegroundColor Cyan
     }
 } else {
     Write-Host "  WARNING: Ollama not found - install from https://ollama.com" -ForegroundColor Yellow
@@ -474,7 +481,7 @@ Write-Host "  ----------------------------------------" -ForegroundColor Gray
 Write-Host "  Companion stopped. Cleaning up..." -ForegroundColor Yellow
 
 # Kill Next.js dev server
-if ($npmJob -and -not $npmJob.HasExited) {
+if (($npmJob) -and (-not $npmJob.HasExited)) {
     taskkill /f /t /pid $npmJob.Id 2>$null | Out-Null
 }
 $port3000 = netstat -ano 2>$null | Select-String "LISTENING" | Select-String ":3000 "
