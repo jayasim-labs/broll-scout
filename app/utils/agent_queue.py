@@ -142,23 +142,28 @@ _poll_count = 0
 _poll_log_interval = 50
 
 async def poll_tasks(agent_id: str, max_tasks: int = 2, job_id: str | None = None) -> list[dict]:
-    """Return pending tasks for the given job_id only.
+    """Return pending tasks matching the agent's job scope.
 
-    If job_id is None (legacy/heartbeat-only poll), still updates the
-    agent timestamp but only claims tasks that have no job_id set
-    (shouldn't happen in normal flow).
+    - If job_id is set: only claim tasks for that specific job (multi-user safe).
+    - If job_id is None: claim ANY pending task (backward compat with old Workers).
     """
     global _poll_count
     async with _lock:
         _active_agents[(agent_id, job_id)] = time.time()
-        # Also update the global "any agent" timestamp for backward compat
         _active_agents[(agent_id, None)] = time.time()
         _poll_count += 1
 
-        pending_for_job = [
-            t for t in _pending.values()
-            if t["status"] == "pending" and t.get("job_id") == job_id
-        ]
+        if job_id is not None:
+            pending_for_job = [
+                t for t in _pending.values()
+                if t["status"] == "pending" and t.get("job_id") == job_id
+            ]
+        else:
+            # Legacy: no job_id means claim any pending task
+            pending_for_job = [
+                t for t in _pending.values()
+                if t["status"] == "pending"
+            ]
 
         claimed: list[dict] = []
         for task in pending_for_job:
@@ -218,21 +223,25 @@ async def get_queue_status() -> dict:
 
 
 def is_agent_available(job_id: str | None = None) -> bool:
-    """Check if an agent is available for the given job (or any job if None)."""
+    """Check if an agent is available for the given job (or any job if None).
+
+    Graceful fallback: if no agent has polled with this specific job_id,
+    check if ANY agent polled recently (covers old Workers that don't send
+    job_id, or the brief window before the Worker learns the new job_id).
+    """
     now = time.time()
     if job_id is not None:
-        # Check if any agent is polling for this specific job
         for (aid, jid), ts in _active_agents.items():
             if jid == job_id and now - ts < 30:
                 return True
-        # Also check if there are claimed tasks for this job (agent is busy)
         has_claimed = any(
             t["status"] == "claimed" and t.get("job_id") == job_id
             for t in _pending.values()
         )
-        return has_claimed
+        if has_claimed:
+            return True
 
-    # Fallback: any agent active
+    # Fallback: any agent active recently (handles old Workers or pre-job polls)
     if any(now - t < 30 for t in _active_agents.values()):
         return True
     has_claimed = any(t["status"] == "claimed" for t in _pending.values())
