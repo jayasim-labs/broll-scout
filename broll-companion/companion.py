@@ -295,9 +295,19 @@ def _cleanup():
             if any(name in iname for iname in installed_names):
                 must_unload.add(name)
 
-        log.info("Cleanup: unloading models from GPU: %s", ", ".join(sorted(must_unload)))
-        for model_name in must_unload:
-            _unload_model(model_name)
+        ollama_reachable = False
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as _:
+                ollama_reachable = True
+        except Exception:
+            pass
+
+        if ollama_reachable and must_unload:
+            log.info("Cleanup: unloading models from GPU: %s", ", ".join(sorted(must_unload)))
+            for model_name in must_unload:
+                _unload_model(model_name)
+        elif must_unload:
+            log.info("Cleanup: Ollama not running — skipping model unload")
 
     # Stop Ollama server if we started it
     if _ollama_process and _ollama_process.poll() is None:
@@ -324,6 +334,12 @@ def _signal_handler(signum, frame):
     sig_name = signal.Signals(signum).name
     log.info("Received %s — shutting down...", sig_name)
     _cleanup()
+    # Suppress multiprocessing resource_tracker warnings from PyTorch/Whisper
+    try:
+        from multiprocessing import resource_tracker
+        resource_tracker._resource_tracker._stop = lambda: None  # type: ignore[attr-defined]
+    except Exception:
+        pass
     print("  Done. All processes stopped.")
     os._exit(0)
 

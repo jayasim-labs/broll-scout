@@ -221,10 +221,7 @@ async def run_pipeline(
         video_pool_lock = asyncio.Lock()
 
         transcript_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-        search_semaphore = asyncio.Semaphore(5)
-        transcript_semaphore = asyncio.Semaphore(max(5, pipeline_cfg.get("max_concurrent_candidates", 3)))
         whisper_concurrency = int(pipeline_cfg.get("whisper_concurrency", 2))
-        whisper_semaphore = asyncio.Semaphore(whisper_concurrency)
         whisper_queue_count = 0
         whisper_queue_lock = asyncio.Lock()
 
@@ -234,43 +231,41 @@ async def run_pipeline(
 
         async def _search_one_shot(seg: Segment, shot: BRollShot):
             nonlocal shots_searched
-            async with search_semaphore:
-                try:
-                    cands = await searcher.search_for_shot(
-                        shot, seg, job_id=job_id,
-                        script_context=script_context,
-                    )
-                    cands = cands or []
-                    shot_candidates[shot.shot_id] = cands
-                except Exception:
-                    logger.warning("Search failed for shot %s", shot.shot_id)
-                    shot_candidates[shot.shot_id] = []
-                    cands = []
+            try:
+                cands = await searcher.search_for_shot(
+                    shot, seg, job_id=job_id,
+                    script_context=script_context,
+                )
+                cands = cands or []
+                shot_candidates[shot.shot_id] = cands
+            except Exception:
+                logger.warning("Search failed for shot %s", shot.shot_id)
+                shot_candidates[shot.shot_id] = []
+                cands = []
 
-                # Locked pool update: queue new videos for transcript fetch
-                async with video_pool_lock:
-                    for c in cands:
-                        vid = c.video_id
-                        is_new = vid not in video_pool
-                        if is_new:
-                            video_pool[vid] = c
-                            video_to_shots[vid] = []
-                            priority = c.video_duration_seconds or 9999
-                            await transcript_queue.put((priority, vid))
-                        if shot.shot_id not in video_to_shots[vid]:
-                            video_to_shots[vid].append(shot.shot_id)
+            async with video_pool_lock:
+                for c in cands:
+                    vid = c.video_id
+                    is_new = vid not in video_pool
+                    if is_new:
+                        video_pool[vid] = c
+                        video_to_shots[vid] = []
+                        priority = c.video_duration_seconds or 9999
+                        await transcript_queue.put((priority, vid))
+                    if shot.shot_id not in video_to_shots[vid]:
+                        video_to_shots[vid].append(shot.shot_id)
 
-                async with progress_lock:
-                    shots_searched += 1
-                    pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
-                    elapsed_s = time.time() - search_start
-                    if shots_searched > 0:
-                        per_shot = elapsed_s / shots_searched
-                        remaining = int(per_shot * (len(all_shots) - shots_searched))
-                        time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
-                    else:
-                        time_note = ""
-                    _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
+            async with progress_lock:
+                shots_searched += 1
+                pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
+                elapsed_s = time.time() - search_start
+                if shots_searched > 0:
+                    per_shot = elapsed_s / shots_searched
+                    remaining = int(per_shot * (len(all_shots) - shots_searched))
+                    time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
+                else:
+                    time_note = ""
+                _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
 
         async def _transcript_fetch_worker(worker_id: int):
             nonlocal transcripts_fetched
@@ -290,60 +285,58 @@ async def run_pipeline(
                     transcript_queue.task_done()
                     continue
 
-                async with transcript_semaphore:
-                    cand = video_pool.get(vid)
-                    if not cand:
-                        transcript_queue.task_done()
-                        continue
-                    yt_link = f"https://youtu.be/{vid}"
-                    short_title = cand.video_title[:45]
-                    dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
+                cand = video_pool.get(vid)
+                if not cand:
+                    transcript_queue.task_done()
+                    continue
+                yt_link = f"https://youtu.be/{vid}"
+                short_title = cand.video_title[:45]
+                dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
 
-                    async def _on_whisper_start(v_id: str, dur_s: int):
-                        nonlocal whisper_queue_count
-                        dur_m = round(dur_s / 60, 1)
-                        async with whisper_queue_lock:
-                            whisper_queue_count += 1
-                            pos = whisper_queue_count
-                        queue_label = f" (queued #{pos})" if pos > 1 else ""
-                        _log_activity(job_id, "clock", f"🎙️ Whisper{queue_label} for \"{short_title}\" ({dur_m}m video) — downloading audio + transcribing locally — {yt_link}", depth=2, group="search")
+                async def _on_whisper_start(v_id: str, dur_s: int):
+                    nonlocal whisper_queue_count
+                    dur_m = round(dur_s / 60, 1)
+                    async with whisper_queue_lock:
+                        whisper_queue_count += 1
+                        pos = whisper_queue_count
+                    queue_label = f" (queued #{pos})" if pos > 1 else ""
+                    _log_activity(job_id, "clock", f"🎙️ Whisper{queue_label} for \"{short_title}\" ({dur_m}m video) — downloading audio + transcribing locally — {yt_link}", depth=2, group="search")
 
-                    try:
-                        fetch_start = time.time()
-                        t = await transcriber.get_transcript(
-                            vid,
-                            video_duration_seconds=cand.video_duration_seconds,
-                            job_id=job_id,
-                            on_whisper_start=_on_whisper_start,
-                            whisper_gate=whisper_semaphore,
-                        )
-                        fetch_elapsed = round(time.time() - fetch_start, 1)
-                        transcript_cache[vid] = t.transcript_text
-                        source_label = _TRANSCRIPT_SOURCE_LABELS.get(
-                            t.transcript_source.value, t.transcript_source.value,
-                        )
-                        transcript_sources[vid] = source_label
-                        is_whisper = "Whisper" in source_label
-                        if t.transcript_text:
-                            timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
-                            if is_whisper:
-                                _log_activity(job_id, "check", f"✅ Whisper done for \"{short_title}\" ({dur_min}m video){timing} — {yt_link}", depth=2, group="search")
-                            else:
-                                _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}", depth=2, group="search")
+                try:
+                    fetch_start = time.time()
+                    t = await transcriber.get_transcript(
+                        vid,
+                        video_duration_seconds=cand.video_duration_seconds,
+                        job_id=job_id,
+                        on_whisper_start=_on_whisper_start,
+                    )
+                    fetch_elapsed = round(time.time() - fetch_start, 1)
+                    transcript_cache[vid] = t.transcript_text
+                    source_label = _TRANSCRIPT_SOURCE_LABELS.get(
+                        t.transcript_source.value, t.transcript_source.value,
+                    )
+                    transcript_sources[vid] = source_label
+                    is_whisper = "Whisper" in source_label
+                    if t.transcript_text:
+                        timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
+                        if is_whisper:
+                            _log_activity(job_id, "check", f"✅ Whisper done for \"{short_title}\" ({dur_min}m video){timing} — {yt_link}", depth=2, group="search")
                         else:
-                            failed_fetches.add(vid)
-                            affected = video_to_shots.get(vid, [])
-                            if t.whisper_attempted:
-                                _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — Whisper attempted but audio download failed (likely restricted/age-gated) — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
-                            else:
-                                _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
-                    except Exception:
-                        logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
-                        transcript_cache[vid] = None
-                        transcript_sources[vid] = "error"
+                            _log_activity(job_id, "mic", f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}", depth=2, group="search")
+                    else:
                         failed_fetches.add(vid)
-                        short_title = cand.video_title[:45]
-                        _log_activity(job_id, "alert", f"✗ \"{short_title}\" — fetch error — {yt_link}", depth=2, group="search")
+                        affected = video_to_shots.get(vid, [])
+                        if t.whisper_attempted:
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — Whisper attempted but audio download failed (likely restricted/age-gated) — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
+                        else:
+                            _log_activity(job_id, "alert", f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)", depth=2, group="search")
+                except Exception:
+                    logger.exception("Transcript fetch failed for %s (affects shots: %s)", vid, video_to_shots.get(vid, []))
+                    transcript_cache[vid] = None
+                    transcript_sources[vid] = "error"
+                    failed_fetches.add(vid)
+                    short_title = cand.video_title[:45]
+                    _log_activity(job_id, "alert", f"✗ \"{short_title}\" — fetch error — {yt_link}", depth=2, group="search")
 
                 async with progress_lock:
                     transcripts_fetched += 1

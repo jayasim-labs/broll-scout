@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from app.config import get_settings, DEFAULTS
@@ -27,7 +26,6 @@ class TranscriberService:
         video_duration_seconds: int = 0,
         job_id: str | None = None,
         on_whisper_start=None,
-        whisper_gate: asyncio.Semaphore | None = None,
     ) -> Transcript:
         """Attempt to get a transcript: cache -> companion agent (residential IP) -> Whisper via companion."""
         from app.services.storage import get_storage
@@ -89,17 +87,10 @@ class TranscriberService:
                     except Exception:
                         pass
 
-                if whisper_gate:
-                    logger.info("[transcript] Whisper waiting for gate for %s", video_id)
-                    await whisper_gate.acquire()
-                try:
-                    logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
-                    whisper_result = await self._whisper_via_agent(
-                        video_id, effective_duration, job_id=job_id,
-                    )
-                finally:
-                    if whisper_gate:
-                        whisper_gate.release()
+                logger.warning("[transcript] Trying Whisper for %s (%ds video)", video_id, effective_duration)
+                whisper_result = await self._whisper_via_agent(
+                    video_id, effective_duration, job_id=job_id,
+                )
 
                 if whisper_result:
                     await storage.store_transcript(
