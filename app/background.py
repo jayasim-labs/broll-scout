@@ -281,9 +281,12 @@ async def run_pipeline(
                     break
                 vid = item[1] if isinstance(item, tuple) else item
 
-                # Skip work if companion is gone — no point queueing tasks
+                # If companion is gone, mark as failed rather than silently dropping
                 if agent_queue.seconds_since_last_poll() > agent_queue.AGENT_GONE_THRESHOLD:
-                    logger.info("Skipping transcript for %s — agent gone", vid)
+                    logger.info("Marking transcript for %s as failed — agent gone", vid)
+                    transcript_cache[vid] = None
+                    failed_fetches.add(vid)
+                    transcript_sources[vid] = "error"
                     transcript_queue.task_done()
                     continue
 
@@ -486,8 +489,10 @@ async def run_pipeline(
         error_count = source_counts.get("error", 0)
         failed_count = len(failed_fetches)
 
+        search_min = round(search_elapsed / 60, 1)
+        search_label = f"{search_min}m" if search_min >= 1 else f"{search_elapsed}s"
         _log_activity(job_id, "check",
-            f"Search + fetch done in {search_elapsed}s! "
+            f"Search + transcript fetch done in {search_label}! "
             f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved) → "
             f"{videos_with_transcript} transcripts ready",
             group="search")
@@ -633,7 +638,13 @@ async def run_pipeline(
             _set_progress(job_id, "matching", pct, f"Matched {matches_done}/{total_match_pairs} — {matches_with_result} clips found — {pending} pending{time_note}")
 
         match_elapsed = round(time.time() - match_start, 1)
-        _log_activity(job_id, "check", f"Matching done in {match_elapsed}s — {matches_with_result} clips from {total_match_pairs} pairs", depth=1, group="match")
+        avg_match = round(match_elapsed / max(total_match_pairs, 1), 1)
+        match_min = round(match_elapsed / 60, 1)
+        _log_activity(job_id, "check",
+            f"Matching done in {match_min}m ({match_elapsed}s) via {match_label} — "
+            f"{matches_with_result} clips from {total_match_pairs} pairs "
+            f"(avg {avg_match}s per match)",
+            group="match")
 
         # Rank per shot, keep top clips per shot, assemble segment results
         # Session-level dedup: track used (video_id, timestamp_bucket) across all shots
@@ -886,6 +897,8 @@ async def run_pipeline(
         await storage.store_results(job_id, all_results, category=category)
 
         elapsed = round(time.time() - start_time, 2)
+        elapsed_min = round(elapsed / 60, 1)
+        elapsed_hr = round(elapsed / 3600, 1)
         api_costs = cost_tracker.end_job(job_id) or {}
         qt = get_quota_tracker()
         qt_stats = qt.stats
@@ -895,7 +908,15 @@ async def run_pipeline(
         qt.reset_for_job()
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
-        _log_activity(job_id, "clock", f"Completed in {elapsed:.1f}s — estimated API cost: ${est_cost:.4f}", group="done")
+        time_label = f"{elapsed_hr}h" if elapsed_hr >= 1 else f"{elapsed_min}m"
+        _log_activity(job_id, "bar-chart",
+            f"Pipeline summary: {time_label} total | "
+            f"GPT-4o (translation) → yt-dlp ({unique_videos} videos) → "
+            f"Whisper ×{whisper_concurrency} ({whisper_ok} transcribed) → "
+            f"{match_label} ({total_match_pairs} matches) → "
+            f"{shots_filled} clips | cost: ${est_cost:.4f}",
+            group="done")
+        _log_activity(job_id, "clock", f"Completed in {time_label} ({elapsed:.0f}s)", group="done")
 
         _set_progress(job_id, "completed", 100, "Scouting complete!")
         _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
