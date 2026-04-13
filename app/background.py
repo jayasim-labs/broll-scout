@@ -281,6 +281,7 @@ async def run_pipeline(
             _log_activity(job_id, "search", f"Searching {total_active_shots} shots for B-roll videos (estimated ~{est_str})", group="search")
             _log_activity(job_id, "clock", f"Search: {sources} → transcripts fetched sequentially", depth=1, group="search")
 
+            searcher = SearcherService(pipeline_settings=pipeline_cfg)
             search_start = time.time()
 
             video_pool: Dict[str, CandidateVideo] = {}
@@ -311,7 +312,7 @@ async def run_pipeline(
                     cands = cands or []
                     shot_candidates[shot.shot_id] = cands
                 except Exception:
-                    logger.warning("Search failed for shot %s", shot.shot_id)
+                    logger.warning("Search failed for shot %s", shot.shot_id, exc_info=True)
                     shot_candidates[shot.shot_id] = []
                     cands = []
 
@@ -368,7 +369,7 @@ async def run_pipeline(
                 try:
                     await _search_one_shot(seg, shot)
                 except Exception:
-                    logger.warning("Search failed for shot %s", shot.shot_id)
+                    logger.exception("Search failed for shot %s", shot.shot_id)
                 if i < len(shuffled_shots) - 1:
                     shot_num = i + 1
                     if shot_num % SEARCH_BATCH_SIZE == 0:

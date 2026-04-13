@@ -85,16 +85,17 @@ export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob, onRes
 
   return (
     <div className="space-y-6">
-      {(job.title || job.category) && (
-        <div className="flex items-center gap-3">
-          {job.title && <h2 className="text-lg font-semibold">{job.title}</h2>}
-          {job.category && (
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
-              {categoryLabel(job.category)}
-            </span>
-          )}
-        </div>
-      )}
+      <div className="flex items-center gap-3 flex-wrap">
+        {job.title && <h2 className="text-lg font-semibold">{job.title}</h2>}
+        {job.category && (
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
+            {categoryLabel(job.category)}
+          </span>
+        )}
+        <span className="text-[10px] font-mono text-muted-foreground/60 select-all" title={job.job_id}>
+          {job.job_id.slice(0, 8)}
+        </span>
+      </div>
 
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">

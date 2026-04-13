@@ -228,7 +228,21 @@ export default function JobPage() {
             onSelectJob={handleSelectJob}
             onSelectProject={() => {}}
             onRenameProject={async () => {}}
-            onDeleteProject={async () => {}}
+            onDeleteProject={async (projectId: string) => {
+              try {
+                const resp = await fetch(`${API_BASE}/projects/${projectId}?hard=true`, { method: 'DELETE' })
+                if (resp.ok) {
+                  setProjects(prev => prev.filter(p => p.project_id !== projectId))
+                  setJobHistory(prev => prev.filter(j => j.project_id !== projectId))
+                  if (job?.project_id === projectId) router.push("/")
+                  toast.success('Project deleted')
+                } else {
+                  toast.error('Failed to delete project')
+                }
+              } catch {
+                toast.error('Failed to delete project')
+              }
+            }}
             onNewProject={() => router.push("/")}
           />
         </aside>

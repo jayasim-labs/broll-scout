@@ -796,10 +796,14 @@ async def rename_project(
 @app.delete("/api/v1/projects/{project_id}")
 async def delete_project(
     project_id: str,
+    hard: bool = Query(default=False),
     x_api_key: str | None = Header(default=None),
 ):
     _verify_key(x_api_key)
     storage = get_storage()
+    if hard:
+        stats = await storage.hard_delete_project(project_id)
+        return {"status": "ok", "deleted": stats}
     ok = await storage.delete_project(project_id)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to delete project")

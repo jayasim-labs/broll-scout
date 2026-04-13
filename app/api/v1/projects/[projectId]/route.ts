@@ -38,12 +38,14 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
     const { projectId } = await params
-    const resp = await fetch(backendUrl(`/api/v1/projects/${projectId}`), {
+    const hard = request.nextUrl.searchParams.get("hard") === "true"
+    const qs = hard ? "?hard=true" : ""
+    const resp = await fetch(backendUrl(`/api/v1/projects/${projectId}${qs}`), {
       method: "DELETE",
       headers: backendHeaders(),
     })

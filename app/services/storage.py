@@ -736,6 +736,93 @@ class StorageService:
             logger.exception("Failed to delete project %s", project_id)
             return False
 
+    async def hard_delete_project(self, project_id: str) -> dict:
+        """Delete project and ALL associated data (jobs, segments, results, audit_log)."""
+        stats = {"project": 0, "jobs": 0, "segments": 0, "results": 0, "audit_log": 0}
+
+        job_items = await self._scan_all(
+            "jobs",
+            FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
+            ProjectionExpression="job_id",
+        )
+        job_ids = [j["job_id"] for j in job_items]
+
+        for job_id in job_ids:
+            try:
+                seg_resp = await self._run(
+                    self._table("segments").query,
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+                    ProjectionExpression="job_id, segment_id",
+                )
+                seg_items = seg_resp.get("Items", [])
+                if seg_items:
+                    table = self._table("segments")
+                    for i in range(0, len(seg_items), 25):
+                        batch = seg_items[i:i + 25]
+                        with table.batch_writer() as writer:
+                            for item in batch:
+                                writer.delete_item(Key={"job_id": item["job_id"], "segment_id": item["segment_id"]})
+                    stats["segments"] += len(seg_items)
+            except Exception:
+                logger.exception("Failed to delete segments for job %s", job_id)
+
+            try:
+                res_resp = await self._run(
+                    self._table("results").query,
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+                    ProjectionExpression="job_id, result_id",
+                )
+                res_items = res_resp.get("Items", [])
+                if res_items:
+                    table = self._table("results")
+                    for i in range(0, len(res_items), 25):
+                        batch = res_items[i:i + 25]
+                        with table.batch_writer() as writer:
+                            for item in batch:
+                                writer.delete_item(Key={"job_id": item["job_id"], "result_id": item["result_id"]})
+                    stats["results"] += len(res_items)
+            except Exception:
+                logger.exception("Failed to delete results for job %s", job_id)
+
+            try:
+                audit_resp = await self._run(
+                    self._table("audit_log").query,
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+                    ProjectionExpression="job_id, result_id",
+                )
+                audit_items = audit_resp.get("Items", [])
+                if audit_items:
+                    table = self._table("audit_log")
+                    for i in range(0, len(audit_items), 25):
+                        batch = audit_items[i:i + 25]
+                        with table.batch_writer() as writer:
+                            for item in batch:
+                                writer.delete_item(Key={"job_id": item["job_id"], "result_id": item["result_id"]})
+                    stats["audit_log"] += len(audit_items)
+            except Exception:
+                logger.exception("Failed to delete audit_log for job %s", job_id)
+
+            try:
+                await self._run(
+                    self._table("jobs").delete_item,
+                    Key={"job_id": job_id},
+                )
+                stats["jobs"] += 1
+            except Exception:
+                logger.exception("Failed to delete job %s", job_id)
+
+        try:
+            await self._run(
+                self._table("projects").delete_item,
+                Key={"project_id": project_id},
+            )
+            stats["project"] = 1
+        except Exception:
+            logger.exception("Failed to delete project %s", project_id)
+
+        logger.info("Hard-deleted project %s: %s", project_id, stats)
+        return stats
+
     async def rename_project(self, project_id: str, new_title: str) -> bool:
         try:
             await self._run(

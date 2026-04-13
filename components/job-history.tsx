@@ -15,6 +15,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel,
+  AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import type { JobSummary, ProjectSummary } from "@/lib/types"
 
 const API = "/api/v1"
@@ -48,6 +53,8 @@ export function JobHistory({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
   const [visibleCount, setVisibleCount] = useState(20)
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   // Orphan jobs (no project) — these still come from the global jobs prop
   const orphanJobs = useMemo(
@@ -130,6 +137,14 @@ export function JobHistory({
     }
     setRenamingId(null)
     setRenameValue("")
+  }
+
+  const confirmHardDelete = async () => {
+    if (!deleteTarget) return
+    setIsDeleting(true)
+    await onDeleteProject(deleteTarget.id)
+    setIsDeleting(false)
+    setDeleteTarget(null)
   }
 
   return (
@@ -244,7 +259,7 @@ export function JobHistory({
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-destructive focus:text-destructive"
-                      onClick={() => onDeleteProject(project.project_id)}
+                      onClick={() => setDeleteTarget({ id: project.project_id, title: project.title })}
                     >
                       <Trash2 className="w-3.5 h-3.5 mr-2" />
                       Delete
@@ -307,6 +322,32 @@ export function JobHistory({
           </div>
         </div>
       )}
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete &ldquo;{deleteTarget?.title}&rdquo;?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the project, all its jobs, segments,
+              results, and audit logs from the database. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmHardDelete}
+              disabled={isDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isDeleting ? (
+                <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Deleting...</>
+              ) : (
+                "Delete Everything"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -338,6 +379,9 @@ function JobItem({
         <p className="text-[10px] text-muted-foreground">
           {job.segment_count} seg · {job.result_count} clips
           <span className="ml-1">{formatDate(job.created_at)}</span>
+        </p>
+        <p className="text-[9px] text-muted-foreground/50 font-mono truncate">
+          {job.job_id.slice(0, 8)}
         </p>
       </div>
     </button>

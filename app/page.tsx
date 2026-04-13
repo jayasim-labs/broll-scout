@@ -193,11 +193,16 @@ export default function HomePage() {
 
   const handleDeleteProject = async (projectId: string) => {
     try {
-      const resp = await fetch(`${API_BASE}/projects/${projectId}`, { method: 'DELETE' })
+      const resp = await fetch(`${API_BASE}/projects/${projectId}?hard=true`, { method: 'DELETE' })
       if (resp.ok) {
+        const data = await resp.json()
         setProjects(prev => prev.filter(p => p.project_id !== projectId))
+        setJobHistory(prev => prev.filter(j => j.project_id !== projectId))
         if (activeProjectId === projectId) setActiveProjectId(null)
-        toast.success('Project deleted')
+        const d = data.deleted
+        toast.success(`Deleted project: ${d?.jobs ?? 0} jobs, ${d?.segments ?? 0} segments, ${d?.results ?? 0} results removed`)
+      } else {
+        toast.error('Failed to delete project')
       }
     } catch {
       toast.error('Failed to delete project')
