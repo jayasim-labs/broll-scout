@@ -243,6 +243,20 @@ export default function JobPage() {
                 toast.error('Failed to delete project')
               }
             }}
+            onDeleteJob={async (deleteJobId: string) => {
+              try {
+                const resp = await fetch(`${API_BASE}/jobs/${deleteJobId}`, { method: 'DELETE' })
+                if (resp.ok) {
+                  setJobHistory(prev => prev.filter(j => j.job_id !== deleteJobId))
+                  if (deleteJobId === jobId) router.push("/")
+                  toast.success('Job deleted')
+                } else {
+                  toast.error('Failed to delete job')
+                }
+              } catch {
+                toast.error('Failed to delete job')
+              }
+            }}
             onNewProject={() => router.push("/")}
           />
         </aside>

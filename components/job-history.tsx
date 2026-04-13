@@ -33,6 +33,7 @@ interface JobHistoryProps {
   onSelectProject: (projectId: string) => void
   onRenameProject: (projectId: string, newTitle: string) => void
   onDeleteProject: (projectId: string) => void
+  onDeleteJob: (jobId: string) => void
   onNewProject: () => void
 }
 
@@ -45,6 +46,7 @@ export function JobHistory({
   onSelectProject,
   onRenameProject,
   onDeleteProject,
+  onDeleteJob,
   onNewProject,
 }: JobHistoryProps) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
@@ -53,7 +55,7 @@ export function JobHistory({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState("")
   const [visibleCount, setVisibleCount] = useState(20)
-  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string; type: "project" | "job" } | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
   // Orphan jobs (no project) — these still come from the global jobs prop
@@ -142,7 +144,11 @@ export function JobHistory({
   const confirmHardDelete = async () => {
     if (!deleteTarget) return
     setIsDeleting(true)
-    await onDeleteProject(deleteTarget.id)
+    if (deleteTarget.type === "project") {
+      await onDeleteProject(deleteTarget.id)
+    } else {
+      await onDeleteJob(deleteTarget.id)
+    }
     setIsDeleting(false)
     setDeleteTarget(null)
   }
@@ -259,7 +265,7 @@ export function JobHistory({
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-destructive focus:text-destructive"
-                      onClick={() => setDeleteTarget({ id: project.project_id, title: project.title })}
+                      onClick={() => setDeleteTarget({ id: project.project_id, title: project.title, type: "project" })}
                     >
                       <Trash2 className="w-3.5 h-3.5 mr-2" />
                       Delete
@@ -282,6 +288,7 @@ export function JobHistory({
                         job={job}
                         isActive={activeJobId === job.job_id}
                         onSelect={onSelectJob}
+                        onDelete={(id, title) => setDeleteTarget({ id, title, type: "job" })}
                       />
                     ))
                   ) : (
@@ -317,6 +324,7 @@ export function JobHistory({
                 job={job}
                 isActive={activeJobId === job.job_id}
                 onSelect={onSelectJob}
+                onDelete={(id, title) => setDeleteTarget({ id, title, type: "job" })}
               />
             ))}
           </div>
@@ -326,10 +334,11 @@ export function JobHistory({
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete &ldquo;{deleteTarget?.title}&rdquo;?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {deleteTarget?.type === "project" ? "project" : "job"} &ldquo;{deleteTarget?.title}&rdquo;?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete the project, all its jobs, segments,
-              results, and audit logs from the database. This action cannot be undone.
+              {deleteTarget?.type === "project"
+                ? "This will permanently delete the project, all its jobs, segments, results, and audit logs from the database. This action cannot be undone."
+                : "This will permanently delete this job, its segments, results, and audit logs from the database. This action cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -342,7 +351,7 @@ export function JobHistory({
               {isDeleting ? (
                 <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Deleting...</>
               ) : (
-                "Delete Everything"
+                "Delete"
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -356,35 +365,47 @@ function JobItem({
   job,
   isActive,
   onSelect,
+  onDelete,
 }: {
   job: JobSummary
   isActive: boolean
   onSelect: (jobId: string) => void
+  onDelete?: (jobId: string, title: string) => void
 }) {
   return (
-    <button
-      onClick={() => onSelect(job.job_id)}
+    <div
       className={cn(
-        "w-full text-left px-2 py-1.5 rounded-md text-sm transition-colors flex items-center gap-2",
+        "group w-full text-left px-2 py-1.5 rounded-md text-sm transition-colors flex items-center gap-2",
         isActive
           ? "bg-primary/10 text-primary"
           : "hover:bg-secondary text-foreground"
       )}
     >
-      <StatusIcon status={job.status} />
-      <div className="flex-1 min-w-0">
-        <p className="text-xs font-medium truncate">
-          {job.title || job.job_id.slice(0, 8) + "..."}
-        </p>
-        <p className="text-[10px] text-muted-foreground">
-          {job.segment_count} seg · {job.result_count} clips
-          <span className="ml-1">{formatDate(job.created_at)}</span>
-        </p>
-        <p className="text-[9px] text-muted-foreground/50 font-mono truncate">
-          {job.job_id.slice(0, 8)}
-        </p>
-      </div>
-    </button>
+      <button className="flex items-center gap-2 flex-1 min-w-0" onClick={() => onSelect(job.job_id)}>
+        <StatusIcon status={job.status} />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium truncate">
+            {job.title || job.job_id.slice(0, 8) + "..."}
+          </p>
+          <p className="text-[10px] text-muted-foreground">
+            {job.segment_count} seg · {job.result_count} clips
+            <span className="ml-1">{formatDate(job.created_at)}</span>
+          </p>
+          <p className="text-[9px] text-muted-foreground/50 font-mono truncate">
+            {job.job_id.slice(0, 8)}
+          </p>
+        </div>
+      </button>
+      {onDelete && (
+        <button
+          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/20 flex-shrink-0 transition-opacity"
+          onClick={(e) => { e.stopPropagation(); onDelete(job.job_id, job.title || job.job_id.slice(0, 8)) }}
+          title="Delete job"
+        >
+          <Trash2 className="w-3 h-3 text-destructive" />
+        </button>
+      )}
+    </div>
   )
 }
 

@@ -203,6 +203,38 @@ class StorageService:
         except ClientError:
             logger.exception("Failed to delete results for %s", job_id)
 
+    async def hard_delete_job(self, job_id: str) -> dict:
+        """Delete a job and ALL associated data (segments, results, audit_log)."""
+        stats = {"segments": 0, "results": 0, "audit_log": 0, "job": 0}
+
+        for table_name, sort_key in [("segments", "segment_id"), ("results", "result_id"), ("audit_log", "result_id")]:
+            try:
+                resp = await self._run(
+                    self._table(table_name).query,
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+                    ProjectionExpression=f"job_id, {sort_key}",
+                )
+                items = resp.get("Items", [])
+                if items:
+                    table = self._table(table_name)
+                    for i in range(0, len(items), 25):
+                        batch = items[i:i + 25]
+                        with table.batch_writer() as writer:
+                            for item in batch:
+                                writer.delete_item(Key={"job_id": item["job_id"], sort_key: item[sort_key]})
+                    stats[table_name] += len(items)
+            except Exception:
+                logger.exception("Failed to delete %s for job %s", table_name, job_id)
+
+        try:
+            await self._run(self._table("jobs").delete_item, Key={"job_id": job_id})
+            stats["job"] = 1
+        except Exception:
+            logger.exception("Failed to delete job %s", job_id)
+
+        logger.info("Hard-deleted job %s: %s", job_id, stats)
+        return stats
+
     async def flush_activity_log(self, job_id: str, activity_log: list) -> None:
         """Persist activity log entries to the job record incrementally."""
         try:

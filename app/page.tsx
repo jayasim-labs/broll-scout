@@ -212,6 +212,21 @@ export default function HomePage() {
     }
   }
 
+  const handleDeleteJob = async (jobId: string) => {
+    try {
+      const resp = await fetch(`${API_BASE}/jobs/${jobId}`, { method: 'DELETE' })
+      if (resp.ok) {
+        setJobHistory(prev => prev.filter(j => j.job_id !== jobId))
+        if (currentJobId === jobId) resetToInput()
+        toast.success('Job deleted')
+      } else {
+        toast.error('Failed to delete job')
+      }
+    } catch {
+      toast.error('Failed to delete job')
+    }
+  }
+
   const handleCancel = async () => {
     if (!currentJobId) {
       resetToInput()
@@ -255,6 +270,7 @@ export default function HomePage() {
             onSelectProject={handleSelectProject}
             onRenameProject={handleRenameProject}
             onDeleteProject={handleDeleteProject}
+            onDeleteJob={handleDeleteJob}
             onNewProject={resetToInput}
           />
         </aside>

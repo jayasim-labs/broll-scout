@@ -392,6 +392,17 @@ async def get_job(
     return job
 
 
+@app.delete("/api/v1/jobs/{job_id}")
+async def delete_job(
+    job_id: str,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    stats = await storage.hard_delete_job(job_id)
+    return {"status": "ok", "deleted": stats}
+
+
 @app.get("/api/v1/jobs/{job_id}/status")
 async def get_job_status(job_id: str):
     progress = get_job_progress(job_id)
