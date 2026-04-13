@@ -417,6 +417,13 @@ async def run_pipeline(
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService(pipeline_settings=pipeline_cfg)
 
+        _pipeline_stats: Dict[str, int] = {
+            "transcript_cache_hits": 0,
+            "transcript_total": 0,
+            "transcript_no_transcript": 0,
+            "candidate_videos": unique_videos,
+        }
+
         if resume_from != "matching":
             # ══════════════════════════════════════════════════════════════
             # Stage 2b: Transcripts — simple sequential loop (no workers)
@@ -558,6 +565,10 @@ async def run_pipeline(
             yt_auto = source_counts.get("YouTube auto-captions", 0)
             error_count = source_counts.get("error", 0)
 
+            _pipeline_stats["transcript_cache_hits"] = cache_hits
+            _pipeline_stats["transcript_total"] = len(sorted_videos)
+            _pipeline_stats["transcript_no_transcript"] = failed_count
+
             _log_activity(job_id, "check",
                 f"Fetched transcripts for {unique_videos} videos → {videos_with_transcript} succeeded, {failed_count} failed",
                 group="transcript")
@@ -649,6 +660,9 @@ async def run_pipeline(
                     transcript_cache[vid] = None
                     transcript_sources[vid] = "no transcript available"
             videos_with_transcript = loaded_count
+            _pipeline_stats["transcript_cache_hits"] = loaded_count
+            _pipeline_stats["transcript_total"] = len(video_pool)
+            _pipeline_stats["transcript_no_transcript"] = len(video_pool) - loaded_count
             _log_activity(job_id, "check",
                 f"Loaded {loaded_count} cached transcripts for {len(video_pool)} videos",
                 group="transcript")
@@ -1043,6 +1057,7 @@ async def run_pipeline(
         api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
         api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
         api_costs["search_mode"] = qt_stats.get("search_mode", "ytdlp")
+        api_costs.update(_pipeline_stats)
         qt.reset_for_job()
 
         est_cost = api_costs.get("estimated_cost_usd", 0)
@@ -1090,6 +1105,7 @@ async def run_pipeline(
         qt_stats = qt.stats
         api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
         api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        api_costs.update(_pipeline_stats)
         qt.reset_for_job()
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:
@@ -1114,6 +1130,7 @@ async def run_pipeline(
         qt_stats = qt.stats
         api_costs["ytdlp_searches"] = qt_stats.get("ytdlp_searches_via_agent", 0)
         api_costs["ytdlp_detail_lookups"] = qt_stats.get("ytdlp_detail_lookups_via_agent", 0)
+        api_costs.update(_pipeline_stats)
         qt.reset_for_job()
         est_cost = api_costs.get("estimated_cost_usd", 0)
         if est_cost:

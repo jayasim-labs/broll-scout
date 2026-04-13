@@ -27,17 +27,25 @@ export interface APICosts {
   openai_mini_calls: number
   openai_input_tokens: number
   openai_output_tokens: number
+  gpt4o_input_tokens: number
+  gpt4o_output_tokens: number
+  gpt4o_mini_input_tokens: number
+  gpt4o_mini_output_tokens: number
   whisper_minutes: number
   whisper_calls: number
+  transcript_cache_hits: number
+  transcript_total: number
+  transcript_no_transcript: number
   youtube_api_units: number
   google_cse_calls: number
   gemini_calls: number
-  ytdlp_searches: number
-  ytdlp_detail_lookups: number
   local_matcher_calls: number
   local_matcher_avg_latency_ms: number
-  estimated_cost_usd: number
+  ytdlp_searches: number
+  ytdlp_detail_lookups: number
+  candidate_videos: number
   search_mode?: string
+  estimated_cost_usd: number
   quota_exhausted?: boolean
 }
 

@@ -82,6 +82,7 @@ export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob, onRes
     () => displaySegments.slice((currentPage - 1) * SEGMENTS_PER_PAGE, currentPage * SEGMENTS_PER_PAGE),
     [displaySegments, currentPage],
   )
+  const c = job.api_costs
 
   return (
     <div className="space-y-6">
@@ -204,38 +205,69 @@ export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob, onRes
 
       <Card>
         <CardContent className="pt-4">
-          <p className="text-sm text-muted-foreground mb-2">API & Resource Usage</p>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1.5 text-xs">
-            <span className="text-muted-foreground">GPT-4o <span className="text-foreground/70">(translation)</span>: <span className="text-foreground">{job.api_costs.openai_calls}</span> calls</span>
-            {(job.api_costs.openai_mini_calls || 0) > 0 && (
-              <span className="text-muted-foreground">GPT-4o-mini <span className="text-foreground/70">(timestamps)</span>: <span className="text-foreground">{job.api_costs.openai_mini_calls}</span> calls</span>
-            )}
-            {(job.api_costs.local_matcher_calls || 0) > 0 && (
-              <span className="text-muted-foreground">Local LLM <span className="text-foreground/70">(timestamps, $0)</span>: <span className="text-foreground">{job.api_costs.local_matcher_calls}</span> calls{job.api_costs.local_matcher_avg_latency_ms > 0 ? ` (~${(job.api_costs.local_matcher_avg_latency_ms / 1000).toFixed(1)}s avg)` : ''}</span>
-            )}
-            {(job.api_costs.openai_mini_calls || 0) === 0 && (job.api_costs.local_matcher_calls || 0) === 0 && (
-              <span className="text-muted-foreground">Timestamps: <span className="text-foreground">0</span> calls</span>
-            )}
-            <span className="text-muted-foreground">Whisper base <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.whisper_calls || 0}</span> videos{job.api_costs.whisper_minutes > 0 ? ` (${job.api_costs.whisper_minutes.toFixed(1)} min audio)` : ''}</span>
-            <span className="text-muted-foreground">yt-dlp searches <span className="text-foreground/70">(local)</span>: <span className="text-foreground">{job.api_costs.ytdlp_searches || 0}</span></span>
-            <span className="text-muted-foreground">YouTube API: <span className="text-foreground">{job.api_costs.youtube_api_units}</span> units</span>
-            {job.api_costs.gemini_calls > 0 && (
-              <span className="text-muted-foreground">Gemini <span className="text-foreground/70">(expansion)</span>: <span className="text-foreground">{job.api_costs.gemini_calls}</span> calls</span>
-            )}
+          <p className="text-sm text-muted-foreground mb-3">API & Resource Usage</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">LLM Calls</p>
+              <UsageLine label="GPT-4o" detail="translation" value={`${c.openai_calls} calls`} sub={c.gpt4o_input_tokens > 0 ? `${(c.gpt4o_input_tokens / 1000).toFixed(1)}K in / ${(c.gpt4o_output_tokens / 1000).toFixed(1)}K out` : undefined} />
+              {(c.openai_mini_calls || 0) > 0 && (
+                <UsageLine label="GPT-4o-mini" detail="timestamps" value={`${c.openai_mini_calls} calls`} sub={c.gpt4o_mini_input_tokens > 0 ? `${(c.gpt4o_mini_input_tokens / 1000).toFixed(1)}K in / ${(c.gpt4o_mini_output_tokens / 1000).toFixed(1)}K out` : undefined} />
+              )}
+              {(c.local_matcher_calls || 0) > 0 && (
+                <UsageLine label="Local LLM" detail="matching, $0" value={`${c.local_matcher_calls} calls`} sub={c.local_matcher_avg_latency_ms > 0 ? `~${(c.local_matcher_avg_latency_ms / 1000).toFixed(1)}s avg` : undefined} />
+              )}
+              {c.gemini_calls > 0 && (
+                <UsageLine label="Gemini" detail="expansion" value={`${c.gemini_calls} calls`} />
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">Video Discovery</p>
+              <UsageLine label="yt-dlp searches" detail="local" value={`${c.ytdlp_searches || 0}`} />
+              {(c.ytdlp_detail_lookups || 0) > 0 && (
+                <UsageLine label="yt-dlp detail lookups" detail="local" value={`${c.ytdlp_detail_lookups}`} />
+              )}
+              <UsageLine label="Candidate videos" value={`${c.candidate_videos || 0}`} />
+              {c.youtube_api_units > 0 && (
+                <UsageLine label="YouTube API" value={`${c.youtube_api_units} units`} />
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider">Transcripts</p>
+              <UsageLine label="Whisper" detail="local" value={`${c.whisper_calls || 0} videos`} sub={c.whisper_minutes > 0 ? `${c.whisper_minutes.toFixed(1)} min audio` : undefined} />
+              <UsageLine label="DynamoDB cache hits" value={`${c.transcript_cache_hits || 0}`} />
+              {(c.transcript_no_transcript || 0) > 0 && (
+                <UsageLine label="No transcript" value={`${c.transcript_no_transcript}`} />
+              )}
+              {(c.transcript_total || 0) > 0 && (
+                <UsageLine label="Total processed" value={`${c.transcript_total}`} />
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-            {job.processing_time_seconds && (
-              <span>Processed in {job.processing_time_seconds.toFixed(1)}s</span>
+          <div className="flex items-center gap-4 mt-3 pt-2 border-t border-border/30 text-xs text-muted-foreground">
+            {job.processing_time_seconds != null && job.processing_time_seconds > 0 && (
+              <span>Processed in {job.processing_time_seconds >= 60 ? `${(job.processing_time_seconds / 60).toFixed(1)}m` : `${job.processing_time_seconds.toFixed(1)}s`}</span>
             )}
-            {job.api_costs.estimated_cost_usd > 0 && (
-              <span>Est. cost: ${job.api_costs.estimated_cost_usd.toFixed(4)}</span>
+            {c.estimated_cost_usd > 0 && (
+              <span>Est. cost: <span className="text-foreground">${c.estimated_cost_usd.toFixed(4)}</span></span>
             )}
-            {job.api_costs.search_mode && (
-              <span className="capitalize">Search: {job.api_costs.search_mode}</span>
+            {c.search_mode && (
+              <span className="capitalize">Search: {c.search_mode}</span>
             )}
           </div>
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+function UsageLine({ label, detail, value, sub }: { label: string; detail?: string; value: string; sub?: string }) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-muted-foreground">
+        {label}{detail && <span className="text-foreground/50"> ({detail})</span>}:
+      </span>
+      <span className="text-foreground font-medium">{value}</span>
+      {sub && <span className="text-muted-foreground/60">{sub}</span>}
     </div>
   )
 }

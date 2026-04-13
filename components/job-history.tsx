@@ -146,8 +146,20 @@ export function JobHistory({
     setIsDeleting(true)
     if (deleteTarget.type === "project") {
       await onDeleteProject(deleteTarget.id)
+      setProjectJobs(prev => {
+        const next = { ...prev }
+        delete next[deleteTarget.id]
+        return next
+      })
     } else {
       await onDeleteJob(deleteTarget.id)
+      setProjectJobs(prev => {
+        const next: Record<string, JobSummary[]> = {}
+        for (const [pid, pjobs] of Object.entries(prev)) {
+          next[pid] = pjobs.filter(j => j.job_id !== deleteTarget.id)
+        }
+        return next
+      })
     }
     setIsDeleting(false)
     setDeleteTarget(null)

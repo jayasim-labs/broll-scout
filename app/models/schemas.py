@@ -304,13 +304,24 @@ class APICosts(BaseModel):
     openai_mini_calls: int = 0
     openai_input_tokens: int = 0
     openai_output_tokens: int = 0
+    gpt4o_input_tokens: int = 0
+    gpt4o_output_tokens: int = 0
+    gpt4o_mini_input_tokens: int = 0
+    gpt4o_mini_output_tokens: int = 0
     whisper_minutes: float = 0.0
     whisper_calls: int = 0
+    transcript_cache_hits: int = 0
+    transcript_total: int = 0
+    transcript_no_transcript: int = 0
     youtube_api_units: int = 0
     google_cse_calls: int = 0
     gemini_calls: int = 0
+    local_matcher_calls: int = 0
+    local_matcher_avg_latency_ms: int = 0
     ytdlp_searches: int = 0
     ytdlp_detail_lookups: int = 0
+    candidate_videos: int = 0
+    search_mode: str = ""
     estimated_cost_usd: float = 0.0
 
 
