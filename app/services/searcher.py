@@ -262,16 +262,25 @@ def _cached_search_key(query: str, max_results: int) -> str:
 
 
 async def _get_cached_search_async(key: str) -> Optional[list[dict]]:
-    """Check in-memory cache, then fall back to DynamoDB."""
+    """Check in-memory cache, then fall back to DynamoDB.
+
+    Treats empty cached results as a miss so transient failures
+    (agent timeout, 429) don't permanently poison the cache.
+    """
     mem = _mem_cache.get(key)
     if mem and (time.time() - mem[0]) < SEARCH_CACHE_TTL:
-        return mem[1]
+        if mem[1]:
+            return mem[1]
+        del _mem_cache[key]
+        return None
     if mem:
         del _mem_cache[key]
     try:
         from app.services.storage import get_storage
         results = await get_storage().get_search_cache(key)
         if results is not None:
+            if not results:
+                return None
             _mem_cache[key] = (time.time(), results)
             return results
     except Exception:
@@ -280,7 +289,10 @@ async def _get_cached_search_async(key: str) -> Optional[list[dict]]:
 
 
 async def _set_cached_search_async(key: str, results: list[dict]) -> None:
-    """Write to in-memory cache and DynamoDB."""
+    """Write to in-memory cache and DynamoDB. Skip caching empty results
+    so transient failures (agent timeout, 429) don't poison the cache."""
+    if not results:
+        return
     _mem_cache[key] = (time.time(), results)
     if len(_mem_cache) > _MEM_CACHE_MAX:
         oldest_key = min(_mem_cache, key=lambda k: _mem_cache[k][0])
@@ -904,7 +916,8 @@ class SearcherService:
                     query=q, max_results=max_results, job_id=job_id, backend=backend,
                 )
                 found = [r for r in results if r.get("video_id")]
-                await _set_cached_search_async(cache_key, found)
+                if found:
+                    await _set_cached_search_async(cache_key, found)
                 all_results.extend(found)
                 if emit:
                     await emit("check", f"→ {len(found)} results for \"{q[:50]}\"", 3)
