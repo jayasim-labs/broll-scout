@@ -685,6 +685,9 @@ async def recalculate_usage(
 
 @app.post("/api/v1/agent/poll")
 async def agent_poll(body: AgentPollRequest):
+    if body.heartbeat_only:
+        await agent_queue.heartbeat(body.agent_id, job_id=body.job_id)
+        return {"tasks": []}
     tasks = await agent_queue.poll_tasks(body.agent_id, max_tasks=3, job_id=body.job_id)
     return {"tasks": tasks}
 

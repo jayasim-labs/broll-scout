@@ -141,6 +141,14 @@ async def cancel_tasks_for_job(job_id: str) -> list[str]:
 _poll_count = 0
 _poll_log_interval = 50
 
+
+async def heartbeat(agent_id: str, job_id: str | None = None) -> None:
+    """Record agent liveness without claiming any tasks."""
+    async with _lock:
+        _active_agents[(agent_id, job_id)] = time.time()
+        _active_agents[(agent_id, None)] = time.time()
+
+
 async def poll_tasks(agent_id: str, max_tasks: int = 2, job_id: str | None = None) -> list[dict]:
     """Return pending tasks matching the agent's job scope.
 

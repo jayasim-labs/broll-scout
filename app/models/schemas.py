@@ -496,6 +496,7 @@ class ExpandShotRequest(BaseModel):
 class AgentPollRequest(BaseModel):
     agent_id: str = Field(default="browser-agent")
     job_id: str | None = Field(default=None)
+    heartbeat_only: bool = Field(default=False)
 
 
 class AgentResultRequest(BaseModel):

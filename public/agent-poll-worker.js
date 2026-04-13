@@ -29,6 +29,7 @@ const HEARTBEAT_MS = 8000
 
 let heartbeatTimer = null
 let busyExecuting = false
+const taskQueue = []
 
 function log(msg) {
   console.log(`[agent-worker] ${msg}`)
@@ -44,7 +45,13 @@ function pollBody() {
   return JSON.stringify(body)
 }
 
-// --- Heartbeat: always-on, never blocked by task execution ---
+function heartbeatBody() {
+  const body = { agent_id: "browser-agent", heartbeat_only: true }
+  if (jobId) body.job_id = jobId
+  return JSON.stringify(body)
+}
+
+// --- Heartbeat: keep-alive ONLY, never claims tasks ---
 function startHeartbeat() {
   stopHeartbeat()
   heartbeatTimer = setInterval(async () => {
@@ -52,7 +59,7 @@ function startHeartbeat() {
       await fetch(`${backendOrigin}/api/v1/agent/poll`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: pollBody(),
+        body: heartbeatBody(),
       })
     } catch (err) {
       logError("heartbeat fetch failed", err)
@@ -128,31 +135,41 @@ async function submitResult(taskId, status, result) {
   }
 }
 
+// --- Task processor: drains the queue sequentially ---
+async function processQueue() {
+  if (busyExecuting) return
+  busyExecuting = true
+  try {
+    while (taskQueue.length > 0) {
+      const task = taskQueue.shift()
+      await executeTask(task)
+    }
+  } catch (err) {
+    logError("task queue processing error", err)
+  } finally {
+    busyExecuting = false
+  }
+}
+
 // --- Poll loop: lightweight, never blocks ---
 async function pollLoop() {
   log("pollLoop started (job=" + jobId + ")")
   while (running) {
     try {
-      const resp = await fetch(`${backendOrigin}/api/v1/agent/poll`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: pollBody(),
-      })
-      if (resp.ok) {
-        const data = await resp.json()
-        if (data.tasks && data.tasks.length > 0 && !busyExecuting) {
-          busyExecuting = true
-          ;(async () => {
-            try {
-              for (const task of data.tasks) {
-                await executeTask(task)
-              }
-            } catch (err) {
-              logError("task execution batch error", err)
-            } finally {
-              busyExecuting = false
+      if (!busyExecuting) {
+        const resp = await fetch(`${backendOrigin}/api/v1/agent/poll`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: pollBody(),
+        })
+        if (resp.ok) {
+          const data = await resp.json()
+          if (data.tasks && data.tasks.length > 0) {
+            for (const task of data.tasks) {
+              taskQueue.push(task)
             }
-          })()
+            processQueue()
+          }
         }
       }
     } catch (err) {
