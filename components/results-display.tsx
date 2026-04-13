@@ -25,6 +25,7 @@ interface ResultsDisplayProps {
   onExport?: () => void
   onNewSearch: () => void
   onRefreshJob?: () => void
+  onResume?: (fromStage: "transcripts" | "matching") => void
 }
 
 function formatTime(seconds: number): string {
@@ -68,7 +69,7 @@ const AUDIT_LABELS: Record<string, { label: string; color: string; icon: typeof 
 
 const SEGMENTS_PER_PAGE = 15
 
-export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob }: ResultsDisplayProps) {
+export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob, onResume }: ResultsDisplayProps) {
   const activityLog = job.activity_log || []
   const displaySegments = useMemo(
     () => job.segments.filter(s => s.results.length > 0 || s.broll_count === 0),
@@ -144,6 +145,22 @@ export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob }: Res
             </TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-2">
+            {onResume && job.pipeline_checkpoint && job.pipeline_checkpoint !== "completed" && (job.status === "failed" || job.status === "partial") && (
+              <>
+                {(job.pipeline_checkpoint === "searched" || job.pipeline_checkpoint === "matched") && (
+                  <Button variant="default" size="sm" onClick={() => onResume("transcripts")} className="gap-2">
+                    <RefreshCw className="w-4 h-4" />
+                    Resume from Transcripts
+                  </Button>
+                )}
+                {job.pipeline_checkpoint === "matched" && (
+                  <Button variant="secondary" size="sm" onClick={() => onResume("matching")} className="gap-2">
+                    <RefreshCw className="w-4 h-4" />
+                    Resume from Matching
+                  </Button>
+                )}
+              </>
+            )}
             <Button variant="secondary" size="sm" onClick={onNewSearch} className="gap-2">
               <RefreshCw className="w-4 h-4" />
               New Search

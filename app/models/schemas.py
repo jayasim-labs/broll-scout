@@ -170,6 +170,7 @@ class BRollShot(BaseModel):
     shot_intent: ShotIntent = ShotIntent.LITERAL
     scarcity: Scarcity = Scarcity.COMMON
     preferred_source_type: str = ""
+    candidates: Optional[List[Dict[str, Any]]] = None
 
 
 class Segment(BaseModel):
@@ -356,6 +357,8 @@ class JobResponse(BaseModel):
     category: Optional[str] = None
     script_context: Optional[ScriptContext] = None
     activity_log: List[dict] = Field(default_factory=list)
+    pipeline_checkpoint: Optional[str] = None
+    checkpoint_at: Optional[str] = None
 
 
 class JobSummary(BaseModel):
@@ -367,6 +370,7 @@ class JobSummary(BaseModel):
     project_id: Optional[str] = None
     title: Optional[str] = None
     category: Optional[str] = None
+    pipeline_checkpoint: Optional[str] = None
 
 
 class JobListResponse(BaseModel):
@@ -491,6 +495,10 @@ class ExpandShotRequest(BaseModel):
     job_id: str
     segment_id: str
     count: int = Field(default=1, ge=1, le=3)
+
+
+class ResumeRequest(BaseModel):
+    from_stage: str = Field(..., pattern=r"^(transcripts|matching)$")
 
 
 class AgentPollRequest(BaseModel):

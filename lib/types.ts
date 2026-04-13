@@ -54,6 +54,7 @@ export interface BRollShot {
   shot_intent?: ShotIntent
   scarcity?: Scarcity
   preferred_source_type?: string
+  candidates?: Record<string, unknown>[] | null
 }
 
 export interface RankedResult {
@@ -161,6 +162,8 @@ export interface JobResponse {
   category?: string | null
   script_context?: ScriptContext | null
   activity_log?: ActivityEntry[]
+  pipeline_checkpoint?: string | null
+  checkpoint_at?: string | null
 }
 
 export interface JobSummary {
@@ -172,6 +175,7 @@ export interface JobSummary {
   project_id?: string | null
   title?: string | null
   category?: string | null
+  pipeline_checkpoint?: string | null
 }
 
 export type VideoCategory =

@@ -31,6 +31,7 @@ import type { JobProgress, ActivityEntry } from "@/lib/types"
 interface ProgressTrackerProps {
   progress: JobProgress
   onCancel: () => void
+  resumedFrom?: string | null
 }
 
 const iconMap: Record<string, LucideIcon> = {
@@ -97,11 +98,14 @@ interface ActivityGroup {
   icon: LucideIcon
   color: string
   entries: ActivityEntry[]
+  isPreviousRun: boolean
 }
 
 function groupActivityLog(log: ActivityEntry[]): ActivityGroup[] {
   const groups: ActivityGroup[] = []
   let currentKey = ""
+  const sepIdx = log.findIndex(e => e.text.startsWith("─── Resumed from"))
+  let entryIdx = 0
 
   for (const entry of log) {
     const gk = entry.group || "general"
@@ -110,14 +114,16 @@ function groupActivityLog(log: ActivityEntry[]): ActivityGroup[] {
     if (base !== currentKey) {
       currentKey = base
       const meta = GROUP_LABELS[base] || { label: base, icon: Zap, color: "text-muted-foreground" }
-      groups.push({ key: `${base}-${groups.length}`, label: meta.label, icon: meta.icon, color: meta.color, entries: [] })
+      const isPrev = sepIdx >= 0 && entryIdx < sepIdx
+      groups.push({ key: `${base}-${groups.length}`, label: meta.label, icon: meta.icon, color: meta.color, entries: [], isPreviousRun: isPrev })
     }
     groups[groups.length - 1].entries.push(entry)
+    entryIdx++
   }
   return groups
 }
 
-function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
+function PipelineFlowDiagram({ currentStage, skippedStages }: { currentStage: string; skippedStages?: Set<string> }) {
   const steps = [
     {
       id: "translate",
@@ -155,20 +161,24 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
     <div className="grid grid-cols-4 gap-1.5">
       {steps.map((step, idx) => {
         const Icon = step.icon
-        const isCompleted = currentIdx > idx
-        const isCurrent = currentIdx === idx
-        const isPending = currentIdx < idx
+        const isSkipped = skippedStages?.has(step.stage) ?? false
+        const isCompleted = isSkipped || currentIdx > idx
+        const isCurrent = !isSkipped && currentIdx === idx
+        const isPending = !isSkipped && currentIdx < idx
 
         return (
           <div key={step.id} className="relative">
             <div className={cn(
               "rounded-lg border p-2.5 transition-all h-full",
-              isCompleted && "bg-emerald-500/10 border-emerald-500/30",
+              isSkipped && "bg-slate-500/5 border-slate-500/20 opacity-60",
+              isCompleted && !isSkipped && "bg-emerald-500/10 border-emerald-500/30",
               isCurrent && "bg-primary/5 border-primary/30 ring-1 ring-primary/20",
               isPending && "bg-secondary/50 border-border/50 opacity-50",
             )}>
               <div className="flex items-center gap-1.5 mb-1">
-                {isCompleted ? (
+                {isSkipped ? (
+                  <Check className="w-3.5 h-3.5 text-slate-400" />
+                ) : isCompleted ? (
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
                 ) : isCurrent ? (
                   <Icon className="w-3.5 h-3.5 text-primary animate-pulse" />
@@ -177,18 +187,20 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
                 )}
                 <span className={cn(
                   "text-[11px] font-semibold",
-                  isCompleted && "text-emerald-400",
+                  isSkipped && "text-slate-400",
+                  isCompleted && !isSkipped && "text-emerald-400",
                   isCurrent && "text-primary",
                   isPending && "text-muted-foreground",
                 )}>
                   {step.title}
+                  {isSkipped && " (cached)"}
                 </span>
               </div>
               <p className={cn(
                 "text-[10px] leading-relaxed",
-                isPending ? "text-muted-foreground/50" : "text-muted-foreground",
+                isPending || isSkipped ? "text-muted-foreground/50" : "text-muted-foreground",
               )}>
-                {step.detail}
+                {isSkipped ? "Reusing results from previous run" : step.detail}
               </p>
             </div>
             {idx < steps.length - 1 && (
@@ -206,14 +218,14 @@ function PipelineFlowDiagram({ currentStage }: { currentStage: string }) {
 
 function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast: boolean }) {
   const [manualToggle, setManualToggle] = useState<boolean | null>(null)
-  const expanded = manualToggle !== null ? manualToggle : isLast
+  const expanded = manualToggle !== null ? manualToggle : (group.isPreviousRun ? false : isLast)
   const Icon = group.icon
 
   const depth0 = group.entries.filter(e => !e.depth || e.depth === 0)
   const childEntries = group.entries.filter(e => (e.depth || 0) >= 1)
 
   return (
-    <div className="relative">
+    <div className={cn("relative", group.isPreviousRun && "opacity-50")}>
       <button
         className="flex items-center gap-2 w-full text-left py-1.5 px-1 rounded hover:bg-secondary/50 transition-colors"
         onClick={() => setManualToggle(prev => prev !== null ? !prev : !isLast ? true : false)}
@@ -225,12 +237,15 @@ function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast:
         )}
         <Icon className={cn("w-3.5 h-3.5 flex-shrink-0", group.color)} />
         <span className={cn("text-xs font-semibold", group.color)}>{group.label}</span>
+        {group.isPreviousRun && (
+          <span className="text-[9px] text-muted-foreground/50 ml-1 italic">previous run</span>
+        )}
         {!expanded && (
           <span className="text-[10px] text-muted-foreground/50 ml-1">
             — {group.entries.length} event{group.entries.length !== 1 ? "s" : ""}
           </span>
         )}
-        {isLast && (
+        {isLast && !group.isPreviousRun && (
           <span className="ml-auto">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
           </span>
@@ -240,10 +255,10 @@ function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast:
       {expanded && (
         <div className="ml-3 pl-3 border-l border-border/40 space-y-0">
           {depth0.map((entry, i) => (
-            <ActivityLine key={`d0-${i}`} entry={entry} isLatest={isLast && i === depth0.length - 1 && childEntries.length === 0} depth={0} />
+            <ActivityLine key={`d0-${i}`} entry={entry} isLatest={isLast && i === depth0.length - 1 && childEntries.length === 0} depth={0} isPreviousRun={group.isPreviousRun} />
           ))}
           {childEntries.length > 0 && (
-            <ChildEntries entries={childEntries} isLastGroup={isLast} />
+            <ChildEntries entries={childEntries} isLastGroup={isLast} isPreviousRun={group.isPreviousRun} />
           )}
         </div>
       )}
@@ -251,7 +266,7 @@ function ActivityGroupSection({ group, isLast }: { group: ActivityGroup; isLast:
   )
 }
 
-function ChildEntries({ entries, isLastGroup }: { entries: ActivityEntry[]; isLastGroup: boolean }) {
+function ChildEntries({ entries, isLastGroup, isPreviousRun }: { entries: ActivityEntry[]; isLastGroup: boolean; isPreviousRun?: boolean }) {
   const segmentGroups = useMemo(() => {
     const groups: { label: string; items: ActivityEntry[] }[] = []
     let currentLabel = ""
@@ -278,19 +293,20 @@ function ChildEntries({ entries, isLastGroup }: { entries: ActivityEntry[]; isLa
           key={gi}
           group={sg}
           isLast={isLastGroup && gi === segmentGroups.length - 1}
+          isPreviousRun={isPreviousRun}
         />
       ))}
     </div>
   )
 }
 
-function SegmentGroup({ group, isLast }: { group: { label: string; items: ActivityEntry[] }; isLast: boolean }) {
+function SegmentGroup({ group, isLast, isPreviousRun }: { group: { label: string; items: ActivityEntry[] }; isLast: boolean; isPreviousRun?: boolean }) {
   const [expanded, setExpanded] = useState(true)
   const header = group.items[0]
   const children = group.items.slice(1)
 
   if (group.items.length === 1) {
-    return <ActivityLine entry={header} isLatest={isLast} depth={1} />
+    return <ActivityLine entry={header} isLatest={isLast} depth={1} isPreviousRun={isPreviousRun} />
   }
 
   return (
@@ -314,7 +330,7 @@ function SegmentGroup({ group, isLast }: { group: { label: string; items: Activi
       {expanded && children.length > 0 && (
         <div className="ml-4 pl-2.5 border-l border-border/30 space-y-0">
           {children.map((e, i) => (
-            <ActivityLine key={i} entry={e} isLatest={isLast && i === children.length - 1} depth={(e.depth || 2)} />
+            <ActivityLine key={i} entry={e} isLatest={isLast && i === children.length - 1} depth={(e.depth || 2)} isPreviousRun={isPreviousRun} />
           ))}
         </div>
       )}
@@ -322,11 +338,23 @@ function SegmentGroup({ group, isLast }: { group: { label: string; items: Activi
   )
 }
 
-function ActivityLine({ entry, isLatest, depth }: { entry: ActivityEntry; isLatest: boolean; depth: number }) {
+function ActivityLine({ entry, isLatest, depth, isPreviousRun }: { entry: ActivityEntry; isLatest: boolean; depth: number; isPreviousRun?: boolean }) {
+  const isResumeSeparator = entry.text.startsWith("─── Resumed from")
+
+  if (isResumeSeparator) {
+    return (
+      <div className="flex items-center gap-3 py-2 my-1">
+        <div className="flex-1 h-px bg-amber-500/30" />
+        <span className="text-[10px] font-semibold text-amber-400 whitespace-nowrap">{entry.text}</span>
+        <div className="flex-1 h-px bg-amber-500/30" />
+      </div>
+    )
+  }
+
   return (
     <div className={cn(
       "flex items-start gap-2 py-1 transition-opacity duration-300",
-      isLatest ? "opacity-100" : "opacity-70",
+      isPreviousRun ? "opacity-40" : isLatest ? "opacity-100" : "opacity-70",
       depth >= 2 && "ml-1",
       depth >= 3 && "ml-2",
     )}>
@@ -384,11 +412,21 @@ function ActivityLineInner({ entry, isLatest }: { entry: ActivityEntry; isLatest
   )
 }
 
-export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
+export function ProgressTracker({ progress, onCancel, resumedFrom }: ProgressTrackerProps) {
   const currentStageIndex = stages.findIndex((s) => s.key === progress.stage)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
   const [showHowItWorks, setShowHowItWorks] = useState(true)
+
+  const skippedStageKeys = new Set<string>()
+  if (resumedFrom === "transcripts") {
+    skippedStageKeys.add("translating")
+    skippedStageKeys.add("searching")
+  } else if (resumedFrom === "matching") {
+    skippedStageKeys.add("translating")
+    skippedStageKeys.add("searching")
+    skippedStageKeys.add("matching")
+  }
 
   useEffect(() => {
     if (logEndRef.current) {
@@ -427,24 +465,29 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
           <div className="flex gap-2">
             {stages.map((stage, index) => {
               const Icon = stage.icon
-              const isCompleted = currentStageIndex > index
-              const isCurrent = index === currentStageIndex
+              const isSkipped = skippedStageKeys.has(stage.key)
+              const isCompleted = isSkipped || currentStageIndex > index
+              const isCurrent = !isSkipped && index === currentStageIndex
               return (
                 <div
                   key={stage.key}
                   className={cn(
                     "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all",
-                    isCompleted && "bg-emerald-500/20 text-emerald-400",
+                    isSkipped && "bg-slate-500/10 text-slate-400",
+                    isCompleted && !isSkipped && "bg-emerald-500/20 text-emerald-400",
                     isCurrent && "bg-primary/20 text-primary animate-pulse",
-                    !isCompleted && !isCurrent && "bg-secondary text-muted-foreground"
+                    !isCompleted && !isCurrent && !isSkipped && "bg-secondary text-muted-foreground"
                   )}
                 >
-                  {isCompleted ? (
+                  {isSkipped ? (
+                    <Check className="w-3 h-3" />
+                  ) : isCompleted ? (
                     <Check className="w-3 h-3" />
                   ) : (
                     <Icon className="w-3 h-3" />
                   )}
                   {stage.label}
+                  {isSkipped && <span className="text-[10px] opacity-60 ml-0.5">(cached)</span>}
                 </div>
               )
             })}
@@ -472,7 +515,7 @@ export function ProgressTracker({ progress, onCancel }: ProgressTrackerProps) {
         </CardHeader>
         {showHowItWorks && (
           <CardContent className="pt-0 pb-3">
-            <PipelineFlowDiagram currentStage={progress.stage} />
+            <PipelineFlowDiagram currentStage={progress.stage} skippedStages={skippedStageKeys.size > 0 ? skippedStageKeys : undefined} />
             <div className="mt-3 px-2 py-2 bg-secondary/30 rounded-md">
               <p className="text-[10px] text-muted-foreground leading-relaxed">
                 <strong className="text-foreground/80">Example:</strong>{" "}

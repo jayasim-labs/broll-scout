@@ -16,7 +16,7 @@ from app.models.schemas import (
     LibrarySearchResponse, AgentPollRequest, AgentResultRequest,
     ProjectCreateRequest, ProjectListResponse, ProjectResponse, ProjectSummary,
     DeepSearchRequest, AddToJobRequest, FindSimilarRequest, RecategorizeRequest,
-    ExpandShotRequest, BRollShot,
+    ExpandShotRequest, BRollShot, ResumeRequest,
 )
 from app.background import run_pipeline, get_job_progress
 from app.services.storage import get_storage
@@ -178,6 +178,60 @@ async def cancel_job(
         "status": "cancelled",
         "cancelled": True,
         "cancelled_agent_task_ids": cancelled_agent_task_ids,
+    }
+
+
+CHECKPOINT_ORDER = ["segmented", "searched", "matched", "completed"]
+
+
+@app.post("/api/v1/jobs/{job_id}/resume")
+async def resume_job(
+    job_id: str,
+    body: ResumeRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _verify_key(x_api_key)
+    storage = get_storage()
+    job = await storage.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job_id in _running_tasks:
+        raise HTTPException(status_code=409, detail="Job is currently running")
+
+    if job.status == JobStatus.PROCESSING:
+        raise HTTPException(status_code=409, detail="Job is currently processing")
+
+    cp = getattr(job, "pipeline_checkpoint", None)
+    if cp == "completed":
+        raise HTTPException(status_code=400, detail="Job is already completed — nothing to resume")
+
+    required_checkpoint = "searched" if body.from_stage == "transcripts" else "matched"
+    if not cp:
+        raise HTTPException(status_code=400, detail="Job has no checkpoint — cannot resume (must run full pipeline)")
+    cp_idx = CHECKPOINT_ORDER.index(cp) if cp in CHECKPOINT_ORDER else -1
+    req_idx = CHECKPOINT_ORDER.index(required_checkpoint)
+    if cp_idx < req_idx:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resume from '{body.from_stage}': job checkpoint is '{cp}' but needs at least '{required_checkpoint}'",
+        )
+
+    task = asyncio.create_task(run_pipeline(
+        job_id,
+        resume_from=body.from_stage,
+        project_id=job.project_id,
+        title=job.title,
+        category=job.category,
+    ))
+    _running_tasks[job_id] = task
+    task.add_done_callback(lambda t: _running_tasks.pop(job_id, None))
+
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "resumed_from": body.from_stage,
+        "message": f"Resuming from {body.from_stage}",
     }
 
 

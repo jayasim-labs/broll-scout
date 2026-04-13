@@ -23,6 +23,10 @@ from app.services.usage_service import get_usage_service
 logger = logging.getLogger(__name__)
 
 _progress: Dict[str, dict] = {}
+_log_flush_state: Dict[str, dict] = {}
+
+LOG_FLUSH_INTERVAL_SEC = 30
+LOG_FLUSH_BATCH_SIZE = 10
 
 
 def get_job_progress(job_id: str) -> Optional[dict]:
@@ -57,6 +61,31 @@ def _log_activity(
     log.append(entry)
     existing["activity_log"] = log
     _progress[job_id] = existing
+
+    state = _log_flush_state.get(job_id)
+    if state:
+        state["pending"] += 1
+
+
+async def _maybe_flush_activity_log(job_id: str, force: bool = False) -> None:
+    """Flush activity log to DynamoDB if enough entries or time has passed."""
+    state = _log_flush_state.get(job_id)
+    if not state:
+        return
+    now = time.time()
+    should_flush = force or state["pending"] >= LOG_FLUSH_BATCH_SIZE or (now - state["last_flush"]) >= LOG_FLUSH_INTERVAL_SEC
+    if not should_flush:
+        return
+    log = _progress.get(job_id, {}).get("activity_log", [])
+    if not log:
+        return
+    try:
+        storage = get_storage()
+        await storage.flush_activity_log(job_id, log)
+        state["pending"] = 0
+        state["last_flush"] = now
+    except Exception:
+        logger.warning("Failed to flush activity log for %s", job_id)
 
 
 def _compact_activity_log(log: list, max_entries: int = 800) -> list:
@@ -115,14 +144,20 @@ def _compact_activity_log(log: list, max_entries: int = 800) -> list:
 
 async def run_pipeline(
     job_id: str,
-    script: str,
+    script: str = "",
     editor_id: str = "default_editor",
     enable_gemini_expansion: bool = False,
     project_id: str | None = None,
     title: str | None = None,
     category: str | None = None,
+    resume_from: str | None = None,
 ) -> None:
-    """Full pipeline: translate -> search -> match -> rank -> store."""
+    """Full pipeline: translate -> search -> match -> rank -> store.
+
+    resume_from=None  → run everything from Stage 1
+    resume_from="transcripts" → skip Stages 1-2, load from DB, start at Stage 3
+    resume_from="matching"    → skip Stages 1-3, start at Stage 4
+    """
     storage = get_storage()
     cost_tracker = get_cost_tracker()
 
@@ -131,436 +166,491 @@ async def run_pipeline(
     pipeline_cfg["enable_gemini_expansion"] = enable_gemini_expansion
 
     start_time = time.time()
-    script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
 
-    cost_tracker.start_job(job_id)
-    await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title, category=category)
+    _log_flush_state[job_id] = {"pending": 0, "last_flush": time.time()}
+
+    if not resume_from:
+        script_hash = hashlib.sha256(script.encode()).hexdigest()[:16]
+        cost_tracker.start_job(job_id)
+        await storage.create_job(job_id, script_hash, editor_id, project_id=project_id, title=title, category=category)
+    else:
+        cost_tracker.start_job(job_id)
+        await storage.update_job_status(job_id, JobStatus.PROCESSING)
+
+        previous_log = await storage.get_activity_log(job_id)
+        if previous_log:
+            existing = _progress.get(job_id, {})
+            existing["activity_log"] = list(previous_log)
+            _progress[job_id] = existing
+            _log_activity(job_id, "sparkles", f"─── Resumed from {resume_from} ───")
+
+        await storage.delete_job_results(job_id)
 
     try:
-        # --- Stage 1: Translation ---
-        _set_progress(job_id, "translating", 5, "Translating and segmenting script...")
+        if resume_from:
+            segments, script_context, script_duration, all_shots, active_segments, \
+                skipped_segments, video_pool, video_to_shots, shot_candidates = \
+                await _reconstruct_pipeline_state(job_id, storage, resume_from)
 
+            if not segments:
+                raise RuntimeError("Cannot resume: no segments found in DB for this job")
 
-        word_count = len(script.split())
-        script_duration = max(1, round(word_count / 100))
+            total_active_shots = sum(seg.broll_count for seg in active_segments)
 
-        async def _translator_progress(icon: str, text: str):
-            _log_activity(job_id, icon, text, depth=1, group="translate")
-    
+            job_data = await storage.get_job(job_id)
+            if job_data and job_data.project_id:
+                project_id = job_data.project_id
+            if job_data and job_data.category:
+                category = job_data.category
 
-        translator = TranslatorService(pipeline_settings=pipeline_cfg)
-        segments, english_translation, script_context = await translator.translate_and_segment(
-            script, job_id, on_progress=_translator_progress,
-        )
+            if resume_from == "transcripts":
+                _set_progress(job_id, "searching", 42, "Resuming from transcript fetch — using cached segmentation and search results")
+                _log_activity(job_id, "check", f"Loaded {len(segments)} segments, {len(all_shots)} shots, {len(video_pool)} candidate videos from previous run", group="search")
+            elif resume_from == "matching":
+                _set_progress(job_id, "matching", 55, "Resuming from matching — using cached segments, search results, and transcripts")
+                _log_activity(job_id, "check", f"Loaded {len(segments)} segments, {len(all_shots)} shots, {len(video_pool)} candidate videos from previous run", group="match")
 
-        translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
-        total_shots = sum(seg.broll_count for seg in segments)
-        no_broll_segs = sum(1 for seg in segments if seg.broll_count == 0)
-        _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} natural segments, {total_shots} B-roll shots needed ({no_broll_segs} host-on-camera segments)", group="translate")
-        if script_context.script_topic:
-            _log_activity(job_id, "shield", f"Context anchoring: \"{script_context.script_topic}\" — will reject clips about unrelated topics", depth=1, group="translate")
-        for i, seg in enumerate(segments, 1):
-            shot_note = f" ({seg.broll_count} shots)" if seg.broll_count > 1 else (" (no B-roll)" if seg.broll_count == 0 else "")
-            _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\"{shot_note} — {seg.visual_need}", depth=1, group="translate")
+        if not resume_from:
+            # --- Stage 1: Translation ---
+            _set_progress(job_id, "translating", 5, "Translating and segmenting script...")
 
-        await storage.store_segments(job_id, segments)
-        await storage.update_job_status(
-            job_id, JobStatus.PROCESSING,
-            segment_count=len(segments),
-            script_duration_minutes=script_duration,
-            english_translation=english_translation,
-            script_context=script_context.model_dump() if script_context.script_topic else None,
-        )
+            word_count = len(script.split())
+            script_duration = max(1, round(word_count / 100))
 
-        # ══════════════════════════════════════════════════
-        # Stage 2: Streaming Search + Transcript Fetch (overlapping)
-        # As each search finds a new video, its transcript starts
-        # fetching immediately. Matching waits for everything to complete.
-        # ══════════════════════════════════════════════════
+            async def _translator_progress(icon: str, text: str):
+                _log_activity(job_id, icon, text, depth=1, group="translate")
 
-        active_segments = [seg for seg in segments if seg.broll_count > 0]
-        skipped_segments = [seg for seg in segments if seg.broll_count == 0]
-        total_active_shots = sum(seg.broll_count for seg in active_segments)
+            translator = TranslatorService(pipeline_settings=pipeline_cfg)
+            segments, english_translation, script_context = await translator.translate_and_segment(
+                script, job_id, on_progress=_translator_progress,
+            )
 
-        all_shots: List[Tuple[Segment, BRollShot]] = []
-        for seg in active_segments:
-            shots_to_use = seg.broll_shots if seg.broll_shots else []
-            if not shots_to_use:
-                shots_to_use = [BRollShot(
-                    shot_id=f"{seg.segment_id}_shot_1",
-                    visual_need=seg.visual_need,
-                    search_queries=seg.search_queries,
-                    key_terms=seg.key_terms,
-                )]
-            for shot in shots_to_use:
-                all_shots.append((seg, shot))
+            translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
+            total_shots = sum(seg.broll_count for seg in segments)
+            no_broll_segs = sum(1 for seg in segments if seg.broll_count == 0)
+            _log_activity(job_id, "brain", f"Translation done via {translation_model}! Your ~{script_duration}-minute script → {len(segments)} natural segments, {total_shots} B-roll shots needed ({no_broll_segs} host-on-camera segments)", group="translate")
+            if script_context.script_topic:
+                _log_activity(job_id, "shield", f"Context anchoring: \"{script_context.script_topic}\" — will reject clips about unrelated topics", depth=1, group="translate")
+            for i, seg in enumerate(segments, 1):
+                shot_note = f" ({seg.broll_count} shots)" if seg.broll_count > 1 else (" (no B-roll)" if seg.broll_count == 0 else "")
+                _log_activity(job_id, "sparkles", f"Scene {i}: \"{seg.title}\"{shot_note} — {seg.visual_need}", depth=1, group="translate")
 
-        num_batches = max(1, len(all_shots) // 4)
-        est_search_sec = len(all_shots) * 12 + num_batches * 80
-        est_min = est_search_sec // 60
-        est_sec = est_search_sec % 60
-        est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
-        _set_progress(job_id, "searching", 20, f"Searching YouTube for {len(all_shots)} B-roll shots...")
-        sources = "yt-dlp"
-        if pipeline_cfg.get("enable_preferred_channel_search"):
-            sources = "preferred channels → " + sources
-        if enable_gemini_expansion:
-            sources += " → Gemini AI creative expansion"
-        _log_activity(job_id, "search", f"Searching {total_active_shots} shots for B-roll videos (estimated ~{est_str})", group="search")
-        _log_activity(job_id, "clock", f"Search: {sources} → transcripts fetched sequentially", depth=1, group="search")
+            await storage.store_segments(job_id, segments)
+            await storage.update_job_status(
+                job_id, JobStatus.PROCESSING,
+                segment_count=len(segments),
+                script_duration_minutes=script_duration,
+                english_translation=english_translation,
+                script_context=script_context.model_dump() if script_context.script_topic else None,
+            )
+            await storage.update_pipeline_checkpoint(job_id, "segmented")
+            await _maybe_flush_activity_log(job_id, force=True)
 
+            # ══════════════════════════════════════════════════
+            # Stage 2: Streaming Search + Transcript Fetch (overlapping)
+            # ══════════════════════════════════════════════════
+
+            active_segments = [seg for seg in segments if seg.broll_count > 0]
+            skipped_segments = [seg for seg in segments if seg.broll_count == 0]
+            total_active_shots = sum(seg.broll_count for seg in active_segments)
+
+            all_shots: List[Tuple[Segment, BRollShot]] = []
+            for seg in active_segments:
+                shots_to_use = seg.broll_shots if seg.broll_shots else []
+                if not shots_to_use:
+                    shots_to_use = [BRollShot(
+                        shot_id=f"{seg.segment_id}_shot_1",
+                        visual_need=seg.visual_need,
+                        search_queries=seg.search_queries,
+                        key_terms=seg.key_terms,
+                    )]
+                for shot in shots_to_use:
+                    all_shots.append((seg, shot))
+
+            num_batches = max(1, len(all_shots) // 4)
+            est_search_sec = len(all_shots) * 12 + num_batches * 80
+            est_min = est_search_sec // 60
+            est_sec = est_search_sec % 60
+            est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
+            _set_progress(job_id, "searching", 20, f"Searching YouTube for {len(all_shots)} B-roll shots...")
+            sources = "yt-dlp"
+            if pipeline_cfg.get("enable_preferred_channel_search"):
+                sources = "preferred channels → " + sources
+            if enable_gemini_expansion:
+                sources += " → Gemini AI creative expansion"
+            _log_activity(job_id, "search", f"Searching {total_active_shots} shots for B-roll videos (estimated ~{est_str})", group="search")
+            _log_activity(job_id, "clock", f"Search: {sources} → transcripts fetched sequentially", depth=1, group="search")
+
+            search_start = time.time()
+
+            video_pool: Dict[str, CandidateVideo] = {}
+            video_to_shots: Dict[str, List[str]] = {}
+            shot_candidates: Dict[str, List[CandidateVideo]] = {}
+            shots_searched = 0
+            search_lock = asyncio.Lock()
+            search_launched = 0
+
+            async def _search_one_shot(seg: Segment, shot: BRollShot):
+                nonlocal shots_searched, search_launched
+                short_need = shot.visual_need[:50] if shot.visual_need else shot.shot_id
+
+                async with search_lock:
+                    search_launched += 1
+                    shot_num = search_launched
+                queries = shot.search_queries or seg.search_queries or []
+                q_preview = f" — queries: {', '.join(q[:30] for q in queries[:2])}" if queries else ""
+                _log_activity(job_id, "globe",
+                    f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" — searching ...{q_preview}",
+                    depth=1, group="search")
+
+                try:
+                    cands = await searcher.search_for_shot(
+                        shot, seg, job_id=job_id,
+                        script_context=script_context,
+                    )
+                    cands = cands or []
+                    shot_candidates[shot.shot_id] = cands
+                except Exception:
+                    logger.warning("Search failed for shot %s", shot.shot_id)
+                    shot_candidates[shot.shot_id] = []
+                    cands = []
+
+                new_videos = 0
+                async with search_lock:
+                    for c in cands:
+                        vid = c.video_id
+                        if vid not in video_pool:
+                            video_pool[vid] = c
+                            video_to_shots[vid] = []
+                            new_videos += 1
+                        if shot.shot_id not in video_to_shots[vid]:
+                            video_to_shots[vid].append(shot.shot_id)
+
+                    shots_searched += 1
+                    pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
+                    elapsed_s = time.time() - search_start
+
+                    if cands:
+                        reused = len(cands) - new_videos
+                        parts = []
+                        if new_videos:
+                            parts.append(f"{new_videos} new")
+                        if reused:
+                            parts.append(f"{reused} already in pool")
+                        detail = f" ({', '.join(parts)})" if parts else ""
+                        _log_activity(job_id, "check",
+                            f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
+                            depth=1, group="search")
+                    else:
+                        _log_activity(job_id, "alert",
+                            f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → no results",
+                            depth=1, group="search")
+
+                    if shots_searched > 0:
+                        per_shot = elapsed_s / shots_searched
+                        remaining = int(per_shot * (len(all_shots) - shots_searched))
+                        time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
+                    else:
+                        time_note = ""
+                    _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
+
+                await _maybe_flush_activity_log(job_id)
+
+            # Stage 2a: Sequential search with batch pacing
+            shuffled_shots = list(all_shots)
+            random.shuffle(shuffled_shots)
+
+            SEARCH_INTER_SHOT_DELAY = 3.0
+            SEARCH_BATCH_SIZE = 4
+            SEARCH_BATCH_COOLDOWN = 75.0
+
+            for i, (seg, shot) in enumerate(shuffled_shots):
+                try:
+                    await _search_one_shot(seg, shot)
+                except Exception:
+                    logger.warning("Search failed for shot %s", shot.shot_id)
+                if i < len(shuffled_shots) - 1:
+                    shot_num = i + 1
+                    if shot_num % SEARCH_BATCH_SIZE == 0:
+                        cooldown = SEARCH_BATCH_COOLDOWN + random.uniform(5, 15)
+                        _log_activity(job_id, "clock",
+                            f"Rate-limit cooldown: pausing {int(cooldown)}s after {shot_num} shots "
+                            f"({len(shuffled_shots) - shot_num} remaining)",
+                            depth=1, group="search")
+                        await asyncio.sleep(cooldown)
+                    else:
+                        await asyncio.sleep(SEARCH_INTER_SHOT_DELAY + random.uniform(0.5, 1.5))
+
+            search_elapsed = round(time.time() - search_start, 1)
+            total_pairs = sum(len(c) for c in shot_candidates.values())
+            unique_videos = len(video_pool)
+            empty_shots = sum(1 for c in shot_candidates.values() if not c)
+            saved_fetches = total_pairs - unique_videos
+            search_min = round(search_elapsed / 60, 1)
+            search_label = f"{search_min}m" if search_min >= 1 else f"{search_elapsed}s"
+            _log_activity(job_id, "check",
+                f"Video discovery done in {search_label} — "
+                f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved)",
+                group="search")
+            if empty_shots:
+                _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
+
+            # --- Checkpoint: save candidates to each shot in broll_segments ---
+            for seg, shot in all_shots:
+                cands = shot_candidates.get(shot.shot_id, [])
+                if cands:
+                    await storage.save_shot_candidates(
+                        job_id, seg.segment_id, shot.shot_id,
+                        [c.model_dump() for c in cands],
+                    )
+            await storage.update_pipeline_checkpoint(job_id, "searched")
+            await _maybe_flush_activity_log(job_id, force=True)
+
+        # --- End of if not resume_from block ---
+        # From here, both fresh and resumed pipelines converge.
+        # Variables available: segments, script_context, script_duration,
+        # all_shots, active_segments, skipped_segments, video_pool,
+        # video_to_shots, shot_candidates, total_active_shots
+
+        unique_videos = len(video_pool)
         searcher = SearcherService(pipeline_settings=pipeline_cfg)
         transcriber = TranscriberService(pipeline_settings=pipeline_cfg)
-        search_start = time.time()
 
-        # Shared state for search dedup
-        video_pool: Dict[str, CandidateVideo] = {}
-        video_to_shots: Dict[str, List[str]] = {}
-        shot_candidates: Dict[str, List[CandidateVideo]] = {}
-        shots_searched = 0
-        search_lock = asyncio.Lock()
+        if resume_from != "matching":
+            # ══════════════════════════════════════════════════════════════
+            # Stage 2b: Transcripts — simple sequential loop (no workers)
+            # ══════════════════════════════════════════════════════════════
+            if not resume_from:
+                SEARCH_COOLDOWN_SEC = 30
+                _log_activity(job_id, "clock",
+                    f"Cooling down {SEARCH_COOLDOWN_SEC}s before transcript fetch (YouTube rate-limit buffer) ...",
+                    depth=1, group="search")
+                _set_progress(job_id, "searching", 42,
+                              f"Cooldown {SEARCH_COOLDOWN_SEC}s — YouTube rate-limit buffer before transcript fetch")
+                await asyncio.sleep(SEARCH_COOLDOWN_SEC)
 
-        search_launched = 0
+            transcript_cache: Dict[str, Optional[str]] = {}
+            transcript_sources: Dict[str, str] = {}
+            failed_fetches: set = set()
+            whisper_failure_reasons: dict[str, int] = {}
+            whisper_count = 0
 
-        async def _search_one_shot(seg: Segment, shot: BRollShot):
-            nonlocal shots_searched, search_launched
-            short_need = shot.visual_need[:50] if shot.visual_need else shot.shot_id
-
-            async with search_lock:
-                search_launched += 1
-                shot_num = search_launched
-            queries = shot.search_queries or seg.search_queries or []
-            q_preview = f" — queries: {', '.join(q[:30] for q in queries[:2])}" if queries else ""
-            _log_activity(job_id, "globe",
-                f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" — searching ...{q_preview}",
-                depth=1, group="search")
-
-            try:
-                cands = await searcher.search_for_shot(
-                    shot, seg, job_id=job_id,
-                    script_context=script_context,
-                )
-                cands = cands or []
-                shot_candidates[shot.shot_id] = cands
-            except Exception:
-                logger.warning("Search failed for shot %s", shot.shot_id)
-                shot_candidates[shot.shot_id] = []
-                cands = []
-
-            new_videos = 0
-            async with search_lock:
-                for c in cands:
-                    vid = c.video_id
-                    if vid not in video_pool:
-                        video_pool[vid] = c
-                        video_to_shots[vid] = []
-                        new_videos += 1
-                    if shot.shot_id not in video_to_shots[vid]:
-                        video_to_shots[vid].append(shot.shot_id)
-
-                shots_searched += 1
-                pct = 20 + int(20 * shots_searched / max(len(all_shots), 1))
-                elapsed_s = time.time() - search_start
-
-                if cands:
-                    reused = len(cands) - new_videos
-                    parts = []
-                    if new_videos:
-                        parts.append(f"{new_videos} new")
-                    if reused:
-                        parts.append(f"{reused} already in pool")
-                    detail = f" ({', '.join(parts)})" if parts else ""
-                    _log_activity(job_id, "check",
-                        f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → {len(cands)} candidates{detail} — {len(video_pool)} total videos",
-                        depth=1, group="search")
-                else:
-                    _log_activity(job_id, "alert",
-                        f"Shot {shot_num}/{len(all_shots)}: \"{short_need}\" → no results",
-                        depth=1, group="search")
-
-                if shots_searched > 0:
-                    per_shot = elapsed_s / shots_searched
-                    remaining = int(per_shot * (len(all_shots) - shots_searched))
-                    time_note = f" (~{remaining}s remaining)" if remaining > 0 else ""
-                else:
-                    time_note = ""
-                _set_progress(job_id, "searching", pct, f"Shot {shots_searched}/{len(all_shots)}, {len(video_pool)} videos found{time_note}")
-
-        # ══════════════════════════════════════════════════════════════
-        # Stage 2a: Search — find all candidate videos (sequential)
-        # ══════════════════════════════════════════════════════════════
-        # Process shots ONE AT A TIME with batch-level pacing.
-        # Each shot fires ~3 yt-dlp queries. YouTube's rate limit window
-        # is roughly ~15-20 requests per 2-minute window. With 3 queries
-        # per shot, we hit the limit after ~5 shots. Inserting a longer
-        # cooldown every BATCH_SIZE shots stays under the threshold.
-        shuffled_shots = list(all_shots)
-        random.shuffle(shuffled_shots)
-
-        SEARCH_INTER_SHOT_DELAY = 3.0  # seconds between shots within a batch
-        SEARCH_BATCH_SIZE = 4          # shots per batch before cooldown
-        SEARCH_BATCH_COOLDOWN = 75.0   # seconds to pause between batches
-
-        for i, (seg, shot) in enumerate(shuffled_shots):
-            try:
-                await _search_one_shot(seg, shot)
-            except Exception:
-                logger.warning("Search failed for shot %s", shot.shot_id)
-            if i < len(shuffled_shots) - 1:
-                shot_num = i + 1
-                if shot_num % SEARCH_BATCH_SIZE == 0:
-                    cooldown = SEARCH_BATCH_COOLDOWN + random.uniform(5, 15)
-                    _log_activity(job_id, "clock",
-                        f"Rate-limit cooldown: pausing {int(cooldown)}s after {shot_num} shots "
-                        f"({len(shuffled_shots) - shot_num} remaining)",
-                        depth=1, group="search")
-                    await asyncio.sleep(cooldown)
-                else:
-                    await asyncio.sleep(SEARCH_INTER_SHOT_DELAY + random.uniform(0.5, 1.5))
-
-        search_elapsed = round(time.time() - search_start, 1)
-        total_pairs = sum(len(c) for c in shot_candidates.values())
-        unique_videos = len(video_pool)
-        empty_shots = sum(1 for c in shot_candidates.values() if not c)
-        saved_fetches = total_pairs - unique_videos
-        search_min = round(search_elapsed / 60, 1)
-        search_label = f"{search_min}m" if search_min >= 1 else f"{search_elapsed}s"
-        _log_activity(job_id, "check",
-            f"Video discovery done in {search_label} — "
-            f"{total_pairs} candidate-shot pairs → {unique_videos} unique videos ({saved_fetches} duplicate fetches saved)",
-            group="search")
-        if empty_shots:
-            _log_activity(job_id, "alert", f"{empty_shots} of {len(all_shots)} shots had no candidate videos", depth=1, group="search")
-
-        # ══════════════════════════════════════════════════════════════
-        # Stage 2b: Transcripts — simple sequential loop (no workers)
-        # ══════════════════════════════════════════════════════════════
-        # Process each video one at a time: cache → captions → Whisper.
-        # The companion handles one task at a time anyway, so sequential
-        # gives identical throughput with zero concurrency bugs.
-
-        # Cooldown: search phase fires many yt-dlp queries in a short burst.
-        # YouTube rate-limits per IP; jumping straight into subtitle fetching
-        # triggers 429s. A short pause lets the rate-limit window reset.
-        SEARCH_COOLDOWN_SEC = 30
-        _log_activity(job_id, "clock",
-            f"Cooling down {SEARCH_COOLDOWN_SEC}s before transcript fetch (YouTube rate-limit buffer) ...",
-            depth=1, group="search")
-        _set_progress(job_id, "searching", 42,
-                      f"Cooldown {SEARCH_COOLDOWN_SEC}s — YouTube rate-limit buffer before transcript fetch")
-        await asyncio.sleep(SEARCH_COOLDOWN_SEC)
-
-        transcript_cache: Dict[str, Optional[str]] = {}
-        transcript_sources: Dict[str, str] = {}
-        failed_fetches: set = set()
-        whisper_failure_reasons: dict[str, int] = {}
-        whisper_count = 0
-
-        # Sort by duration (shorter first) so fast videos finish early
-        sorted_videos = sorted(
-            video_pool.values(),
-            key=lambda c: c.video_duration_seconds or 9999,
-        )
-
-        _log_activity(job_id, "clock",
-            f"Fetching transcripts for {len(sorted_videos)} videos (cache → captions → Whisper) ...",
-            group="transcript")
-
-        for i, cand in enumerate(sorted_videos):
-            vid = cand.video_id
-            yt_link = f"https://youtu.be/{vid}"
-            short_title = cand.video_title[:45]
-            dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
+            sorted_videos = sorted(
+                video_pool.values(),
+                key=lambda c: c.video_duration_seconds or 9999,
+            )
 
             _log_activity(job_id, "clock",
-                f"[{i+1}/{len(sorted_videos)}] \"{short_title}\" ({dur_min}m) — fetching transcript ... — {yt_link}",
-                depth=1, group="transcript")
+                f"Fetching transcripts for {len(sorted_videos)} videos (cache → captions → Whisper) ...",
+                group="transcript")
 
-            async def _on_whisper_start(v_id: str, dur_s: int):
-                nonlocal whisper_count
-                whisper_count += 1
-                dur_m = round(dur_s / 60, 1)
+            transcript_start = time.time()
+
+            for i, cand in enumerate(sorted_videos):
+                vid = cand.video_id
+                yt_link = f"https://youtu.be/{vid}"
+                short_title = cand.video_title[:45]
+                dur_min = round(cand.video_duration_seconds / 60, 1) if cand.video_duration_seconds else 0
+
                 _log_activity(job_id, "clock",
-                    f"🎙️ Whisper #{whisper_count} for \"{short_title}\" ({dur_m}m video) "
-                    f"— downloading audio + transcribing locally — {yt_link}",
-                    depth=2, group="transcript")
+                    f"[{i+1}/{len(sorted_videos)}] \"{short_title}\" ({dur_min}m) — fetching transcript ... — {yt_link}",
+                    depth=1, group="transcript")
 
-            try:
-                fetch_start = time.time()
-                t = await transcriber.get_transcript(
-                    vid,
-                    video_duration_seconds=cand.video_duration_seconds,
-                    job_id=job_id,
-                    on_whisper_start=_on_whisper_start,
-                )
-                fetch_elapsed = round(time.time() - fetch_start, 1)
+                async def _on_whisper_start(v_id: str, dur_s: int):
+                    nonlocal whisper_count
+                    whisper_count += 1
+                    dur_m = round(dur_s / 60, 1)
+                    _log_activity(job_id, "clock",
+                        f"🎙️ Whisper #{whisper_count} for \"{short_title}\" ({dur_m}m video) "
+                        f"— downloading audio + transcribing locally — {yt_link}",
+                        depth=2, group="transcript")
 
-                transcript_cache[vid] = t.transcript_text
-                source_label = _TRANSCRIPT_SOURCE_LABELS.get(
-                    t.transcript_source.value, t.transcript_source.value,
-                )
-                transcript_sources[vid] = source_label
-                is_whisper = "Whisper" in source_label
+                try:
+                    fetch_start = time.time()
+                    t = await transcriber.get_transcript(
+                        vid,
+                        video_duration_seconds=cand.video_duration_seconds,
+                        job_id=job_id,
+                        on_whisper_start=_on_whisper_start,
+                    )
+                    fetch_elapsed = round(time.time() - fetch_start, 1)
 
-                if t.transcript_text:
-                    timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
-                    if is_whisper:
-                        _log_activity(job_id, "check",
-                            f"✅ Whisper done for \"{short_title}\" ({dur_min}m video){timing} — {yt_link}",
-                            depth=2, group="transcript")
+                    transcript_cache[vid] = t.transcript_text
+                    source_label = _TRANSCRIPT_SOURCE_LABELS.get(
+                        t.transcript_source.value, t.transcript_source.value,
+                    )
+                    transcript_sources[vid] = source_label
+                    is_whisper = "Whisper" in source_label
+
+                    if t.transcript_text:
+                        timing = f" [{fetch_elapsed}s]" if fetch_elapsed >= 2 else ""
+                        if is_whisper:
+                            _log_activity(job_id, "check",
+                                f"✅ Whisper done for \"{short_title}\" ({dur_min}m video){timing} — {yt_link}",
+                                depth=2, group="transcript")
+                        else:
+                            _log_activity(job_id, "mic",
+                                f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}",
+                                depth=2, group="transcript")
                     else:
-                        _log_activity(job_id, "mic",
-                            f"📄 \"{short_title}\" — transcript via {source_label}{timing} — {yt_link}",
-                            depth=2, group="transcript")
-                else:
+                        failed_fetches.add(vid)
+                        affected = video_to_shots.get(vid, [])
+                        if t.whisper_attempted:
+                            reason = t.whisper_failure_reason or "audio_download_failed"
+                            whisper_failure_reasons[reason] = whisper_failure_reasons.get(reason, 0) + 1
+                            reason_labels = {
+                                "timeout": "Whisper task timed out",
+                                "transcription_timeout": "Whisper transcription exceeded 20 min limit",
+                                "no_agent": "companion agent unavailable",
+                                "audio_download_failed": "audio download failed (restricted/age-gated)",
+                                "video_fallback_failed": "audio + video fallback both failed",
+                                "all_formats_failed": "all download formats failed (restricted video)",
+                                "download_timeout": "audio download timed out",
+                            }
+                            reason_text = reason_labels.get(reason, f"Whisper failed: {reason}")
+                            _log_activity(job_id, "alert",
+                                f"✗ \"{short_title}\" ({dur_min}m video) — {reason_text} — {yt_link} (affects {len(affected)} shots)",
+                                depth=2, group="transcript")
+                        else:
+                            _log_activity(job_id, "alert",
+                                f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)",
+                                depth=2, group="transcript")
+                except Exception:
+                    logger.exception("Transcript fetch failed for %s", vid)
+                    transcript_cache[vid] = None
+                    transcript_sources[vid] = "error"
                     failed_fetches.add(vid)
-                    affected = video_to_shots.get(vid, [])
-                    if t.whisper_attempted:
-                        reason = t.whisper_failure_reason or "audio_download_failed"
-                        whisper_failure_reasons[reason] = whisper_failure_reasons.get(reason, 0) + 1
-                        reason_labels = {
-                            "timeout": "Whisper task timed out",
-                            "transcription_timeout": "Whisper transcription exceeded 20 min limit",
-                            "no_agent": "companion agent unavailable",
-                            "audio_download_failed": "audio download failed (restricted/age-gated)",
-                            "video_fallback_failed": "audio + video fallback both failed",
-                            "all_formats_failed": "all download formats failed (restricted video)",
-                            "download_timeout": "audio download timed out",
-                        }
-                        reason_text = reason_labels.get(reason, f"Whisper failed: {reason}")
-                        _log_activity(job_id, "alert",
-                            f"✗ \"{short_title}\" ({dur_min}m video) — {reason_text} — {yt_link} (affects {len(affected)} shots)",
-                            depth=2, group="transcript")
-                    else:
-                        _log_activity(job_id, "alert",
-                            f"✗ \"{short_title}\" ({dur_min}m video) — no transcript available — {yt_link} (affects {len(affected)} shots)",
-                            depth=2, group="transcript")
-            except Exception:
-                logger.exception("Transcript fetch failed for %s", vid)
-                transcript_cache[vid] = None
-                transcript_sources[vid] = "error"
-                failed_fetches.add(vid)
-                _log_activity(job_id, "alert",
-                    f"✗ \"{short_title}\" — fetch error — {yt_link}",
-                    depth=2, group="transcript")
+                    _log_activity(job_id, "alert",
+                        f"✗ \"{short_title}\" — fetch error — {yt_link}",
+                        depth=2, group="transcript")
 
-            # Progress update with ETA
-            done = i + 1
-            pct = 40 + int(15 * done / max(len(sorted_videos), 1))
-            transcript_elapsed = time.time() - search_start - SEARCH_COOLDOWN_SEC
-            if done > 0 and transcript_elapsed > 0:
-                per_video = transcript_elapsed / done
-                remaining_videos = len(sorted_videos) - done
-                eta_sec = int(per_video * remaining_videos)
-                if eta_sec >= 3600:
-                    eta_label = f" — ~{eta_sec // 3600}h {(eta_sec % 3600) // 60}m remaining"
-                elif eta_sec >= 60:
-                    eta_label = f" — ~{eta_sec // 60}m remaining"
-                elif eta_sec > 0:
-                    eta_label = f" — ~{eta_sec}s remaining"
+                done = i + 1
+                pct = 40 + int(15 * done / max(len(sorted_videos), 1))
+                transcript_elapsed = time.time() - transcript_start
+                if done > 0 and transcript_elapsed > 0:
+                    per_video = transcript_elapsed / done
+                    remaining_videos = len(sorted_videos) - done
+                    eta_sec = int(per_video * remaining_videos)
+                    if eta_sec >= 3600:
+                        eta_label = f" — ~{eta_sec // 3600}h {(eta_sec % 3600) // 60}m remaining"
+                    elif eta_sec >= 60:
+                        eta_label = f" — ~{eta_sec // 60}m remaining"
+                    elif eta_sec > 0:
+                        eta_label = f" — ~{eta_sec}s remaining"
+                    else:
+                        eta_label = ""
                 else:
                     eta_label = ""
-            else:
-                eta_label = ""
-            _set_progress(job_id, "searching", min(pct, 55),
-                          f"Transcripts: {done}/{len(sorted_videos)} fetched ({whisper_count} via Whisper){eta_label}")
+                _set_progress(job_id, "searching", min(pct, 55),
+                              f"Transcripts: {done}/{len(sorted_videos)} fetched ({whisper_count} via Whisper){eta_label}")
+                await _maybe_flush_activity_log(job_id)
 
-        total_pipeline_elapsed = round(time.time() - search_start, 1)
+            videos_with_transcript = sum(1 for v in transcript_cache.values() if v)
+            failed_count = len(failed_fetches)
 
-        videos_with_transcript = sum(1 for v in transcript_cache.values() if v)
-        failed_count = len(failed_fetches)
+            source_counts: dict[str, int] = {}
+            for src in transcript_sources.values():
+                source_counts[src] = source_counts.get(src, 0) + 1
+            whisper_ok = sum(v for k, v in source_counts.items() if "Whisper" in k)
+            cache_hits = source_counts.get("DynamoDB cache", 0)
+            yt_manual = source_counts.get("YouTube manual captions", 0)
+            yt_auto = source_counts.get("YouTube auto-captions", 0)
+            error_count = source_counts.get("error", 0)
 
-        # Transcript source breakdown
-        source_counts: dict[str, int] = {}
-        for src in transcript_sources.values():
-            source_counts[src] = source_counts.get(src, 0) + 1
-        whisper_ok = sum(v for k, v in source_counts.items() if "Whisper" in k)
-        cache_hits = source_counts.get("DynamoDB cache", 0)
-        yt_manual = source_counts.get("YouTube manual captions", 0)
-        yt_auto = source_counts.get("YouTube auto-captions", 0)
-        error_count = source_counts.get("error", 0)
+            _log_activity(job_id, "check",
+                f"Fetched transcripts for {unique_videos} videos → {videos_with_transcript} succeeded, {failed_count} failed",
+                group="transcript")
 
-        # ── Transcript & Whisper summary ──
+            breakdown_parts = []
+            if cache_hits:
+                breakdown_parts.append(f"{cache_hits} cached")
+            if yt_manual:
+                breakdown_parts.append(f"{yt_manual} YouTube captions")
+            if yt_auto:
+                breakdown_parts.append(f"{yt_auto} auto-captions")
+            if whisper_ok:
+                breakdown_parts.append(f"{whisper_ok} Whisper")
+            if failed_count:
+                breakdown_parts.append(f"{failed_count} failed")
+            if error_count:
+                breakdown_parts.append(f"{error_count} errors")
 
-        _log_activity(job_id, "check",
-            f"Fetched transcripts for {unique_videos} videos → {videos_with_transcript} succeeded, {failed_count} failed",
-            group="transcript")
+            if breakdown_parts:
+                _log_activity(job_id, "check", f"Sources: {' · '.join(breakdown_parts)}", depth=1, group="transcript")
 
-        breakdown_parts = []
-        if cache_hits:
-            breakdown_parts.append(f"{cache_hits} cached")
-        if yt_manual:
-            breakdown_parts.append(f"{yt_manual} YouTube captions")
-        if yt_auto:
-            breakdown_parts.append(f"{yt_auto} auto-captions")
-        if whisper_ok:
-            breakdown_parts.append(f"{whisper_ok} Whisper")
-        if failed_count:
-            breakdown_parts.append(f"{failed_count} failed")
-        if error_count:
-            breakdown_parts.append(f"{error_count} errors")
-
-        if breakdown_parts:
-            _log_activity(job_id, "check", f"Sources: {' · '.join(breakdown_parts)}", depth=1, group="transcript")
-
-        if whisper_count > 0:
-            whisper_failed = whisper_count - whisper_ok
-            if whisper_ok > 0 and whisper_failed == 0:
-                _log_activity(job_id, "check",
-                    f"🎙️ Whisper: all {whisper_ok} transcriptions succeeded",
-                    depth=1, group="transcript")
-            else:
-                reason_summary_parts = []
-                if whisper_failure_reasons.get("timeout"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['timeout']} timed out")
-                if whisper_failure_reasons.get("transcription_timeout"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['transcription_timeout']} transcription timed out (>20min)")
-                if whisper_failure_reasons.get("audio_download_failed"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['audio_download_failed']} audio download failed")
-                if whisper_failure_reasons.get("download_timeout"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['download_timeout']} download timed out")
-                if whisper_failure_reasons.get("video_fallback_failed"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['video_fallback_failed']} video fallback failed")
-                if whisper_failure_reasons.get("all_formats_failed"):
-                    reason_summary_parts.append(f"{whisper_failure_reasons['all_formats_failed']} restricted")
-                other_reasons = sum(v for k, v in whisper_failure_reasons.items()
-                                    if k not in ("timeout", "transcription_timeout", "audio_download_failed", "download_timeout", "video_fallback_failed", "all_formats_failed", "no_agent"))
-                if other_reasons:
-                    reason_summary_parts.append(f"{other_reasons} other")
-                reason_detail = f" ({', '.join(reason_summary_parts)})" if reason_summary_parts else ""
-
-                if whisper_ok > 0:
-                    _log_activity(job_id, "alert",
-                        f"🎙️ Whisper: {whisper_ok} succeeded, {whisper_failed} failed{reason_detail}",
+            if whisper_count > 0:
+                whisper_failed = whisper_count - whisper_ok
+                if whisper_ok > 0 and whisper_failed == 0:
+                    _log_activity(job_id, "check",
+                        f"🎙️ Whisper: all {whisper_ok} transcriptions succeeded",
                         depth=1, group="transcript")
                 else:
-                    _log_activity(job_id, "alert",
-                        f"🎙️ Whisper: all {whisper_failed} attempted transcriptions failed{reason_detail}",
-                        depth=1, group="transcript")
-        elif unique_videos > 0 and videos_with_transcript == unique_videos:
-            _log_activity(job_id, "check",
-                f"🎙️ Whisper not needed — all {unique_videos} videos had YouTube captions or cached transcripts",
-                depth=1, group="transcript")
+                    reason_summary_parts = []
+                    if whisper_failure_reasons.get("timeout"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['timeout']} timed out")
+                    if whisper_failure_reasons.get("transcription_timeout"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['transcription_timeout']} transcription timed out (>20min)")
+                    if whisper_failure_reasons.get("audio_download_failed"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['audio_download_failed']} audio download failed")
+                    if whisper_failure_reasons.get("download_timeout"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['download_timeout']} download timed out")
+                    if whisper_failure_reasons.get("video_fallback_failed"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['video_fallback_failed']} video fallback failed")
+                    if whisper_failure_reasons.get("all_formats_failed"):
+                        reason_summary_parts.append(f"{whisper_failure_reasons['all_formats_failed']} restricted")
+                    other_reasons = sum(v for k, v in whisper_failure_reasons.items()
+                                        if k not in ("timeout", "transcription_timeout", "audio_download_failed", "download_timeout", "video_fallback_failed", "all_formats_failed", "no_agent"))
+                    if other_reasons:
+                        reason_summary_parts.append(f"{other_reasons} other")
+                    reason_detail = f" ({', '.join(reason_summary_parts)})" if reason_summary_parts else ""
 
-        # High failure rate warning
-        if failed_count > 0 and unique_videos > 0:
-            fail_pct = round(failed_count / unique_videos * 100)
-            if fail_pct >= 40:
-                _log_activity(job_id, "alert",
-                    f"⚠️ {failed_count} of {unique_videos} videos ({fail_pct}%) had no transcript at all. "
-                    f"Likely restricted/age-gated videos or YouTube rate-limiting. "
-                    f"Only {videos_with_transcript} videos can proceed to matching.",
+                    if whisper_ok > 0:
+                        _log_activity(job_id, "alert",
+                            f"🎙️ Whisper: {whisper_ok} succeeded, {whisper_failed} failed{reason_detail}",
+                            depth=1, group="transcript")
+                    else:
+                        _log_activity(job_id, "alert",
+                            f"🎙️ Whisper: all {whisper_failed} attempted transcriptions failed{reason_detail}",
+                            depth=1, group="transcript")
+            elif unique_videos > 0 and videos_with_transcript == unique_videos:
+                _log_activity(job_id, "check",
+                    f"🎙️ Whisper not needed — all {unique_videos} videos had YouTube captions or cached transcripts",
                     depth=1, group="transcript")
 
-        _log_activity(job_id, "check",
-            f"Transcript phase complete — {videos_with_transcript} videos ready for timestamp matching",
-            group="transcript")
+            if failed_count > 0 and unique_videos > 0:
+                fail_pct = round(failed_count / unique_videos * 100)
+                if fail_pct >= 40:
+                    _log_activity(job_id, "alert",
+                        f"⚠️ {failed_count} of {unique_videos} videos ({fail_pct}%) had no transcript at all. "
+                        f"Likely restricted/age-gated videos or YouTube rate-limiting. "
+                        f"Only {videos_with_transcript} videos can proceed to matching.",
+                        depth=1, group="transcript")
 
-        logger.info(
-            "Job %s streaming search+fetch: %d pairs, %d unique, %d transcripts, %d failed in %.1fs | sources: %s",
-            job_id, total_pairs, unique_videos, videos_with_transcript, len(failed_fetches), total_pipeline_elapsed,
-            dict(source_counts),
-        )
+            _log_activity(job_id, "check",
+                f"Transcript phase complete — {videos_with_transcript} videos ready for timestamp matching",
+                group="transcript")
+            await _maybe_flush_activity_log(job_id, force=True)
+
+        else:
+            # resume_from == "matching": skip transcript phase, build cache from DynamoDB
+            transcript_cache = {}
+            transcript_sources = {}
+            _log_activity(job_id, "check", "Loading cached transcripts from DynamoDB...", group="transcript")
+            loaded_count = 0
+            for vid in video_pool:
+                cached = await storage.get_transcript(vid)
+                if cached and cached.transcript_text:
+                    transcript_cache[vid] = cached.transcript_text
+                    transcript_sources[vid] = _TRANSCRIPT_SOURCE_LABELS.get(
+                        cached.transcript_source.value, cached.transcript_source.value)
+                    loaded_count += 1
+                else:
+                    transcript_cache[vid] = None
+                    transcript_sources[vid] = "no transcript available"
+            videos_with_transcript = loaded_count
+            _log_activity(job_id, "check",
+                f"Loaded {loaded_count} cached transcripts for {len(video_pool)} videos",
+                group="transcript")
 
         # ══════════════════════════════════════════════════
         # Stage 3: Matching (waits for search + fetch to fully complete)
@@ -689,6 +779,9 @@ async def run_pipeline(
             f"{matches_with_result} clips from {total_match_pairs} pairs "
             f"(avg {avg_match}s per match)",
             group="match")
+
+        await storage.update_pipeline_checkpoint(job_id, "matched")
+        await _maybe_flush_activity_log(job_id, force=True)
 
         # Rank per shot, keep top clips per shot, assemble segment results
         # Session-level dedup: track used (video_id, timestamp_bucket) across all shots
@@ -965,6 +1058,7 @@ async def run_pipeline(
         _set_progress(job_id, "completed", 100, "Scouting complete!")
         _log_activity(job_id, "check", "Done! Your B-roll results are ready.", group="done")
 
+        await storage.update_pipeline_checkpoint(job_id, "completed")
         final_log = _compact_activity_log(_progress.get(job_id, {}).get("activity_log", []))
         await storage.update_job_status(
             job_id, JobStatus.COMPLETE,
@@ -988,6 +1082,7 @@ async def run_pipeline(
     except asyncio.CancelledError:
         logger.info("Job %s cancelled by user", job_id)
         _log_activity(job_id, "alert", "Job cancelled by user.")
+        await _maybe_flush_activity_log(job_id, force=True)
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
         qt = get_quota_tracker()
@@ -1011,6 +1106,7 @@ async def run_pipeline(
     except Exception as exc:
         logger.exception("Pipeline failed for job %s", job_id)
         _log_activity(job_id, "alert", f"Pipeline failed: {str(exc)[:200]}")
+        await _maybe_flush_activity_log(job_id, force=True)
         elapsed = round(time.time() - start_time, 2)
         api_costs = cost_tracker.end_job(job_id) or {}
         qt = get_quota_tracker()
@@ -1032,10 +1128,97 @@ async def run_pipeline(
         _set_progress(job_id, "failed", 0, "Pipeline failed")
 
     finally:
+        _log_flush_state.pop(job_id, None)
         try:
             await get_usage_service().recalculate()
         except Exception:
             logger.warning("Failed to recalculate usage after job %s", job_id)
+
+
+async def _reconstruct_pipeline_state(
+    job_id: str,
+    storage,
+    resume_from: str,
+) -> Tuple[
+    List[Segment],           # segments
+    ScriptContext,           # script_context
+    int,                     # script_duration
+    List[Tuple["Segment", BRollShot]],  # all_shots
+    List[Segment],           # active_segments
+    List[Segment],           # skipped_segments
+    Dict[str, CandidateVideo],  # video_pool
+    Dict[str, List[str]],    # video_to_shots
+    Dict[str, List[CandidateVideo]],  # shot_candidates
+]:
+    """Reconstruct the in-memory pipeline state from DynamoDB for resume."""
+    seg_items = await storage.get_segments_with_candidates(job_id)
+    if not seg_items:
+        return [], ScriptContext(), 0, [], [], [], {}, {}, {}
+
+    segments = []
+    for item in seg_items:
+        broll_shots_raw = item.get("broll_shots", [])
+        broll_shots = [BRollShot(**s) for s in broll_shots_raw] if broll_shots_raw else []
+        seg = Segment(
+            segment_id=item.get("segment_id", "seg_001"),
+            title=item.get("title", ""),
+            summary=item.get("summary", ""),
+            visual_need=item.get("visual_need", ""),
+            emotional_tone=item.get("emotional_tone", ""),
+            key_terms=item.get("key_terms", []),
+            search_queries=item.get("search_queries", []),
+            estimated_duration_seconds=int(item.get("estimated_duration_seconds", 60)),
+            context_anchor=item.get("context_anchor", ""),
+            negative_keywords=item.get("negative_keywords", []),
+            broll_count=int(item.get("broll_count", 1)),
+            broll_shots=broll_shots,
+            broll_note=item.get("broll_note"),
+        )
+        segments.append(seg)
+
+    job_data = await storage.get_job(job_id)
+    script_context = job_data.script_context if job_data and job_data.script_context else ScriptContext()
+    script_duration = job_data.script_duration_minutes if job_data else 0
+
+    active_segments = [seg for seg in segments if seg.broll_count > 0]
+    skipped_segments = [seg for seg in segments if seg.broll_count == 0]
+
+    all_shots: List[Tuple[Segment, BRollShot]] = []
+    for seg in active_segments:
+        shots_to_use = seg.broll_shots if seg.broll_shots else []
+        if not shots_to_use:
+            shots_to_use = [BRollShot(
+                shot_id=f"{seg.segment_id}_shot_1",
+                visual_need=seg.visual_need,
+                search_queries=seg.search_queries,
+                key_terms=seg.key_terms,
+            )]
+        for shot in shots_to_use:
+            all_shots.append((seg, shot))
+
+    video_pool: Dict[str, CandidateVideo] = {}
+    video_to_shots: Dict[str, List[str]] = {}
+    shot_candidates: Dict[str, List[CandidateVideo]] = {}
+
+    for seg, shot in all_shots:
+        raw_candidates = shot.candidates or []
+        cands: List[CandidateVideo] = []
+        for c in raw_candidates:
+            try:
+                cand = CandidateVideo(**{k: v for k, v in c.items() if k in CandidateVideo.model_fields})
+                cands.append(cand)
+                vid = cand.video_id
+                if vid not in video_pool:
+                    video_pool[vid] = cand
+                    video_to_shots[vid] = []
+                if shot.shot_id not in video_to_shots[vid]:
+                    video_to_shots[vid].append(shot.shot_id)
+            except Exception:
+                logger.warning("Failed to reconstruct candidate for shot %s", shot.shot_id)
+        shot_candidates[shot.shot_id] = cands
+
+    return segments, script_context, script_duration, all_shots, active_segments, \
+        skipped_segments, video_pool, video_to_shots, shot_candidates
 
 
 def _validate_shot_coverage(

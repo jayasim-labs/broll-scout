@@ -1938,6 +1938,529 @@ class TestTypeScriptConsistency:
         assert "minimum_results_met" not in content
 
 
+# ---------------------------------------------------------------------------
+# 19g-pre. Heartbeat isolation & task-claim safety
+# ---------------------------------------------------------------------------
+
+class TestHeartbeatDoesNotClaimTasks:
+    """Regression tests for the bug where heartbeat polls were claiming tasks
+    and discarding them, causing the pipeline to stall indefinitely.
+
+    The fix: heartbeat sends `heartbeat_only: true` to the backend, which
+    records the agent as alive but returns zero tasks.
+    """
+
+    @pytest.fixture
+    def client(self):
+        from httpx import AsyncClient, ASGITransport
+        from app.main import app
+        transport = ASGITransport(app=app)
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_only_returns_no_tasks(self, client):
+        """heartbeat_only=true should return empty tasks list even when tasks exist."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("whisper", {
+            "video_id": "test-vid", "max_duration_min": 60,
+        }, job_id="job-hb-test")
+
+        async with client as c:
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent",
+                "job_id": "job-hb-test",
+                "heartbeat_only": True,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["tasks"] == []
+
+        # Task should still be pending (not claimed)
+        status = await agent_queue.get_queue_status()
+        assert status["pending_tasks"] >= 1
+
+        # Clean up
+        await agent_queue.submit_result(task_id, "completed", [{"transcript": "test"}])
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_keeps_agent_alive(self, client):
+        """heartbeat_only=true should still register the agent as active."""
+        from app.utils import agent_queue
+
+        async with client as c:
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "hb-agent",
+                "job_id": "job-alive-test",
+                "heartbeat_only": True,
+            })
+            assert resp.status_code == 200
+
+        assert agent_queue.is_agent_available(job_id="job-alive-test")
+
+    @pytest.mark.asyncio
+    async def test_normal_poll_still_claims_tasks(self, client):
+        """A normal poll (heartbeat_only=false) should still claim tasks."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("search", {
+            "query": "test", "max_results": 5,
+        }, job_id="job-poll-test")
+
+        async with client as c:
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent",
+                "job_id": "job-poll-test",
+                "heartbeat_only": False,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["tasks"]) >= 1
+            assert data["tasks"][0]["task_id"] == task_id
+
+        await agent_queue.submit_result(task_id, "completed", [{"video_id": "v1"}])
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_does_not_steal_whisper_task(self, client):
+        """Reproduces the exact production bug: heartbeat runs during a slow
+        transcript fetch, a Whisper task is created, and heartbeat must NOT
+        claim it. The subsequent normal poll should claim and complete it."""
+        from app.utils import agent_queue
+
+        whisper_task_id = await agent_queue.create_task("whisper", {
+            "video_id": "-Je-OYRdlJg",
+            "max_duration_min": 60,
+            "whisper_model": "large-v3-turbo",
+        }, job_id="job-whisper-bug")
+
+        async with client as c:
+            # Heartbeat fires multiple times (simulating 8s intervals)
+            for _ in range(5):
+                resp = await c.post("/api/v1/agent/poll", json={
+                    "agent_id": "browser-agent",
+                    "job_id": "job-whisper-bug",
+                    "heartbeat_only": True,
+                })
+                assert resp.json()["tasks"] == []
+
+            # The Whisper task must still be pending
+            async with agent_queue._lock:
+                task = agent_queue._pending.get(whisper_task_id)
+                assert task is not None, "Whisper task was stolen by heartbeat"
+                assert task["status"] == "pending"
+
+            # Now a normal poll claims it
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent",
+                "job_id": "job-whisper-bug",
+            })
+            tasks = resp.json()["tasks"]
+            assert len(tasks) >= 1
+            assert tasks[0]["task_id"] == whisper_task_id
+            assert tasks[0]["task_type"] == "whisper"
+
+        # Submit result
+        whisper_transcript = "0:00 Fractional Reserve Banking explained"
+        async def submit_soon():
+            await asyncio.sleep(0.05)
+            await agent_queue.submit_result(whisper_task_id, "completed", [
+                {"video_id": "-Je-OYRdlJg", "transcript": whisper_transcript, "source": "whisper_transcription"}
+            ])
+
+        asyncio.create_task(submit_soon())
+        results = await agent_queue.wait_for_result(whisper_task_id, timeout=5)
+        assert len(results) == 1
+        assert results[0]["transcript"] == whisper_transcript
+
+    @pytest.mark.asyncio
+    async def test_concurrent_heartbeats_and_polls_isolation(self, client):
+        """Multiple heartbeats and polls running concurrently should not interfere.
+        Only polls should claim tasks; heartbeats must never claim."""
+        from app.utils import agent_queue
+
+        task_ids = []
+        for i in range(3):
+            tid = await agent_queue.create_task("transcript", {
+                "video_id": f"vid_{i}",
+            }, job_id="job-concurrent")
+            task_ids.append(tid)
+
+        async with client as c:
+            # Fire 10 heartbeats concurrently
+            heartbeat_coros = []
+            for _ in range(10):
+                heartbeat_coros.append(
+                    c.post("/api/v1/agent/poll", json={
+                        "agent_id": "browser-agent",
+                        "job_id": "job-concurrent",
+                        "heartbeat_only": True,
+                    })
+                )
+            responses = await asyncio.gather(*heartbeat_coros)
+            for resp in responses:
+                assert resp.json()["tasks"] == []
+
+            # All 3 tasks should still be pending
+            async with agent_queue._lock:
+                for tid in task_ids:
+                    task = agent_queue._pending.get(tid)
+                    assert task is not None, f"Task {tid} was stolen"
+                    assert task["status"] == "pending"
+
+            # One normal poll claims all 3
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent",
+                "job_id": "job-concurrent",
+            })
+            claimed = resp.json()["tasks"]
+            assert len(claimed) == 3
+
+        for tid in task_ids:
+            await agent_queue.submit_result(tid, "completed", [])
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_without_heartbeat_flag_backward_compat(self, client):
+        """Old Workers that don't send heartbeat_only should still work (they claim tasks)."""
+        from app.utils import agent_queue
+
+        task_id = await agent_queue.create_task("search", {
+            "query": "backward compat",
+        }, job_id="job-compat")
+
+        async with client as c:
+            # Old-style poll without heartbeat_only field
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "old-agent",
+                "job_id": "job-compat",
+            })
+            tasks = resp.json()["tasks"]
+            assert len(tasks) >= 1
+
+        await agent_queue.submit_result(task_id, "completed", [])
+
+
+class TestTaskQueueNotDropped:
+    """Tests that the poll loop properly queues tasks instead of dropping them
+    when the worker is busy executing another task."""
+
+    @pytest.mark.asyncio
+    async def test_sequential_tasks_all_complete(self):
+        """Create multiple tasks sequentially — all should eventually complete."""
+        from app.utils import agent_queue
+
+        # Create 5 tasks for the same job
+        task_ids = []
+        for i in range(5):
+            tid = await agent_queue.create_task("transcript", {
+                "video_id": f"vid_{i}",
+            }, job_id="job-queue-test")
+            task_ids.append(tid)
+
+        # Simulate agent claiming and completing them one by one
+        async def agent_loop():
+            completed = 0
+            for _ in range(20):
+                await asyncio.sleep(0.02)
+                tasks = await agent_queue.poll_tasks("queue-agent", max_tasks=2, job_id="job-queue-test")
+                for task in tasks:
+                    await asyncio.sleep(0.01)  # simulate work
+                    await agent_queue.submit_result(task["task_id"], "completed", [
+                        {"video_id": task["payload"]["video_id"], "transcript": "text"}
+                    ])
+                    completed += 1
+                if completed >= 5:
+                    break
+
+        consumer = asyncio.create_task(agent_loop())
+
+        # Wait for all results
+        results_list = await asyncio.gather(
+            *[agent_queue.wait_for_result(tid, timeout=10) for tid in task_ids]
+        )
+        consumer.cancel()
+        try:
+            await consumer
+        except asyncio.CancelledError:
+            pass
+
+        for i, results in enumerate(results_list):
+            assert len(results) >= 1, f"Task {i} (vid_{i}) got no results"
+            assert results[0]["video_id"] == f"vid_{i}"
+
+    @pytest.mark.asyncio
+    async def test_whisper_task_not_blocked_by_transcript_task(self):
+        """A Whisper task created while a transcript task is running should
+        not be stuck — it should be picked up after the transcript task completes."""
+        from app.utils import agent_queue
+
+        transcript_tid = await agent_queue.create_task("transcript", {
+            "video_id": "vid-1",
+        }, job_id="job-block-test")
+
+        whisper_tid = await agent_queue.create_task("whisper", {
+            "video_id": "vid-1", "max_duration_min": 60,
+        }, job_id="job-block-test")
+
+        # Agent claims transcript first (it was created first)
+        tasks = await agent_queue.poll_tasks("block-agent", max_tasks=1, job_id="job-block-test")
+        assert len(tasks) == 1
+        assert tasks[0]["task_type"] == "transcript"
+
+        # Whisper should still be pending
+        async with agent_queue._lock:
+            w_task = agent_queue._pending.get(whisper_tid)
+            assert w_task is not None
+            assert w_task["status"] == "pending"
+
+        # Complete the transcript task
+        await agent_queue.submit_result(transcript_tid, "completed", [
+            {"video_id": "vid-1", "transcript": None, "source": "no_transcript"}
+        ])
+
+        # Now poll again — should get the Whisper task
+        tasks2 = await agent_queue.poll_tasks("block-agent", max_tasks=1, job_id="job-block-test")
+        assert len(tasks2) == 1
+        assert tasks2[0]["task_type"] == "whisper"
+        assert tasks2[0]["task_id"] == whisper_tid
+
+        # Complete whisper
+        async def submit_whisper():
+            await asyncio.sleep(0.05)
+            await agent_queue.submit_result(whisper_tid, "completed", [
+                {"video_id": "vid-1", "transcript": "Whisper text", "source": "whisper_transcription"}
+            ])
+
+        asyncio.create_task(submit_whisper())
+        results = await agent_queue.wait_for_result(whisper_tid, timeout=5)
+        assert len(results) == 1
+        assert results[0]["transcript"] == "Whisper text"
+
+
+class TestHeartbeatFunction:
+    """Unit tests for the new agent_queue.heartbeat() function."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_registers_agent(self):
+        from app.utils import agent_queue
+
+        await agent_queue.heartbeat("test-hb-agent", job_id="job-hb-unit")
+
+        assert agent_queue.is_agent_available(job_id="job-hb-unit")
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_does_not_modify_pending_tasks(self):
+        from app.utils import agent_queue
+
+        tid = await agent_queue.create_task("search", {"query": "test"}, job_id="job-hb-pending")
+
+        async with agent_queue._lock:
+            before_status = agent_queue._pending[tid]["status"]
+
+        await agent_queue.heartbeat("test-hb-agent", job_id="job-hb-pending")
+
+        async with agent_queue._lock:
+            after_status = agent_queue._pending[tid]["status"]
+
+        assert before_status == "pending"
+        assert after_status == "pending"
+
+        # Clean up
+        tasks = await agent_queue.poll_tasks("cleanup-agent", job_id="job-hb-pending")
+        for t in tasks:
+            await agent_queue.submit_result(t["task_id"], "completed", [])
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_updates_both_job_and_global(self):
+        """heartbeat should update both (agent_id, job_id) and (agent_id, None) entries."""
+        from app.utils import agent_queue
+        import time
+
+        await agent_queue.heartbeat("dual-agent", job_id="job-dual")
+
+        async with agent_queue._lock:
+            now = time.time()
+            job_ts = agent_queue._active_agents.get(("dual-agent", "job-dual"))
+            global_ts = agent_queue._active_agents.get(("dual-agent", None))
+
+        assert job_ts is not None
+        assert global_ts is not None
+        assert now - job_ts < 2
+        assert now - global_ts < 2
+
+
+class TestFullWhisperRelayWithHeartbeat:
+    """End-to-end test simulating the real-world scenario:
+    1. Backend creates transcript task
+    2. Agent claims and sends to companion (429 on captions → no_transcript)
+    3. Backend creates Whisper task
+    4. Heartbeats fire throughout (must NOT steal tasks)
+    5. Agent claims Whisper task and completes it
+    """
+
+    @pytest.fixture
+    def client(self):
+        from httpx import AsyncClient, ASGITransport
+        from app.main import app
+        transport = ASGITransport(app=app)
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    @pytest.mark.asyncio
+    async def test_full_transcript_to_whisper_relay(self, client):
+        from app.utils import agent_queue
+
+        job_id = "job-full-relay"
+
+        # Step 1: Backend creates caption task
+        caption_tid = await agent_queue.create_task("transcript", {
+            "video_id": "-Je-OYRdlJg", "languages": ["en"],
+        }, job_id=job_id)
+
+        async with client as c:
+            # Step 2: Agent poll claims it
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent", "job_id": job_id,
+            })
+            tasks = resp.json()["tasks"]
+            assert len(tasks) == 1
+            assert tasks[0]["task_type"] == "transcript"
+
+            # Step 3: Heartbeats fire while companion is stuck on 429s
+            for _ in range(10):
+                resp = await c.post("/api/v1/agent/poll", json={
+                    "agent_id": "browser-agent",
+                    "job_id": job_id,
+                    "heartbeat_only": True,
+                })
+                assert resp.json()["tasks"] == []
+
+            # Step 4: Companion returns no_transcript (all 429s)
+            await agent_queue.submit_result(caption_tid, "completed", [
+                {"video_id": "-Je-OYRdlJg", "transcript": None, "source": "no_transcript"}
+            ])
+
+            # Step 5: Backend creates Whisper task
+            whisper_tid = await agent_queue.create_task("whisper", {
+                "video_id": "-Je-OYRdlJg",
+                "max_duration_min": 60,
+                "whisper_model": "large-v3-turbo",
+            }, job_id=job_id)
+
+            # Step 6: More heartbeats (must not steal Whisper task!)
+            for _ in range(5):
+                resp = await c.post("/api/v1/agent/poll", json={
+                    "agent_id": "browser-agent",
+                    "job_id": job_id,
+                    "heartbeat_only": True,
+                })
+                assert resp.json()["tasks"] == []
+
+            # Step 7: Normal poll claims the Whisper task
+            resp = await c.post("/api/v1/agent/poll", json={
+                "agent_id": "browser-agent", "job_id": job_id,
+            })
+            tasks = resp.json()["tasks"]
+            assert len(tasks) == 1
+            assert tasks[0]["task_id"] == whisper_tid
+            assert tasks[0]["task_type"] == "whisper"
+
+        # Step 8: Agent completes Whisper
+        whisper_text = "0:00 How $ and Fractional Reserve Banking Work..."
+        async def finish_whisper():
+            await asyncio.sleep(0.05)
+            await agent_queue.submit_result(whisper_tid, "completed", [
+                {"video_id": "-Je-OYRdlJg", "transcript": whisper_text, "source": "whisper_transcription"}
+            ])
+
+        asyncio.create_task(finish_whisper())
+        results = await agent_queue.wait_for_result(whisper_tid, timeout=5)
+
+        assert len(results) == 1
+        assert results[0]["transcript"] == whisper_text
+        assert results[0]["source"] == "whisper_transcription"
+
+    @pytest.mark.asyncio
+    async def test_multi_video_transcript_pipeline(self, client):
+        """Simulate fetching transcripts for multiple videos sequentially,
+        where some need Whisper fallback, with heartbeats throughout."""
+        from app.utils import agent_queue
+
+        job_id = "job-multi-video"
+        videos = [
+            {"id": "vid-A", "has_captions": True},
+            {"id": "vid-B", "has_captions": False},  # needs Whisper
+            {"id": "vid-C", "has_captions": True},
+        ]
+
+        completed_transcripts = {}
+
+        async with client as c:
+            for video in videos:
+                # Create caption task
+                cap_tid = await agent_queue.create_task("transcript", {
+                    "video_id": video["id"], "languages": ["en"],
+                }, job_id=job_id)
+
+                # Agent claims it
+                resp = await c.post("/api/v1/agent/poll", json={
+                    "agent_id": "browser-agent", "job_id": job_id,
+                })
+                claimed = resp.json()["tasks"]
+                assert len(claimed) >= 1
+
+                # Heartbeat fires
+                await c.post("/api/v1/agent/poll", json={
+                    "agent_id": "browser-agent", "job_id": job_id,
+                    "heartbeat_only": True,
+                })
+
+                if video["has_captions"]:
+                    await agent_queue.submit_result(cap_tid, "completed", [
+                        {"video_id": video["id"], "transcript": f"Captions for {video['id']}", "source": "youtube_captions"}
+                    ])
+                    results = await agent_queue.wait_for_result(cap_tid, timeout=2)
+                    completed_transcripts[video["id"]] = results[0]["transcript"]
+                else:
+                    await agent_queue.submit_result(cap_tid, "completed", [
+                        {"video_id": video["id"], "transcript": None, "source": "no_transcript"}
+                    ])
+                    await agent_queue.wait_for_result(cap_tid, timeout=2)
+
+                    # Backend creates Whisper task
+                    w_tid = await agent_queue.create_task("whisper", {
+                        "video_id": video["id"], "max_duration_min": 60,
+                    }, job_id=job_id)
+
+                    # Heartbeats must not steal it
+                    for _ in range(3):
+                        resp = await c.post("/api/v1/agent/poll", json={
+                            "agent_id": "browser-agent", "job_id": job_id,
+                            "heartbeat_only": True,
+                        })
+                        assert resp.json()["tasks"] == []
+
+                    # Normal poll claims Whisper
+                    resp = await c.post("/api/v1/agent/poll", json={
+                        "agent_id": "browser-agent", "job_id": job_id,
+                    })
+                    w_tasks = resp.json()["tasks"]
+                    assert len(w_tasks) == 1
+                    assert w_tasks[0]["task_type"] == "whisper"
+
+                    async def submit_w(vid_id=video["id"], tid=w_tid):
+                        await asyncio.sleep(0.05)
+                        await agent_queue.submit_result(tid, "completed", [
+                            {"video_id": vid_id, "transcript": f"Whisper for {vid_id}", "source": "whisper_transcription"}
+                        ])
+                    asyncio.create_task(submit_w())
+                    results = await agent_queue.wait_for_result(w_tid, timeout=5)
+                    completed_transcripts[video["id"]] = results[0]["transcript"]
+
+        assert len(completed_transcripts) == 3
+        assert "Captions for vid-A" == completed_transcripts["vid-A"]
+        assert "Whisper for vid-B" == completed_transcripts["vid-B"]
+        assert "Captions for vid-C" == completed_transcripts["vid-C"]
+
+
 class TestGeminiExpansionToggle:
 
     def test_default_gemini_expansion_off(self):

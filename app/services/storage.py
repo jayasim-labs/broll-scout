@@ -107,6 +107,7 @@ class StorageService:
             "segment_count", "result_count", "english_translation",
             "script_duration_minutes", "coverage_assessment", "warnings",
             "activity_log", "script_context",
+            "pipeline_checkpoint", "checkpoint_at",
         ):
             if param in kwargs:
                 safe = param.replace("_", "")
@@ -127,6 +128,92 @@ class StorageService:
             )
         except ClientError:
             logger.exception("Failed to update job %s", job_id)
+
+    async def update_pipeline_checkpoint(self, job_id: str, checkpoint: str) -> None:
+        """Update the job's pipeline checkpoint and timestamp."""
+        try:
+            await self._run(
+                self._table("jobs").update_item,
+                Key={"job_id": job_id},
+                UpdateExpression="SET pipeline_checkpoint = :cp, checkpoint_at = :ts",
+                ExpressionAttributeValues={
+                    ":cp": checkpoint,
+                    ":ts": datetime.utcnow().isoformat(),
+                },
+            )
+        except ClientError:
+            logger.exception("Failed to update checkpoint for %s", job_id)
+
+    async def save_shot_candidates(
+        self, job_id: str, segment_id: str, shot_id: str, candidates: List[dict],
+    ) -> None:
+        """Update a specific shot's candidates within the segment item."""
+        try:
+            seg_resp = await self._run(
+                self._table("segments").get_item,
+                Key={"job_id": job_id, "segment_id": segment_id},
+            )
+            item = seg_resp.get("Item")
+            if not item:
+                logger.warning("Segment %s/%s not found for candidate save", job_id, segment_id)
+                return
+            shots = item.get("broll_shots", [])
+            for shot in shots:
+                if shot.get("shot_id") == shot_id:
+                    shot["candidates"] = _to_dynamo(candidates)
+                    break
+            await self._run(
+                self._table("segments").update_item,
+                Key={"job_id": job_id, "segment_id": segment_id},
+                UpdateExpression="SET broll_shots = :bs",
+                ExpressionAttributeValues={":bs": shots},
+            )
+        except ClientError:
+            logger.exception("Failed to save candidates for %s/%s/%s", job_id, segment_id, shot_id)
+
+    async def get_segments_with_candidates(self, job_id: str) -> List[dict]:
+        """Load all segments for a job, including candidate data on each shot."""
+        try:
+            seg_resp = await self._run(
+                self._table("segments").query,
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+            )
+            return seg_resp.get("Items", [])
+        except ClientError:
+            logger.exception("Failed to load segments for resume %s", job_id)
+            return []
+
+    async def delete_job_results(self, job_id: str) -> None:
+        """Delete all result items for a job (used before resume to avoid stale data)."""
+        try:
+            res_resp = await self._run(
+                self._table("results").query,
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("job_id").eq(job_id),
+                ProjectionExpression="job_id, result_id",
+            )
+            items = res_resp.get("Items", [])
+            if items:
+                table = self._table("results")
+                for i in range(0, len(items), 25):
+                    batch = items[i:i + 25]
+                    with table.batch_writer() as writer:
+                        for item in batch:
+                            writer.delete_item(Key={"job_id": item["job_id"], "result_id": item["result_id"]})
+                logger.info("Deleted %d results for job %s before resume", len(items), job_id)
+        except ClientError:
+            logger.exception("Failed to delete results for %s", job_id)
+
+    async def flush_activity_log(self, job_id: str, activity_log: list) -> None:
+        """Persist activity log entries to the job record incrementally."""
+        try:
+            await self._run(
+                self._table("jobs").update_item,
+                Key={"job_id": job_id},
+                UpdateExpression="SET activity_log = :al",
+                ExpressionAttributeValues={":al": _to_dynamo(activity_log)},
+            )
+        except ClientError:
+            logger.exception("Failed to flush activity log for %s", job_id)
 
     async def get_activity_log(self, job_id: str) -> list:
         try:
@@ -274,6 +361,8 @@ class StorageService:
                 category=item.get("category"),
                 script_context=script_ctx,
                 activity_log=item.get("activity_log", []),
+                pipeline_checkpoint=item.get("pipeline_checkpoint"),
+                checkpoint_at=item.get("checkpoint_at"),
             )
         except ClientError:
             logger.exception("Failed to get job %s", job_id)
@@ -283,7 +372,7 @@ class StorageService:
         try:
             items = await self._scan_all(
                 "jobs",
-                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category",
+                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category, pipeline_checkpoint",
                 ExpressionAttributeNames={"#st": "status"},
             )
             items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
@@ -297,6 +386,7 @@ class StorageService:
                     project_id=i.get("project_id"),
                     title=i.get("title"),
                     category=i.get("category"),
+                    pipeline_checkpoint=i.get("pipeline_checkpoint"),
                 )
                 for i in items[:limit]
             ]
@@ -310,7 +400,7 @@ class StorageService:
             items = await self._scan_all(
                 "jobs",
                 FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
-                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category",
+                ProjectionExpression="job_id, #st, created_at, segment_count, result_count, project_id, title, category, pipeline_checkpoint",
                 ExpressionAttributeNames={"#st": "status"},
             )
             items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
@@ -324,6 +414,7 @@ class StorageService:
                     project_id=i.get("project_id"),
                     title=i.get("title"),
                     category=i.get("category"),
+                    pipeline_checkpoint=i.get("pipeline_checkpoint"),
                 )
                 for i in items
             ]

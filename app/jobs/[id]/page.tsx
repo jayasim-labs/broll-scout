@@ -30,6 +30,7 @@ export default function JobPage() {
   })
   const [jobHistory, setJobHistory] = useState<JobSummary[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [resumedFrom, setResumedFrom] = useState<string | null>(null)
 
   useAgentLoop(isProcessing, jobId)
 
@@ -71,6 +72,9 @@ export default function JobPage() {
         const data = await resp.json()
         setJob(data)
         setIsProcessing(false)
+        if (data.status === "failed") {
+          setError("Job failed")
+        }
       } else if (resp.status === 404) {
         setError("Job not found")
       } else {
@@ -120,6 +124,10 @@ export default function JobPage() {
       } else if (status.status === "failed") {
         toast.error("Job failed")
         setIsProcessing(false)
+        try {
+          const jobResp = await fetch(`${API_BASE}/jobs/${jobId}`)
+          if (jobResp.ok) setJob(await jobResp.json())
+        } catch { /* still show error */ }
         setError("Job failed")
         loadJobHistory()
         return true
@@ -154,6 +162,33 @@ export default function JobPage() {
       }
     } catch { /* silent */ }
   }, [jobId])
+
+  const handleResume = async (fromStage: "transcripts" | "matching") => {
+    try {
+      const resp = await fetch(`${API_BASE}/jobs/${jobId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_stage: fromStage }),
+      })
+      const data = await resp.json()
+      if (resp.ok) {
+        toast.success(`Resuming from ${fromStage}`)
+        setError(null)
+        setIsProcessing(true)
+        setResumedFrom(fromStage)
+        setProgress({
+          stage: fromStage === "transcripts" ? "searching" : "matching",
+          percent_complete: fromStage === "transcripts" ? 42 : 55,
+          message: `Resuming from ${fromStage}...`,
+          activity_log: [],
+        })
+      } else {
+        toast.error(data.detail || "Failed to resume")
+      }
+    } catch {
+      toast.warning("Could not reach server")
+    }
+  }
 
   const handleCancel = async () => {
     try {
@@ -211,6 +246,31 @@ export default function JobPage() {
           {error && !loading && (
             <div className="text-center py-20">
               <p className="text-muted-foreground text-lg">{error}</p>
+              {job?.pipeline_checkpoint && job.pipeline_checkpoint !== "completed" && (
+                <div className="mt-6 flex flex-col items-center gap-3">
+                  <p className="text-sm text-muted-foreground">
+                    This job reached the &quot;{job.pipeline_checkpoint}&quot; stage before failing.
+                  </p>
+                  <div className="flex gap-3">
+                    {(job.pipeline_checkpoint === "searched" || job.pipeline_checkpoint === "matched") && (
+                      <button
+                        onClick={() => handleResume("transcripts")}
+                        className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+                      >
+                        Resume from Transcripts
+                      </button>
+                    )}
+                    {job.pipeline_checkpoint === "matched" && (
+                      <button
+                        onClick={() => handleResume("matching")}
+                        className="px-4 py-2 bg-secondary text-secondary-foreground rounded-md text-sm font-medium hover:bg-secondary/80 transition-colors"
+                      >
+                        Resume from Matching
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               <button
                 onClick={() => router.push("/")}
                 className="mt-4 text-primary hover:underline"
@@ -221,7 +281,7 @@ export default function JobPage() {
           )}
 
           {isProcessing && !loading && (
-            <ProgressTracker progress={progress} onCancel={handleCancel} />
+            <ProgressTracker progress={progress} onCancel={handleCancel} resumedFrom={resumedFrom} />
           )}
 
           {!loading && !error && !isProcessing && job && (
@@ -229,6 +289,7 @@ export default function JobPage() {
               job={job}
               onNewSearch={() => router.push("/")}
               onRefreshJob={refreshJob}
+              onResume={handleResume}
             />
           )}
         </main>
