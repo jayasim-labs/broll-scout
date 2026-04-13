@@ -987,7 +987,7 @@ async def run_pipeline(
                 _log_activity(job_id, "alert", w["message"], depth=1, group="rank")
 
         # --- Recovery search (only for segments with zero results) ---
-        low_threshold = max(3, len(active_segments) // 3)
+        low_threshold = max(1, total_active_shots // 3)
         if len(all_results) < low_threshold:
             logger.info(
                 "Only %d results (below threshold %d), running recovery",

@@ -122,15 +122,9 @@ Do the following in one response:
        * Each entry should be a proper noun, specific name, or highly specific concept — the kind of word that narrows YouTube results to THIS script's topic
 
 3. Break the English translation into segments based on narrative shifts.
-   MANDATORY SEGMENT COUNT RULE: You MUST produce at least 1 segment per 2 minutes of script.
-   A 20-minute script → minimum 10 segments (aim for 12-15).
-   A 30-minute script → minimum 15 segments (aim for 16-22).
-   A 40-minute script → minimum 20 segments (aim for 22-28).
-   A 50-minute script → minimum 25 segments (aim for 26-35).
-   If your output has fewer segments than the minimum, you have merged too aggressively — go back and split.
+   {segment_guidance}
    Each distinct subtopic, event, era, location, or concept shift MUST be its own segment.
    Do NOT merge "Origin of X" + "Evolution of X" + "Modern X" into one segment — those are 3 separate segments.
-   Segments should typically be 60-150 seconds each. Any segment over 180 seconds should be split unless it truly covers only one narrow topic.
    Each segment gets independent YouTube searches, so more segments = better search coverage for editors.
 
 4. For each segment, return:
@@ -149,7 +143,7 @@ Do the following in one response:
        * 1 clip: a very brief single concept (rare — most segments benefit from 2+).
        * 2-3 clips: the STANDARD for most segments — a location PLUS a historical event PLUS a contextual visual. Each shot must be a genuinely different visual need.
        * 4+ clips: for segments covering multiple distinct events, locations, or concepts in sequence. This is COMMON for documentary content — don't hesitate to use it.
-       AIM HIGH on broll_count — editors would rather have 40 diverse shots to choose from than 20 generic ones. When in doubt, add another shot with a different visual angle on the same topic. A 30-minute script typically needs 30-45 total B-roll shots across 12-20 segments. Do NOT reduce segment count to increase per-segment broll_count — keep segments granular AND give each one 2-4 shots.
+       AIM HIGH on broll_count — editors would rather have more diverse shots to choose from than fewer generic ones. When in doubt, add another shot with a different visual angle on the same topic. As a guideline, aim for approximately 1–1.5 B-roll shots per minute of script (e.g., a 5-min script → 5-8 shots total, a 30-min script → 30-45 shots total). Do NOT reduce segment count to increase per-segment broll_count — keep segments granular AND give each one appropriate shots for its content density.
    - broll_note: if broll_count is 0, explain why (e.g., "Host on camera — no B-roll needed"). Otherwise null.
    - broll_shots: an array of EXACTLY broll_count objects, each describing a distinct B-roll shot:
        * shot_id: "{segment_id}_shot_{N}" (e.g., "seg_003_shot_1", "seg_003_shot_2")
@@ -213,6 +207,37 @@ Do the following in one response:
 Return as valid JSON with four keys: "english_translation" (string), "script_context" (object), "segments" (JSON array), and "segment_summary" (object). No prose, no markdown fences."""
 
 
+def _build_segment_guidance(estimated_minutes: int) -> str:
+    """Build segment count guidance proportional to script length."""
+    min_segments = max(2, round(estimated_minutes / 2))
+
+    if estimated_minutes <= 3:
+        return (
+            f"This is a SHORT script (~{estimated_minutes} minutes). "
+            f"Produce {min_segments}–{min_segments + 2} segments. "
+            f"Do NOT over-segment — a 2-3 minute script needs only 2-4 segments, not 10+. "
+            f"Each segment can be 30-90 seconds. "
+            f"Only split when there is a genuine narrative shift."
+        )
+    elif estimated_minutes <= 8:
+        aim_high = min_segments + round(estimated_minutes * 0.3)
+        return (
+            f"This is a MEDIUM script (~{estimated_minutes} minutes). "
+            f"Produce at least {min_segments} segments (aim for {min_segments}–{aim_high}). "
+            f"Segments should typically be 60-120 seconds each. "
+            f"Split when there is a clear subtopic or narrative shift."
+        )
+    else:
+        aim_low = round(estimated_minutes * 0.5)
+        aim_high = round(estimated_minutes * 0.75)
+        return (
+            f"MANDATORY SEGMENT COUNT RULE: You MUST produce at least 1 segment per 2 minutes of script.\n"
+            f"   This is a ~{estimated_minutes}-minute script → minimum {min_segments} segments (aim for {aim_low}-{aim_high}).\n"
+            f"   If your output has fewer segments than the minimum, you have merged too aggressively — go back and split.\n"
+            f"   Segments should typically be 60-150 seconds each. Any segment over 180 seconds should be split unless it truly covers only one narrow topic."
+        )
+
+
 class TranslatorService:
     """Translates Tamil scripts to English and segments them via GPT-4o."""
 
@@ -252,7 +277,8 @@ class TranslatorService:
         await _emit("brain", f"Your script is ~{word_count} words (~{estimated_minutes} minutes of video). Sending to GPT-4o to translate from Tamil to English")
         await _emit("clock", f"GPT-4o will also break your script into scenes and figure out what B-roll each scene needs. This usually takes 15–30 seconds")
 
-        system = SYSTEM_PROMPT
+        segment_guidance = _build_segment_guidance(estimated_minutes)
+        system = SYSTEM_PROMPT.replace("{segment_guidance}", segment_guidance)
         if special_instructions and special_instructions.strip():
             system += (
                 "\n\n=== EDITOR PREFERENCES ===\n"
@@ -279,7 +305,7 @@ class TranslatorService:
 
         segments_raw = data.get("segments", [])
 
-        min_expected_segments = max(5, int(estimated_minutes / 3))
+        min_expected_segments = max(2, round(estimated_minutes / 2))
         if len(segments_raw) < min_expected_segments:
             logger.warning(
                 "GPT-4o returned only %d segments for a %d-min script (expected at least %d). "
@@ -287,11 +313,12 @@ class TranslatorService:
                 len(segments_raw), estimated_minutes, min_expected_segments,
             )
             await _emit("alert", f"GPT-4o returned only {len(segments_raw)} segments for a {estimated_minutes}-min script — retrying with stronger guidance for at least {min_expected_segments} segments")
+            max_seg_duration = 90 if estimated_minutes <= 5 else (120 if estimated_minutes <= 10 else 150)
             retry_msg = (
                 f"You returned {len(segments_raw)} segments for a {estimated_minutes}-minute script. "
                 f"That is too few — you MUST produce at least {min_expected_segments} segments. "
                 f"Each distinct subtopic, event, concept, or narrative shift needs its own segment. "
-                f"Split any segment over 150 seconds into smaller parts. "
+                f"Split any segment over {max_seg_duration} seconds into smaller parts. "
                 f"Return the corrected full JSON with more granular segments."
             )
             messages.append({"role": "assistant", "content": json.dumps(data)})

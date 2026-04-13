@@ -126,22 +126,20 @@ async def estimate_pipeline(
     word_count = len(body.script.split())
     script_duration = max(1, round(word_count / 100))
 
-    # Segment estimation: GPT prompt asks for ~1 per 2 min, code enforces min max(5, dur/3)
+    # Segment estimation: matches _build_segment_guidance in translator.py
+    min_segments = max(2, round(script_duration / 2))
     if script_duration <= 3:
-        est_segments = max(3, round(script_duration * 1.5))
+        est_segments = max(min_segments, round(script_duration * 1.2))
         script_type = "Short Form"
     elif script_duration <= 8:
-        est_segments = max(5, round(script_duration * 0.7))
+        est_segments = max(min_segments, round(script_duration * 0.7))
         script_type = "Medium Form"
     elif script_duration <= 20:
-        est_segments = max(8, round(script_duration * 0.65))
+        est_segments = max(min_segments, round(script_duration * 0.65))
         script_type = "Long Form"
     else:
-        est_segments = max(15, round(script_duration * 0.6))
+        est_segments = max(min_segments, round(script_duration * 0.6))
         script_type = "Long Form"
-
-    min_segments_enforced = max(5, int(script_duration / 3))
-    est_segments = max(est_segments, min_segments_enforced)
 
     # Shot estimation: GPT typically gives 2-3 shots/segment for documentary
     # ~15% of segments are host-on-camera (broll_count=0)
