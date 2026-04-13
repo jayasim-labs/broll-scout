@@ -79,9 +79,9 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ---------------------------------------------------------------------------
 import random as _random
 
-_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.5"))
+_YT_RATE_LIMIT = float(os.environ.get("BROLL_YT_RATE_LIMIT", "0.125"))
 _YT_BURST_SIZE = int(os.environ.get("BROLL_YT_BURST_SIZE", "1"))
-_YT_MIN_GAP_BASE = float(os.environ.get("BROLL_YT_MIN_GAP", "2.0"))
+_YT_MIN_GAP_BASE = float(os.environ.get("BROLL_YT_MIN_GAP", "8.0"))
 _yt_tokens = float(_YT_BURST_SIZE)
 _yt_last_refill = time.time()
 _yt_last_request = 0.0
@@ -90,10 +90,10 @@ _yt_lock = threading.Lock()
 # Unified 429 state — shared across search, subtitle, and audio code paths
 _yt_429_count = 0
 _yt_429_last_hit = 0.0
-_YT_429_COOLDOWN_PER_HIT = 15       # seconds added per consecutive 429
-_YT_429_COOLDOWN_CAP = 90           # max pre-emptive cooldown
-_YT_429_RAMP_DURATION = 5 * 60      # 5 min: how long the elevated gap lasts
-_YT_429_RAMP_MULTIPLIER = 2.0       # double the min gap after a 429
+_YT_429_COOLDOWN_PER_HIT = 20       # seconds added per consecutive 429
+_YT_429_COOLDOWN_CAP = 120          # max pre-emptive cooldown
+_YT_429_RAMP_DURATION = 10 * 60     # 10 min: how long the elevated gap lasts
+_YT_429_RAMP_MULTIPLIER = 3.0       # triple the min gap (8s → 24s) after a 429
 
 
 def _yt_record_429(source: str) -> None:
@@ -150,7 +150,7 @@ def _yt_throttle() -> None:
             now = time.time()
             since_last = now - _yt_last_request
             if since_last < min_gap:
-                wait = min_gap - since_last + _random.uniform(0.3, 0.8)
+                wait = min_gap - since_last + _random.uniform(0.5, 2.0)
                 time.sleep(wait)
                 now = time.time()
 
@@ -160,9 +160,9 @@ def _yt_throttle() -> None:
             if _yt_tokens >= 1.0:
                 _yt_tokens -= 1.0
                 _yt_last_request = time.time()
-                time.sleep(_random.uniform(0.3, 0.8))
+                time.sleep(_random.uniform(0.5, 2.0))
                 break
-        time.sleep(0.5 + _random.uniform(0.2, 0.6))
+        time.sleep(1.0 + _random.uniform(0.5, 1.5))
 
 _abort_lock = threading.Lock()
 _task_aborts: dict[str, threading.Event] = {}
@@ -793,7 +793,7 @@ def ytdlp_video_details(video_ids: list[str]) -> list[dict]:
     urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
     cmd = [
         "yt-dlp", *urls, "--dump-json", "--no-download", "--no-warnings",
-        "--sleep-requests", "1.5",
+        "--sleep-requests", "3",
     ]
     results = _run_ytdlp(cmd, timeout=max(YTDLP_TIMEOUT, len(video_ids) * 10))
     return results
@@ -1070,6 +1070,7 @@ def whisper_transcribe(
                 "-f", "bestaudio/ba",
                 "-o", output_template,
                 "--no-playlist", "--no-warnings",
+                "--limit-rate", "3M",
             ]
             proc = _ytdlp_with_429_retry(cmd_best, timeout=180)
             audio_files = globmod.glob(os.path.join(tmpdir, "audio.*"))
@@ -1081,6 +1082,7 @@ def whisper_transcribe(
                     "-f", "bestaudio/ba",
                     "-x", "--audio-format", "mp3",
                     "--no-playlist", "--no-warnings",
+                    "--limit-rate", "3M",
                     "-o", output_template,
                 ]
                 proc = _ytdlp_with_429_retry(cmd_mp3, timeout=180)
@@ -1099,6 +1101,7 @@ def whisper_transcribe(
                     "-f", "worstvideo+worstaudio/worst",
                     "-o", video_template,
                     "--no-playlist", "--no-warnings",
+                    "--limit-rate", "3M",
                 ]
                 proc = _ytdlp_with_429_retry(cmd_video, timeout=300)
                 video_files = globmod.glob(os.path.join(tmpdir, "video.*"))
@@ -1394,6 +1397,7 @@ def clip_download(video_id: str, start_seconds: int, end_seconds: int, output_di
         "--merge-output-format", "mp4",
         "--concurrent-fragments", "4",
         "--no-playlist", "--no-warnings",
+        "--limit-rate", "3M",
         "-o", output_path,
     ]
 

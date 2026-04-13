@@ -64,10 +64,11 @@
 │   │                                                      │                           │
 │   │  Transcript cascade (first success wins):            │                           │
 │   │    1. DynamoDB cache — instant, previously fetched    │                           │
-│   │    2. YouTube manual captions — best quality          │                           │
-│   │    3. YouTube auto captions — decent quality          │                           │
-│   │    4. Whisper large-v3-turbo (local) — companion       │                           │
-│   │       downloads audio + transcribes (~2-8min/video)   │                           │
+│   │    2. Whisper large-v3-turbo (local) — companion       │                           │
+│   │       downloads audio + transcribes (~15-90s/video)   │                           │
+│   │                                                      │                           │
+│   │  (yt-dlp subtitle fetch disabled — 4.2% success      │                           │
+│   │   rate, triggers 429s that poison the pipeline)       │                           │
 │   │                                                      │                           │
 │   │  Streaming: fetch starts as soon as search finds     │                           │
 │   │  a video — no waiting for all searches to finish     │                           │
@@ -197,8 +198,7 @@
 | **Full API fallback** | GPT-4o-mini | EC2 → OpenAI API | 0 (disabled by default) | ~$0.001 each | `api_fallback_enabled` |
 | **Re-search (alt queries)** | GPT-4o-mini **or** Ollama | Configurable | 0–10 | ~$0.0001 each or $0 | `lightweight_model` |
 | **"Add another shot"** | GPT-4o-mini **or** Ollama | Configurable | 0 (editor-triggered) | ~$0.0001 or $0 | `lightweight_model` |
-| **Transcription (YT captions)** | YouTube's own | Free | Auto | $0 | — |
-| **Transcription (Whisper)** | Whisper large-v3-turbo (1.5GB) | Local (companion GPU) | 0–10 | $0 | `whisper_max_video_duration_min` |
+| **Transcription (Whisper)** | Whisper large-v3-turbo (1.5GB) | Local (companion GPU) | 10–50+ | $0 | `whisper_max_video_duration_min` |
 | **YouTube search** | yt-dlp | Local (companion) | 100–200 | $0 | — |
 | **Clip download** | yt-dlp + ffmpeg | Local (companion) | Editor-triggered | $0 | — |
 
@@ -351,7 +351,11 @@ Shots are searched **sequentially in batches of 4** with 75s cooldowns between b
 2. Every 4 shots → 75-90s cooldown (rate-limit buffer)
 3. **Global dedup**: same video found by multiple shots → transcript fetched once
 4. After all searches complete → 30s cooldown → sequential transcript fetch
-5. **Transcript cascade**: DynamoDB cache → YouTube captions → Whisper local
+5. **Inter-video pacing**: 5–8s randomized gap between each transcript fetch (per [YouTube's documented rate limits](https://github.com/yt-dlp/yt-dlp-wiki/blob/master/Extractors.md))
+6. **Transcript cascade**: DynamoDB cache → Whisper local (yt-dlp subtitle fetch disabled due to persistent 429s — see below)
+7. All audio downloads use `--limit-rate 3M` to avoid download-speed-based detection
+
+> **Note**: yt-dlp subtitle fetching was disabled after analysis showed only a 4.2% success rate (206/4911 attempts) while triggering YouTube 429 rate-limits that poisoned the entire pipeline. Whisper on local MPS (large-v3-turbo) is fast enough (15–90s per video) and avoids 429 pressure entirely.
 
 Typical: 100+ search queries → 80–150 unique videos → transcripts for all
 
@@ -454,7 +458,7 @@ BRoll Scout/
 │   ├── services/
 │   │   ├── translator.py        # GPT-4o: translate, segment, extract shots (5 queries/shot)
 │   │   ├── searcher.py          # Context-aware YouTube search via yt-dlp companion
-│   │   ├── transcriber.py       # 4-level transcript cascade (cache → YT → companion → Whisper)
+│   │   ├── transcriber.py       # 2-level transcript cascade (cache → Whisper local)
 │   │   ├── matcher.py           # Qwen3 8B: context gate + timestamp extraction
 │   │   ├── ranker.py            # 7-dimension scoring, hard filters, dedup
 │   │   ├── expand_shots.py      # "Add another shot" + re-search query generation
@@ -620,7 +624,6 @@ Shorter scripts (5–10 min) cost ~$0.03–0.05. The translation call is 95%+ of
 |---|---|---|
 | YouTube search (yt-dlp) | Local companion | $0 |
 | Video details (yt-dlp) | Local companion | $0 |
-| Transcript fetch (YouTube captions) | Local companion | $0 |
 | Whisper transcription | Local companion (GPU) | $0 |
 | Timestamp matching (Gemma 4 / Qwen3) | Local Ollama | $0 |
 | Ranking & scoring | Backend (algorithmic) | $0 |
@@ -634,11 +637,42 @@ Shorter scripts (5–10 min) cost ~$0.03–0.05. The translation call is 95%+ of
 
 ### The Problem
 
-YouTube rate-limits IPs that make too many requests in a short window. The observed threshold is roughly **15–20 yt-dlp requests per 2-minute window**. Each shot fires ~3 search queries, so after 5–6 shots searched back-to-back, YouTube returns HTTP 429 (Too Many Requests).
+YouTube rate-limits IPs that make too many requests in a short window. According to the [official yt-dlp wiki](https://github.com/yt-dlp/yt-dlp-wiki/blob/master/Extractors.md) (updated April 2025 by yt-dlp maintainer [@coletdjnz](https://github.com/yt-dlp/yt-dlp-wiki/pull/52)):
+
+> **Guest sessions**: ~300 videos/hour (~1000 webpage/player requests per hour)
+> **Authenticated (cookies)**: ~2000 videos/hour (~4000 requests per hour)
+> **Recommended delay**: 5–10 seconds between downloads
+
+Each shot fires ~3 search queries, and each yt-dlp call involves 2–3 underlying requests (webpage extraction + stream). Our throttling is calibrated to stay well within these documented limits.
+
+### References
+
+- [yt-dlp Extractors wiki — YouTube rate limit guidance](https://github.com/yt-dlp/yt-dlp-wiki/blob/master/Extractors.md) — Official rate limits: ~300 videos/hr guest, ~2000/hr with cookies, 5–10s delay recommended
+- [yt-dlp/yt-dlp-wiki PR #52](https://github.com/yt-dlp/yt-dlp-wiki/pull/52) — Merged April 2025, adds session rate limit documentation
+- [yt-dlp issue #11897](https://github.com/yt-dlp/yt-dlp/issues/11897) — Community-recommended sleep configuration: `--sleep-interval 60 --max-sleep-interval 120 --sleep-requests 3 -r 3M`
+- [yt-dlp issue #15770](https://github.com/yt-dlp/yt-dlp/issues/15770) — HTTP 429 discussion and retry strategies
+- [yt-dlp issue #13714](https://github.com/yt-dlp/yt-dlp/issues/13714) — Guidance on `--extractor-retries` and `--retry-sleep` options
+
+### Design Rationale
+
+Our initial configuration used a 2s base gap between requests (~1800 req/hr), which exceeded the guest session limit by 6× and sat at the edge of even the authenticated limit. After studying the yt-dlp wiki and community guidance, we aligned our throttling to YouTube's documented limits:
+
+| Setting | Before | After | Why |
+|---------|--------|-------|-----|
+| Base min gap | 2.0s (~1800 req/hr) | **8.0s** (~450 req/hr) | Within YouTube's 300/hr guest limit accounting for multi-request overhead |
+| Token refill rate | 0.5/s | **0.125/s** | Matches the 8s gap |
+| Post-429 multiplier | 2× (4s) | **3×** (24s) | Stronger pullback on detection |
+| Cooldown per 429 | 15s | **20s** | More recovery time between retries |
+| Cooldown cap | 90s | **120s** | Higher ceiling for sustained 429 streaks |
+| Ramp duration | 5 min | **10 min** | Stay cautious longer after a 429 |
+| Jitter range | 0.3–0.8s | **0.5–2.0s** | Less predictable timing pattern |
+| `--sleep-requests` | 1.5s | **3s** | Per community recommendation ([#11897](https://github.com/yt-dlp/yt-dlp/issues/11897)) |
+| `--limit-rate` | none | **3M** | Prevents download-speed-based detection ([#11897](https://github.com/yt-dlp/yt-dlp/issues/11897)) |
+| Inter-video gap (transcripts) | 0s | **5–8s** | YouTube wiki recommends 5–10s between downloads |
 
 ### Defense Layers
 
-The system uses four layers of protection, from proactive (prevent 429s) to reactive (recover from them):
+The system uses five layers of protection, from proactive (prevent 429s) to reactive (recover from them):
 
 #### Layer 1: Batch-Level Pacing (backend — `background.py`)
 
@@ -653,45 +687,62 @@ SEARCH_BATCH_COOLDOWN = 75s  # pause between batches (+ 5-15s jitter)
 For a 37-shot job: 9 batches × ~75s cooldown = ~11 min of intentional pausing.
 This keeps total requests well under YouTube's rate window.
 
-After all search completes, an additional `SEARCH_COOLDOWN_SEC = 30s` buffer before transcript fetching begins.
+After all searches complete, an additional `SEARCH_COOLDOWN_SEC = 30s` buffer before transcript fetching begins.
 
-#### Layer 2: Token Bucket Throttle (companion — `companion.py`)
+#### Layer 2: Inter-Video Pacing (backend — `background.py`)
+
+Between sequential transcript fetches (each of which triggers a yt-dlp audio download for Whisper), the pipeline inserts a **5–8s randomized gap**. This matches the yt-dlp wiki's recommendation of 5–10s between downloads and prevents burst patterns that trigger YouTube's bot detection.
+
+```
+Inter-video gap:  5.0s + random(1.0–3.0s)  → 6–8s between each transcript fetch
+```
+
+#### Layer 3: Token Bucket Throttle (companion — `companion.py`)
 
 Every yt-dlp call passes through `_yt_throttle()`:
 
 ```
-Rate limit:   0.5 requests/second average
+Rate limit:   0.125 requests/second average (~450 req/hr)
 Burst size:   1 (no bursting — strict 1-at-a-time)
-Min gap:      2.0 seconds between any two yt-dlp calls (dynamic — see Layer 3)
-+ random jitter of 0.3–0.8s on each call
+Min gap:      8.0 seconds between any two yt-dlp calls (dynamic — see Layer 4)
++ random jitter of 0.5–2.0s on each call
 ```
 
-#### Layer 3: Dynamic Throttle Ramp (companion — `companion.py`)
+This keeps the effective rate at ~360–450 requests/hour — safely within YouTube's documented 2000/hr authenticated limit, and close to the 300/hr guest limit with overhead accounted for.
+
+#### Layer 4: Dynamic Throttle Ramp (companion — `companion.py`)
 
 After any 429 hit, the throttle automatically tightens:
 
 ```
-Normal:   MIN_GAP = 2.0s
-After 429: MIN_GAP = 4.0s (2× multiplier) for 5 minutes
-           + pre-emptive cooldown of min(count × 15, 90) seconds
-           
-Auto-reset: If no 429 for 5 minutes → back to 2.0s baseline
+Normal:    MIN_GAP = 8.0s
+After 429: MIN_GAP = 24.0s (3× multiplier) for 10 minutes
+           + pre-emptive cooldown of min(count × 20, 120) seconds
+
+Auto-reset: If no 429 for 10 minutes → back to 8.0s baseline
 Success decay: Each successful request decrements the 429 counter by 1
 ```
 
-#### Layer 4: Per-Request Retry with Exponential Backoff (companion — `companion.py`)
+#### Layer 5: Per-Request Retry with Exponential Backoff (companion — `companion.py`)
 
 When a 429 actually hits, each yt-dlp call retries up to 5 times:
 
-| Attempt | Backoff (search) | Backoff (subtitles/audio) |
+| Attempt | Backoff | Total (with jitter) |
 |---|---|---|
-| 1 | 10s + jitter(3-8s) | 10s + jitter(3-8s) |
-| 2 | 20s + jitter | 20s + jitter |
-| 3 | 40s + jitter | 40s + jitter |
-| 4 | 80s + jitter | 80s + jitter |
-| 5 | 160s + jitter | 160s + jitter |
+| 1 | 10s + jitter(3-8s) | **13–18s** |
+| 2 | 20s + jitter | **23–28s** |
+| 3 | 40s + jitter | **43–48s** |
+| 4 | 80s + jitter | **83–88s** |
+| 5 | 160s + jitter | **163–168s** |
 
-Max total retry time per call: ~310s (~5 minutes).
+Max total retry time per call: ~310s (~5 minutes). The pre-emptive cooldown from Layer 4 runs **before** each retry attempt.
+
+### Download Rate Limiting
+
+All yt-dlp audio/video downloads use `--limit-rate 3M` (3 MB/s) to prevent download-speed-based bot detection. This is a community-recommended practice from [yt-dlp issue #11897](https://github.com/yt-dlp/yt-dlp/issues/11897). Affected commands:
+
+- Audio download for Whisper transcription (3 fallback strategies: bestaudio → mp3 extract → video fallback)
+- Clip download for editors
 
 ### Unified 429 Tracker
 
@@ -705,18 +756,28 @@ _yt_record_429("audio")      # Audio 429s affect everything
 _yt_record_success()         # Successful calls gradually decay the counter
 ```
 
+### yt-dlp Sleep Parameters
+
+For batch video details fetching (`ytdlp_video_details`), `--sleep-requests 3` is applied to space out metadata requests when fetching details for multiple videos at once.
+
 ### Expected Behavior
 
 | Scenario | Search Time (37 shots) | 429 Stalls |
 |---|---|---|
-| Clean run (no 429s) | ~18 min (batch pacing) | 0 |
-| Light 429s (1-2 hits) | ~20 min | 0 (dynamic ramp absorbs it) |
-| Heavy 429s (5+ hits) | ~25 min | 0-1 brief stalls |
-| **Before these fixes** | 40-80 min | 5-8 stalls of 10 min each |
+| Clean run (no 429s) | ~20 min (batch pacing + 8s gaps) | 0 |
+| Light 429s (1-2 hits) | ~25 min | 0 (dynamic ramp absorbs it) |
+| Heavy 429s (5+ hits) | ~35 min | 0-1 brief stalls |
+| **Before rate-limit alignment** | 40-80 min | 5-8 stalls of 10 min each |
 
-### yt-dlp Sleep Parameters
+### Environment Variable Overrides
 
-For batch video details fetching (`ytdlp_video_details`), `--sleep-requests 1.5` is applied to space out metadata requests when fetching details for multiple videos at once.
+All throttle parameters can be tuned via environment variables on the companion:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BROLL_YT_RATE_LIMIT` | `0.125` | Token refill rate (requests/second) |
+| `BROLL_YT_BURST_SIZE` | `1` | Max burst size |
+| `BROLL_YT_MIN_GAP` | `8.0` | Minimum seconds between yt-dlp calls |
 
 ---
 

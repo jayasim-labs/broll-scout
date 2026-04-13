@@ -553,6 +553,10 @@ async def run_pipeline(
                               f"Transcripts: {done}/{len(sorted_videos)} fetched ({whisper_count} via Whisper){eta_label}")
                 await _maybe_flush_activity_log(job_id)
 
+                if done < len(sorted_videos):
+                    gap = 5.0 + random.uniform(1.0, 3.0)
+                    await asyncio.sleep(gap)
+
             videos_with_transcript = sum(1 for v in transcript_cache.values() if v)
             failed_count = len(failed_fetches)
 
