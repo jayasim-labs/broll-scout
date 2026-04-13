@@ -66,8 +66,8 @@
 │   │    1. DynamoDB cache — instant, previously fetched    │                           │
 │   │    2. YouTube manual captions — best quality          │                           │
 │   │    3. YouTube auto captions — decent quality          │                           │
-│   │    4. Whisper base (local) — companion downloads      │                           │
-│   │       audio + transcribes (~45s per video)            │                           │
+│   │    4. Whisper large-v3-turbo (local) — companion       │                           │
+│   │       downloads audio + transcribes (~2-8min/video)   │                           │
 │   │                                                      │                           │
 │   │  Streaming: fetch starts as soon as search finds     │                           │
 │   │  a video — no waiting for all searches to finish     │                           │
@@ -175,7 +175,7 @@
 │  │     & segmentation   │  │  └─ Context audit      │  │                     │   │
 │  │     (1–2 calls/job)  │  │  (100–200 calls/job)   │  │  DEFAULT:           │   │
 │  │                      │  │                       │  │  GPT-4o-mini        │   │
-│  │  GPT-4o-mini         │  │  Whisper base          │  │  └─ Re-search       │   │
+│  │  GPT-4o-mini         │  │  Whisper large-v3-turbo│  │  └─ Re-search       │   │
 │  │  └─ Zero-confidence  │  │  └─ Audio → text       │  │     queries         │   │
 │  │     rescue (opt-in)  │  │  (0–10 calls/job)      │  │  └─ "Add another    │   │
 │  │  └─ Full API         │  │                       │  │     shot" ideation  │   │
@@ -198,7 +198,7 @@
 | **Re-search (alt queries)** | GPT-4o-mini **or** Ollama | Configurable | 0–10 | ~$0.0001 each or $0 | `lightweight_model` |
 | **"Add another shot"** | GPT-4o-mini **or** Ollama | Configurable | 0 (editor-triggered) | ~$0.0001 or $0 | `lightweight_model` |
 | **Transcription (YT captions)** | YouTube's own | Free | Auto | $0 | — |
-| **Transcription (Whisper)** | Whisper base (77MB) | Local (companion) | 0–10 | $0 | `whisper_max_video_duration_min` |
+| **Transcription (Whisper)** | Whisper large-v3-turbo (1.5GB) | Local (companion GPU) | 0–10 | $0 | `whisper_max_video_duration_min` |
 | **YouTube search** | yt-dlp | Local (companion) | 100–200 | $0 | — |
 | **Clip download** | yt-dlp + ffmpeg | Local (companion) | Editor-triggered | $0 | — |
 
@@ -321,7 +321,7 @@ returns data to pipeline
 | `channel_search` | `yt-dlp` channel search | Same reason |
 | `video_details` | `yt-dlp --dump-json` | Metadata fetch |
 | `transcript` | `youtube-transcript-api` | YouTube blocks transcript API from AWS |
-| `whisper` | `yt-dlp -x` + Whisper base model | Audio download + local transcription |
+| `whisper` | `yt-dlp -x` + Whisper large-v3-turbo | Audio download + local GPU transcription |
 | `match_timestamp` | Ollama Qwen3 8B — context-aware matching | Zero cost, structured JSON, local inference |
 | `lightweight_llm` | Ollama Qwen3 8B — query generation & ideation | Zero cost (when `lightweight_model=ollama`) |
 | `clip` | `yt-dlp --download-sections` + ffmpeg | Downloads a specific time range as MP4 |
@@ -343,16 +343,17 @@ One API call to GPT-4o:
   - `key_terms` for matching
 - Segments marked as "host on camera" get `broll_count: 0` and are skipped
 
-### Stage 2: Search + Transcript Fetch (Streaming) — `yt-dlp` + `Whisper` (Local)
+### Stage 2: Search + Transcript Fetch — `yt-dlp` + `Whisper` (Local)
 
-Runs as a **streaming pipeline** — search and transcript fetch overlap:
+Shots are searched **sequentially in batches of 4** with 75s cooldowns between batches to avoid YouTube rate limiting. See [YouTube Rate Limiting & Throttling](#youtube-rate-limiting--throttling) for full details.
 
-1. All shots searched concurrently (5 at a time, 4 results per query)
-2. **Global dedup**: same video found by multiple shots → transcript fetched once
-3. As each search completes, new videos immediately queue for transcript fetch
-4. **Transcript cascade**: DynamoDB cache → YouTube captions → companion API → Whisper local
+1. Each shot fires ~3 yt-dlp search queries with 3s delays between shots
+2. Every 4 shots → 75-90s cooldown (rate-limit buffer)
+3. **Global dedup**: same video found by multiple shots → transcript fetched once
+4. After all searches complete → 30s cooldown → sequential transcript fetch
+5. **Transcript cascade**: DynamoDB cache → YouTube captions → Whisper local
 
-Typical: 200+ search queries → 100–150 unique videos → 100+ transcripts
+Typical: 100+ search queries → 80–150 unique videos → transcripts for all
 
 ### Stage 3: Timestamp Matching — `Qwen3 8B` (Local via Ollama)
 
@@ -386,12 +387,9 @@ Runs sequentially (one match at a time) with `OLLAMA_NUM_PARALLEL=3` for optimal
 
 ### Stage 5: Re-Search Pass (Automatic)
 
-After ranking, shots with fewer clips than `top_results_per_shot` (default 5) get up to **3 re-search attempts**:
+After ranking, shots scoring below 50% relevance get up to **3 failure-mode-aware re-search attempts**. See [Re-Search Trigger Logic](#re-search-trigger-logic) for full details.
 
-1. GPT-4o-mini (or Ollama if configured) generates **5 alternative search queries** — told the originals failed
-2. New YouTube search with the alternative queries → up to 8 new candidates per attempt
-3. New candidates go through transcript fetch → matching → ranking
-4. If the best new result beats the old one → **upgraded**
+The re-search uses the same pipeline — same yt-dlp throttling, same transcript cascade, same timestamp matching — with different search queries generated by GPT-4o-mini (or Ollama).
 
 Activity log shows: `"Upgrade: 'Satellite images...' — 30% → 62%"`
 
@@ -433,7 +431,7 @@ Editors can click **"+ Add another shot"** on any segment to:
 | **AI — Translation** | OpenAI GPT-4o |
 | **AI — Matching** | Qwen3 8B via Ollama (local) |
 | **AI — Lightweight tasks** | GPT-4o-mini or Ollama (configurable) |
-| **AI — Transcription** | OpenAI Whisper base (local) |
+| **AI — Transcription** | OpenAI Whisper large-v3-turbo (local GPU) |
 | **Search** | yt-dlp (local companion) — no YouTube API quota needed |
 | **Transcripts** | youtube-transcript-api + Whisper fallback |
 | **Storage** | AWS DynamoDB (9 tables) |
@@ -552,6 +550,173 @@ All settings are saved to DynamoDB and take effect immediately — no redeploy n
 | `weight_caption_quality` | 0.05 | Transcript source (manual > auto > whisper > none) |
 | `weight_recency` | 0.10 | Publish date |
 | `weight_context_relevance` | 0.10 | Title vs script topic, keywords, domain, geography |
+
+---
+
+## Re-Search Trigger Logic
+
+After timestamp matching (Stage 4) completes, the system automatically evaluates every shot's best result:
+
+```
+RESEARCH_THRESHOLD = 0.5    (50% relevance_score)
+MAX_RESEARCH_ATTEMPTS = 3   (per shot)
+```
+
+**Trigger condition:** Any shot where `relevance_score < 0.5` OR no match was found at all.
+
+**Failure-mode-aware strategy** — the approach adapts based on WHY the shot scored low:
+
+| Failure Mode | Detection | Strategy |
+|---|---|---|
+| No results at all | `existing_result is None` | Broaden with modifiers: "footage", "b-roll", "cinematic" |
+| Low visual fit | `visual_fit < 0.4` | Add visual modifiers: "footage", "b-roll", "cinematic", "drone" |
+| Low topical fit on abstract shot | `topical_fit < 0.4` + shot intent is `ILLUSTRATIVE` or `ATMOSPHERIC` | Recalculate with intent-weighted scoring before re-searching |
+| General low score | Everything else | Generate completely new alternative queries via GPT |
+
+**Per attempt, the system:**
+
+1. Generates 5 alternative search queries via `_generate_alternative_queries()` (GPT-4o-mini or Ollama)
+2. Searches YouTube with the new queries via the same yt-dlp pipeline
+3. Filters out duplicate videos already in the results pool
+4. Runs timestamp matching + ranking on up to 8 new candidates
+5. Keeps the best result if it beats the previous score
+6. Stops early if score reaches >= 0.6 (good enough)
+
+**Consolidation detection:** If two consecutive shots have similar visual needs (text similarity > 0.6) and both scored low, the system flags them as consolidation candidates in the activity log.
+
+**After re-search**, empty segments (zero clips) trigger one final broader `search_batch` as a last-resort recovery.
+
+---
+
+## API Cost Breakdown (Per Job)
+
+### OpenAI API Call Paths
+
+| # | Call Path | Model | When | Calls/Job | Cost/Call | Typical Total |
+|---|---|---|---|---|---|---|
+| 1 | Translation & segmentation | **GPT-4o** | Once per job (Stage 1) | 1–2 | $0.03–0.10 | **$0.05–0.10** |
+| 2 | Re-search alt query generation | **GPT-4o-mini** | Per low-confidence shot × up to 3 attempts | 0–60 | ~$0.0001 | **$0.001–0.006** |
+| 3 | "Add another shot" ideation | **GPT-4o-mini** | Editor-triggered only | 0 | ~$0.0001 | $0 |
+| 4 | Timestamp matching API fallback | **GPT-4o-mini** | Only if `api_fallback_enabled=true` (off by default) | 0 | ~$0.001 | $0 |
+| 5 | Zero-confidence rescue | **GPT-4o-mini** | Only if `confident_fallback_enabled=true` (off by default) | 0 | ~$0.001 | $0 |
+
+**Call paths 2 and 3** can use local Ollama instead of GPT-4o-mini by setting `lightweight_model: "ollama"` in Settings, reducing cost to $0.
+
+### Token Estimates for GPT-4o Translation Call
+
+For a 37-minute script (~3700 words):
+
+| Direction | Tokens | Rate | Cost |
+|---|---|---|---|
+| Input (script + system prompt) | ~5,000–8,000 | $0.005/1K | $0.025–0.04 |
+| Output (segments + shots + queries) | ~8,000–12,000 | $0.015/1K | $0.12–0.18 |
+| **Total** | | | **$0.15–0.22** |
+
+Shorter scripts (5–10 min) cost ~$0.03–0.05. The translation call is 95%+ of total API cost.
+
+### Zero-Cost Components
+
+| Component | Runs On | Cost |
+|---|---|---|
+| YouTube search (yt-dlp) | Local companion | $0 |
+| Video details (yt-dlp) | Local companion | $0 |
+| Transcript fetch (YouTube captions) | Local companion | $0 |
+| Whisper transcription | Local companion (GPU) | $0 |
+| Timestamp matching (Gemma 4 / Qwen3) | Local Ollama | $0 |
+| Ranking & scoring | Backend (algorithmic) | $0 |
+| Clip download (yt-dlp + ffmpeg) | Local companion | $0 |
+
+**Typical job total: $0.05–0.25** depending on script length. All matching, search, and transcription runs locally for free.
+
+---
+
+## YouTube Rate Limiting & Throttling
+
+### The Problem
+
+YouTube rate-limits IPs that make too many requests in a short window. The observed threshold is roughly **15–20 yt-dlp requests per 2-minute window**. Each shot fires ~3 search queries, so after 5–6 shots searched back-to-back, YouTube returns HTTP 429 (Too Many Requests).
+
+### Defense Layers
+
+The system uses four layers of protection, from proactive (prevent 429s) to reactive (recover from them):
+
+#### Layer 1: Batch-Level Pacing (backend — `background.py`)
+
+Shots are searched sequentially with a longer cooldown every N shots:
+
+```
+SEARCH_BATCH_SIZE = 4        # shots per batch
+SEARCH_INTER_SHOT_DELAY = 3s # between shots within a batch
+SEARCH_BATCH_COOLDOWN = 75s  # pause between batches (+ 5-15s jitter)
+```
+
+For a 37-shot job: 9 batches × ~75s cooldown = ~11 min of intentional pausing.
+This keeps total requests well under YouTube's rate window.
+
+After all search completes, an additional `SEARCH_COOLDOWN_SEC = 30s` buffer before transcript fetching begins.
+
+#### Layer 2: Token Bucket Throttle (companion — `companion.py`)
+
+Every yt-dlp call passes through `_yt_throttle()`:
+
+```
+Rate limit:   0.5 requests/second average
+Burst size:   1 (no bursting — strict 1-at-a-time)
+Min gap:      2.0 seconds between any two yt-dlp calls (dynamic — see Layer 3)
++ random jitter of 0.3–0.8s on each call
+```
+
+#### Layer 3: Dynamic Throttle Ramp (companion — `companion.py`)
+
+After any 429 hit, the throttle automatically tightens:
+
+```
+Normal:   MIN_GAP = 2.0s
+After 429: MIN_GAP = 4.0s (2× multiplier) for 5 minutes
+           + pre-emptive cooldown of min(count × 15, 90) seconds
+           
+Auto-reset: If no 429 for 5 minutes → back to 2.0s baseline
+Success decay: Each successful request decrements the 429 counter by 1
+```
+
+#### Layer 4: Per-Request Retry with Exponential Backoff (companion — `companion.py`)
+
+When a 429 actually hits, each yt-dlp call retries up to 5 times:
+
+| Attempt | Backoff (search) | Backoff (subtitles/audio) |
+|---|---|---|
+| 1 | 10s + jitter(3-8s) | 10s + jitter(3-8s) |
+| 2 | 20s + jitter | 20s + jitter |
+| 3 | 40s + jitter | 40s + jitter |
+| 4 | 80s + jitter | 80s + jitter |
+| 5 | 160s + jitter | 160s + jitter |
+
+Max total retry time per call: ~310s (~5 minutes).
+
+### Unified 429 Tracker
+
+All yt-dlp code paths (search, subtitles, audio download) share a single 429 counter. A 429 hit on search also slows down subsequent subtitle and audio requests — because YouTube rate-limits the entire IP, not individual endpoints.
+
+```python
+_yt_record_429("search")     # Any 429 increments the global counter
+_yt_record_429("subtitles")  # Subtitle 429s affect search throttling too
+_yt_record_429("audio")      # Audio 429s affect everything
+
+_yt_record_success()         # Successful calls gradually decay the counter
+```
+
+### Expected Behavior
+
+| Scenario | Search Time (37 shots) | 429 Stalls |
+|---|---|---|
+| Clean run (no 429s) | ~18 min (batch pacing) | 0 |
+| Light 429s (1-2 hits) | ~20 min | 0 (dynamic ramp absorbs it) |
+| Heavy 429s (5+ hits) | ~25 min | 0-1 brief stalls |
+| **Before these fixes** | 40-80 min | 5-8 stalls of 10 min each |
+
+### yt-dlp Sleep Parameters
+
+For batch video details fetching (`ytdlp_video_details`), `--sleep-requests 1.5` is applied to space out metadata requests when fetching details for multiple videos at once.
 
 ---
 
