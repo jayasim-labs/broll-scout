@@ -1,14 +1,14 @@
 "use client"
 
-import { useState, useMemo, useEffect } from "react"
-import { Search, Loader2, Upload, Sparkles } from "lucide-react"
+import { useState, useMemo, useEffect, useCallback } from "react"
+import { Search, Loader2, Upload, Sparkles, ClipboardCheck, Layers, Film, Clock, DollarSign, Cpu, ChevronDown, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import type { ProjectSummary, VideoCategory } from "@/lib/types"
+import type { ProjectSummary, VideoCategory, PipelineEstimate } from "@/lib/types"
 import { CATEGORY_OPTIONS } from "@/lib/types"
 
 interface ScriptInputProps {
@@ -31,6 +31,10 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
   )
   const [category, setCategory] = useState<VideoCategory | "">("")
   const [enableGeminiExpansion, setEnableGeminiExpansion] = useState(false)
+  const [estimate, setEstimate] = useState<PipelineEstimate | null>(null)
+  const [isEstimating, setIsEstimating] = useState(false)
+  const [showConfig, setShowConfig] = useState(false)
+  const [lastEstimatedScript, setLastEstimatedScript] = useState("")
 
   useEffect(() => {
     fetch("/api/v1/settings")
@@ -50,6 +54,40 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
   }, [script])
 
   const estimatedMinutes = useMemo(() => Math.ceil(wordCount / 100), [wordCount])
+
+  // Clear estimate when script changes significantly
+  useEffect(() => {
+    if (estimate && script !== lastEstimatedScript) {
+      const currentWords = script.trim().split(/\s+/).length
+      const prevWords = lastEstimatedScript.trim().split(/\s+/).length
+      if (Math.abs(currentWords - prevWords) > 20) {
+        setEstimate(null)
+      }
+    }
+  }, [script, estimate, lastEstimatedScript])
+
+  const handleCheckScript = useCallback(async () => {
+    if (charCount < 100) return
+    setIsEstimating(true)
+    try {
+      const resp = await fetch("/api/v1/jobs/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          script,
+          title: title.trim() || "Untitled",
+          editor_id: "default_editor",
+          enable_gemini_expansion: enableGeminiExpansion,
+        }),
+      })
+      if (resp.ok) {
+        const data: PipelineEstimate = await resp.json()
+        setEstimate(data)
+        setLastEstimatedScript(script)
+      }
+    } catch { /* backend unavailable */ }
+    finally { setIsEstimating(false) }
+  }, [charCount, script, title, enableGeminiExpansion])
 
   const handleSubmit = () => {
     if (charCount < 100) return
@@ -215,7 +253,7 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                 <Switch
                   id="gemini-toggle"
                   checked={enableGeminiExpansion}
-                  onCheckedChange={setEnableGeminiExpansion}
+                  onCheckedChange={(v) => { setEnableGeminiExpansion(v); setEstimate(null) }}
                 />
                 <Label htmlFor="gemini-toggle" className="flex items-center gap-1.5 text-sm cursor-pointer">
                   <Sparkles className="w-3.5 h-3.5 text-amber-500" />
@@ -233,27 +271,151 @@ export function ScriptInput({ onSubmit, isLoading, projects = [], preselectedPro
                   : "Default: GPT-4o translates your script, segments it, and generates 3 targeted YouTube search queries per segment. Fast and cost-effective for most scripts."}
               </p>
             </div>
-            <Button
-              onClick={handleSubmit}
-              disabled={isLoading || !isValid}
-              size="lg"
-              className="gap-2 self-start"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Processing...
-                </>
-              ) : (
-                <>
-                  <Search className="w-5 h-5" />
-                  Scout B-Roll
-                </>
-              )}
-            </Button>
+            <div className="flex flex-col gap-2 self-start">
+              <Button
+                onClick={handleCheckScript}
+                disabled={isEstimating || charCount < 100}
+                variant="outline"
+                size="lg"
+                className="gap-2"
+              >
+                {isEstimating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Analyzing...
+                  </>
+                ) : (
+                  <>
+                    <ClipboardCheck className="w-4 h-4" />
+                    Check Script
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
+
+      {estimate && (
+        <Card className="border-blue-500/30 bg-blue-500/[0.03]">
+          <CardContent className="pt-6 pb-5">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+                    <Layers className="w-4 h-4 text-blue-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold">Pipeline Plan</h3>
+                    <p className="text-[11px] text-muted-foreground">
+                      {estimate.script_type} &middot; ~{estimate.est_duration_minutes} min &middot; {estimate.word_count.toLocaleString()} words
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 uppercase tracking-wider">
+                  Preview
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <PlanStat
+                  icon={<Layers className="w-3.5 h-3.5" />}
+                  label="Segments"
+                  value={`~${estimate.est_segments}`}
+                  sub={`${estimate.est_no_broll_segments} host-on-camera`}
+                />
+                <PlanStat
+                  icon={<Film className="w-3.5 h-3.5" />}
+                  label="B-Roll Shots"
+                  value={`~${estimate.est_shots}`}
+                  sub={`${estimate.est_queries} search queries`}
+                />
+                <PlanStat
+                  icon={<Search className="w-3.5 h-3.5" />}
+                  label="YouTube Searches"
+                  value={`~${estimate.est_youtube_searches}`}
+                  sub={`~${estimate.est_videos_to_match} videos to match`}
+                />
+                <PlanStat
+                  icon={<Clock className="w-3.5 h-3.5" />}
+                  label="Est. Pipeline Time"
+                  value={`~${estimate.est_pipeline_time_min}–${estimate.est_pipeline_time_max} min`}
+                />
+                <PlanStat
+                  icon={<DollarSign className="w-3.5 h-3.5" />}
+                  label="Est. API Cost"
+                  value={`~$${estimate.est_cost_usd.toFixed(2)}`}
+                  sub="GPT-4o translation + matching"
+                />
+                <PlanStat
+                  icon={<Cpu className="w-3.5 h-3.5" />}
+                  label="Translation Model"
+                  value={estimate.config.translation_model}
+                  sub={`Matcher: ${estimate.config.matcher_backend}`}
+                />
+              </div>
+
+              <div className="pt-1">
+                <button
+                  onClick={() => setShowConfig(!showConfig)}
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showConfig ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  {showConfig ? "Hide" : "Show"} pipeline config
+                </button>
+                {showConfig && (
+                  <div className="mt-2 rounded-md bg-muted/50 p-3 font-mono text-[11px] text-muted-foreground space-y-0.5">
+                    <div>yt_results_per_query: {estimate.config.youtube_results_per_query}</div>
+                    <div>max_candidates_per_shot: {estimate.config.max_candidates_per_shot}</div>
+                    <div>matcher_model: {estimate.config.matcher_model}</div>
+                    <div>whisper_model: {estimate.config.whisper_model}</div>
+                    <div>gemini_expansion: {estimate.config.enable_gemini_expansion ? "enabled" : "disabled"}</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <Button
+                  onClick={handleSubmit}
+                  disabled={isLoading || !isValid}
+                  size="lg"
+                  className="gap-2"
+                >
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <Search className="w-5 h-5" />
+                      Scout B-Roll
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+function PlanStat({ icon, label, value, sub }: {
+  icon: React.ReactNode
+  label: string
+  value: string
+  sub?: string
+}) {
+  return (
+    <div className="rounded-lg border border-border/50 bg-background/50 p-3 space-y-1">
+      <div className="flex items-center gap-1.5 text-muted-foreground">
+        {icon}
+        <span className="text-[10px] font-medium uppercase tracking-wider">{label}</span>
+      </div>
+      <p className="text-sm font-semibold">{value}</p>
+      {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
     </div>
   )
 }

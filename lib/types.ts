@@ -397,3 +397,28 @@ export interface PipelineSettings {
 
   [key: string]: unknown
 }
+
+export interface PipelineEstimate {
+  script_type: string
+  word_count: number
+  est_duration_minutes: number
+  est_segments: number
+  est_no_broll_segments: number
+  est_active_segments: number
+  est_shots: number
+  est_queries: number
+  est_youtube_searches: number
+  est_videos_to_match: number
+  est_pipeline_time_min: number
+  est_pipeline_time_max: number
+  est_cost_usd: number
+  config: {
+    translation_model: string
+    matcher_model: string
+    matcher_backend: string
+    youtube_results_per_query: number
+    max_candidates_per_shot: number
+    whisper_model: string
+    enable_gemini_expansion: boolean
+  }
+}

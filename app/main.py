@@ -112,6 +112,104 @@ async def health_check():
 _running_tasks: dict[str, asyncio.Task] = {}
 
 
+@app.post("/api/v1/jobs/estimate")
+async def estimate_pipeline(
+    body: JobCreateRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    """Return a pipeline plan preview without running anything."""
+    _verify_key(x_api_key)
+
+    service = get_settings_service()
+    pipeline_cfg = await service.get_all_settings()
+
+    word_count = len(body.script.split())
+    script_duration = max(1, round(word_count / 100))
+
+    # Segment estimation: GPT prompt asks for ~1 per 2 min, code enforces min max(5, dur/3)
+    if script_duration <= 3:
+        est_segments = max(3, round(script_duration * 1.5))
+        script_type = "Short Form"
+    elif script_duration <= 8:
+        est_segments = max(5, round(script_duration * 0.7))
+        script_type = "Medium Form"
+    elif script_duration <= 20:
+        est_segments = max(8, round(script_duration * 0.65))
+        script_type = "Long Form"
+    else:
+        est_segments = max(15, round(script_duration * 0.6))
+        script_type = "Long Form"
+
+    min_segments_enforced = max(5, int(script_duration / 3))
+    est_segments = max(est_segments, min_segments_enforced)
+
+    # Shot estimation: GPT typically gives 2-3 shots/segment for documentary
+    # ~15% of segments are host-on-camera (broll_count=0)
+    active_segments = round(est_segments * 0.85)
+    no_broll_segments = est_segments - active_segments
+    avg_shots_per_segment = 2.5 if script_duration >= 10 else 2.0
+    est_shots = round(active_segments * avg_shots_per_segment)
+
+    queries_per_shot = 3
+    est_queries = est_shots * queries_per_shot
+
+    # YouTube search estimate
+    yt_results_per_query = pipeline_cfg.get("youtube_results_per_query", 12)
+    max_cands_per_shot = pipeline_cfg.get("max_candidates_per_shot", 20)
+    est_unique_videos = min(est_shots * max_cands_per_shot, est_queries * yt_results_per_query // 2)
+
+    # Time estimate: 12s per shot + 80s cooldown per batch of 4
+    num_batches = max(1, est_shots // 4)
+    search_sec = est_shots * 12 + num_batches * 80
+    transcript_sec = est_unique_videos * 8
+    matching_sec = est_unique_videos * 3
+    total_sec = 60 + search_sec + transcript_sec + matching_sec  # 60s for translation
+    est_time_min_low = max(1, total_sec // 60)
+    est_time_min_high = max(est_time_min_low + 2, round(total_sec * 1.4 / 60))
+
+    # Cost estimate: GPT-4o translation
+    # ~$0.005/1K input tokens, ~$0.015/1K output tokens
+    # Input: script (~0.75 tokens/word) + system prompt (~2K tokens)
+    # Output: segments JSON (~3x input tokens)
+    input_tokens = round(word_count * 0.75 + 2000)
+    output_tokens = round(input_tokens * 2.5)
+    translation_model = pipeline_cfg.get("translation_model", "gpt-4o")
+    if "gpt-4o-mini" in translation_model:
+        cost_per_1k_in, cost_per_1k_out = 0.00015, 0.0006
+    else:
+        cost_per_1k_in, cost_per_1k_out = 0.0025, 0.01
+    translation_cost = (input_tokens / 1000) * cost_per_1k_in + (output_tokens / 1000) * cost_per_1k_out
+
+    # Matching cost: gpt-4o-mini for timestamp matching
+    matching_cost = est_unique_videos * 0.0003
+    total_cost = translation_cost + matching_cost
+
+    return {
+        "script_type": script_type,
+        "word_count": word_count,
+        "est_duration_minutes": script_duration,
+        "est_segments": est_segments,
+        "est_no_broll_segments": no_broll_segments,
+        "est_active_segments": active_segments,
+        "est_shots": est_shots,
+        "est_queries": est_queries,
+        "est_youtube_searches": est_queries,
+        "est_videos_to_match": est_unique_videos,
+        "est_pipeline_time_min": est_time_min_low,
+        "est_pipeline_time_max": est_time_min_high,
+        "est_cost_usd": round(total_cost, 3),
+        "config": {
+            "translation_model": translation_model,
+            "matcher_model": pipeline_cfg.get("matcher_model", "qwen3:8b"),
+            "matcher_backend": pipeline_cfg.get("matcher_backend", "auto"),
+            "youtube_results_per_query": yt_results_per_query,
+            "max_candidates_per_shot": max_cands_per_shot,
+            "whisper_model": pipeline_cfg.get("whisper_model", "large-v3-turbo"),
+            "enable_gemini_expansion": body.enable_gemini_expansion,
+        },
+    }
+
+
 @app.post("/api/v1/jobs")
 async def create_job(
     body: JobCreateRequest,
