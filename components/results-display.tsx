@@ -146,7 +146,7 @@ export function ResultsDisplay({ job, onExport, onNewSearch, onRefreshJob, onRes
             </TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-2">
-            {onResume && job.pipeline_checkpoint && job.pipeline_checkpoint !== "completed" && (job.status === "failed" || job.status === "partial") && (
+            {onResume && job.pipeline_checkpoint && job.pipeline_checkpoint !== "completed" && (job.status === "failed" || job.status === "partial" || job.status === "cancelled") && (
               <>
                 {(job.pipeline_checkpoint === "searched" || job.pipeline_checkpoint === "matched") && (
                   <Button variant="default" size="sm" onClick={() => onResume("transcripts")} className="gap-2">

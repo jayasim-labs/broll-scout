@@ -834,6 +834,21 @@ class StorageService:
                     ":ua": datetime.utcnow().isoformat(),
                 },
             )
+            job_items = await self._scan_all(
+                "jobs",
+                FilterExpression=boto3.dynamodb.conditions.Attr("project_id").eq(project_id),
+                ProjectionExpression="job_id",
+            )
+            for item in job_items:
+                try:
+                    await self._run(
+                        self._table("jobs").update_item,
+                        Key={"job_id": item["job_id"]},
+                        UpdateExpression="SET title = :t",
+                        ExpressionAttributeValues={":t": new_title},
+                    )
+                except ClientError:
+                    logger.warning("Failed to rename job %s under project %s", item["job_id"], project_id)
             return True
         except ClientError:
             logger.exception("Failed to rename project %s", project_id)

@@ -51,27 +51,11 @@ class TranscriberService:
         except Exception:
             logger.exception("Cache lookup failed for %s", video_id)
 
-        # 2. Companion captions (YouTube captions via residential IP)
-        if agent_queue.is_agent_available(job_id=job_id):
-            try:
-                agent_result = await self._fetch_captions_via_agent(video_id, job_id=job_id)
-                if agent_result:
-                    await storage.store_transcript(
-                        video_id=video_id,
-                        transcript_text=agent_result["text"],
-                        source=agent_result["source"],
-                        language="en",
-                        duration=video_duration_seconds,
-                    )
-                    return Transcript(
-                        video_id=video_id,
-                        transcript_text=agent_result["text"],
-                        transcript_source=agent_result["source"],
-                        language="en",
-                        video_duration_seconds=video_duration_seconds,
-                    )
-            except Exception:
-                logger.info("[transcript] Agent captions failed for %s", video_id)
+        # 2. Skip yt-dlp subtitle fetch — go straight to Whisper.
+        # Historical data: yt-dlp captions succeeded only 4.2% of the time (206/4911)
+        # while triggering YouTube 429 rate-limits that poison the entire pipeline.
+        # Whisper on local MPS (large-v3-turbo) is fast enough (15-90s per video)
+        # and avoids 429 pressure entirely.
 
         # 3. Whisper transcription via companion
         max_whisper_duration = self._get("whisper_max_video_duration_min", 60) * 60

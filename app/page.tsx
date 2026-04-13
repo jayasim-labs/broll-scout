@@ -184,6 +184,9 @@ export default function HomePage() {
         setProjects(prev =>
           prev.map(p => p.project_id === projectId ? { ...p, title: newTitle } : p)
         )
+        setJobHistory(prev =>
+          prev.map(j => j.project_id === projectId ? { ...j, title: newTitle } : j)
+        )
         toast.success('Project renamed')
       }
     } catch {
